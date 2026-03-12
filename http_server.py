@@ -90,7 +90,8 @@ async def health(request: Request) -> JSONResponse:
         "status": "ok",
         "server": "session-rag",
         "port": PORT,
-        "model": _model_loaded,
+        "model_name": rag_engine.get_model_name(),
+        "model_loaded": _model_loaded,
         "milvus": _server_mode_ready,
         "watchers": {k: v for k, v in watchers.items()},
     })
@@ -267,21 +268,22 @@ async def lifespan(app: Starlette):
 
     # Pre-load embedding model
     try:
-        print("[HTTP] Pre-loading Nomic model...", file=sys.stderr)
+        model_name = rag_engine.get_model_name()
+        print(f"[HTTP] Pre-loading {model_name} model...", file=sys.stderr)
         rag_engine.get_model()
         _model_loaded = True
-        print("[HTTP] Nomic model loaded.", file=sys.stderr)
+        print(f"[HTTP] {model_name} model loaded.", file=sys.stderr)
     except Exception as e:
         print(f"[HTTP] Warning: Could not pre-load model: {e}", file=sys.stderr)
 
+    db_path = str(_SERVER_DIR / "milvus.db")
     try:
-        rag_engine.init_server_mode()
+        rag_engine.init_server_mode(db_path=db_path)
         _server_mode_ready = True
     except Exception as e:
         print(f"[HTTP] Warning: Could not init server mode: {e}", file=sys.stderr)
 
     # Backfill FTS from Milvus for any records indexed before FTS was added
-    db_path = str(_SERVER_DIR / "milvus.db")
     try:
         backfilled = rag_engine.backfill_fts(db_path=db_path)
         if backfilled:

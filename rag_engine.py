@@ -1,16 +1,19 @@
 """
 RAG engine for session transcripts.
 
-Embeds conversation turns with ModernBERT Embed Base (768 dims, 8192 token context)
-via mlx-embeddings. Stores vectors in a single global Milvus Lite DB at ~/.session-rag/.
+Embeds conversation turns via mlx-embeddings. Stores vectors in a single global
+Milvus Lite DB at ~/.session-rag/.
 
 Full-text search via SQLite FTS5 sidecar for hybrid search (vector + keyword).
 Results merged with Reciprocal Rank Fusion (RRF).
 
 Each turn is tagged with a project_root field, enabling per-project or cross-project search.
+
+Supports multiple embedding models via SESSION_RAG_MODEL env var (default: modernbert).
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -33,16 +36,91 @@ from fts_hybrid import FTSIndex, rrf_merge
 
 logger = logging.getLogger("session-rag.milvus")
 
-# --- Embedding model ---
+# --- Model registry ---
 
-_EMBED_DIM = 768
-_MODEL_ID = "nomic-ai/modernbert-embed-base"
-_MODEL_CACHE = Path.home() / ".cache/huggingface/hub/models--nomic-ai--modernbert-embed-base"
+_MODEL_REGISTRY = {
+    "modernbert": {
+        "model_id": "nomic-ai/modernbert-embed-base",
+        "embed_dim": 768,
+        "max_tokens": 8192,
+        "search_prefix": "search_query: ",
+        "document_prefix": "search_document: ",
+        "cache_subdir": "models--nomic-ai--modernbert-embed-base",
+    },
+    "embeddinggemma": {
+        "model_id": "mlx-community/embeddinggemma-300m-bf16",
+        "embed_dim": 768,
+        "max_tokens": 2048,
+        "search_prefix": "task: search result | query: ",
+        "document_prefix": "title: none | text: ",
+        "cache_subdir": "models--mlx-community--embeddinggemma-300m-bf16",
+    },
+}
+
+_MODEL_NAME = os.getenv("SESSION_RAG_MODEL", "embeddinggemma").lower()
+if _MODEL_NAME not in _MODEL_REGISTRY:
+    raise ValueError(
+        f"Unknown model '{_MODEL_NAME}'. "
+        f"Valid options: {', '.join(_MODEL_REGISTRY.keys())}"
+    )
+
+_MODEL_CFG = _MODEL_REGISTRY[_MODEL_NAME]
+_EMBED_DIM = _MODEL_CFG["embed_dim"]
+_MODEL_ID = _MODEL_CFG["model_id"]
+_MODEL_CACHE = Path.home() / ".cache/huggingface/hub" / _MODEL_CFG["cache_subdir"]
+_SEARCH_PREFIX = _MODEL_CFG["search_prefix"]
+_DOCUMENT_PREFIX = _MODEL_CFG["document_prefix"]
+
 COLLECTION_NAME = "sessions"
 
-# ModernBERT Embed uses the same Nomic task prefixes
-_SEARCH_PREFIX = "search_query: "
-_DOCUMENT_PREFIX = "search_document: "
+# --- Model identity check ---
+
+_IDENTITY_FILE = Path.home() / ".session-rag" / "model_identity.json"
+
+
+def _check_model_identity(db_path: Optional[str] = None):
+    """Verify that the active model matches what was used to build the index.
+
+    On first run, stamps model_identity.json. On subsequent runs, if the stored
+    model differs and the index has data, raises an error to prevent mixing
+    incompatible vectors.
+    """
+    _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if _IDENTITY_FILE.exists():
+        stored = json.loads(_IDENTITY_FILE.read_text())
+        stored_model = stored.get("model_name", "")
+        if stored_model and stored_model != _MODEL_NAME:
+            # Check if the index actually has data before raising
+            has_data = False
+            if db_path:
+                try:
+                    client = MilvusClient(db_path)
+                    if client.has_collection(COLLECTION_NAME):
+                        count = client.query(
+                            collection_name=COLLECTION_NAME,
+                            filter="",
+                            limit=1,
+                            output_fields=["id"],
+                        )
+                        has_data = len(count) > 0
+                    client.close()
+                except Exception:
+                    pass
+            if has_data:
+                raise RuntimeError(
+                    f"Model mismatch: index was built with '{stored_model}' but "
+                    f"SESSION_RAG_MODEL is '{_MODEL_NAME}'. "
+                    f"Run cleanup.py reset or clear the index before switching models."
+                )
+            # Index is empty — safe to overwrite the stamp
+    # Stamp current model
+    _IDENTITY_FILE.write_text(json.dumps({"model_name": _MODEL_NAME}))
+
+
+def get_model_name() -> str:
+    """Return the active model's short name (e.g. 'modernbert', 'embeddinggemma')."""
+    return _MODEL_NAME
 
 _mlx_model = None
 _mlx_tokenizer = None
@@ -62,16 +140,36 @@ def get_model():
 
     print(f"Loading {_MODEL_ID} via mlx-embeddings...", file=sys.stderr)
     _mlx_model, _mlx_tokenizer = mlx_load(_MODEL_ID)
-    print(f"{_MODEL_ID} ready ({_EMBED_DIM} dims, 8192 token context)", file=sys.stderr)
+    print(f"{_MODEL_ID} ready ({_EMBED_DIM} dims, {_MODEL_CFG['max_tokens']} token context)", file=sys.stderr)
     return _mlx_model, _mlx_tokenizer
 
 
+def _needs_input_remap() -> bool:
+    """Check if the model's __call__ uses 'inputs' instead of 'input_ids'.
+
+    Works around mlx-embeddings gemma3_text models where __call__ expects
+    'inputs' but the tokenizer returns 'input_ids'.
+    """
+    return "gemma" in _MODEL_NAME
+
+
 def embed_texts(texts: List[str], is_query: bool = False) -> List[List[float]]:
-    """Embed texts using ModernBERT. Adds task prefix per Nomic spec."""
+    """Embed texts using the configured model. Adds model-specific prefix."""
     model, tokenizer = get_model()
     prefix = _SEARCH_PREFIX if is_query else _DOCUMENT_PREFIX
     prefixed = [prefix + t for t in texts]
-    output = mlx_generate(model, tokenizer, texts=prefixed)
+
+    if _needs_input_remap():
+        # gemma3_text models expect (inputs, attention_mask) not (input_ids, ...)
+        encoded = tokenizer.batch_encode_plus(
+            prefixed, return_tensors="mlx", padding=True,
+            truncation=True, max_length=_MODEL_CFG["max_tokens"],
+        )
+        output = model(encoded["input_ids"], attention_mask=encoded.get("attention_mask"))
+    else:
+        output = mlx_generate(model, tokenizer, texts=prefixed,
+                              max_length=_MODEL_CFG["max_tokens"])
+
     embeddings = output.text_embeds.tolist()
     mx.clear_cache()
     return embeddings
@@ -86,14 +184,15 @@ _embed_semaphore: Optional[asyncio.Semaphore] = None
 _server_mode = False
 
 
-def init_server_mode():
+def init_server_mode(db_path: Optional[str] = None):
     """Initialize async concurrency primitives for HTTP server mode."""
     global _write_lock, _embed_semaphore, _server_mode
+    _check_model_identity(db_path=db_path)
     _write_lock = asyncio.Lock()
     _embed_semaphore = asyncio.Semaphore(1)
     _server_mode = True
     _fts.set_server_mode(True)
-    print("Server mode initialized", file=sys.stderr)
+    print(f"Server mode initialized (model: {_MODEL_NAME})", file=sys.stderr)
 
 
 def close_server_mode():

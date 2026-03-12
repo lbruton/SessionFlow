@@ -6,7 +6,7 @@ Semantic search over Claude Code session transcripts. Recovers information lost 
 
 Claude Code compresses older messages when conversations get long. Once compressed, the original content is lost. Session-rag indexes conversation turns into a vector database so Claude can search past discussions.
 
-- **Embedding model**: ModernBERT Embed Base (768 dims, 8192 token context) via `mlx-embeddings` on Apple Silicon
+- **Embedding model**: EmbeddingGemma-300M (default) or ModernBERT Embed Base, via `mlx-embeddings` on Apple Silicon
 - **Vector store**: Milvus Lite (per-project DB at `{project}/.session-rag/milvus.db`)
 - **Indexing**: File watcher (watchdog) monitors transcript files in real time, plus Stop/PreCompact hooks as backup
 - **Backfill**: On session start, automatically indexes any transcripts that were missed
@@ -117,7 +117,7 @@ Claude Code Session
                                                         │   (parse JSONL → turns)
                                                         │
                                                         ├── rag_engine.py
-                                                        │   (ModernBERT embed + Milvus)
+                                                        │   (embed + Milvus)
                                                         │
                                                         └── .session-rag/milvus.db
                                                             (per-project vector DB)
@@ -157,10 +157,36 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `SESSION_RAG_MODEL` | `embeddinggemma` | Embedding model: `embeddinggemma` or `modernbert` |
 | `SESSION_RAG_PORT` | `7102` | HTTP server port |
 | `SESSION_RAG_EXPIRE_DAYS` | `365` | Auto-prune turns older than this |
 | `SESSION_RAG_WATCH` | `true` | Enable/disable file watcher |
 | `SESSION_RAG_WATCH_DEBOUNCE` | `2.0` | Seconds to wait after last file change before indexing |
+
+### Switching Models
+
+Two embedding models are supported:
+
+| Model | ID | Dims | Context | Notes |
+|-------|----|------|---------|-------|
+| `modernbert` | `nomic-ai/modernbert-embed-base` | 768 | 8192 tokens | Default. Well-tested. |
+| `embeddinggemma` | `mlx-community/embeddinggemma-300m-bf16` | 768 | 2048 tokens | Google's EmbeddingGemma-300M. |
+
+To switch models:
+
+```bash
+# 1. Download the new model
+SESSION_RAG_MODEL=embeddinggemma ./download-model.sh
+
+# 2. Clear the existing index (vectors are incompatible across models)
+./venv/bin/python cleanup.py reset
+
+# 3. Restart the server with the new model
+export SESSION_RAG_MODEL=embeddinggemma
+./session-rag-server.sh restart
+```
+
+The server stamps `~/.session-rag/model_identity.json` with the active model. If you change `SESSION_RAG_MODEL` without clearing the index, the server will refuse to start with a clear error message.
 
 ## Data Management
 
@@ -219,7 +245,7 @@ claude-code-session-rag/
 ├── http_server.py          # HTTP MCP server (port 7102)
 ├── file_watcher.py         # Watchdog-based transcript file watcher
 ├── tools.py                # MCP tool definitions
-├── rag_engine.py           # ModernBERT embedding + Milvus operations
+├── rag_engine.py           # Embedding (ModernBERT/EmbeddingGemma) + Milvus operations
 ├── transcript_parser.py    # Parse JSONL transcripts into turns
 ├── index_hook.py           # Hook entry point (stdin → POST)
 ├── session_start_hook.sh   # SessionStart hook (env var + register watcher)

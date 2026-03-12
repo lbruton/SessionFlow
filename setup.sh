@@ -68,15 +68,16 @@ echo "  All dependencies installed"
 
 # --- Download model ---
 echo ""
-echo "Downloading ModernBERT Embed Base..."
+SESSION_RAG_MODEL="${SESSION_RAG_MODEL:-embeddinggemma}"
+echo "Downloading embedding model ($SESSION_RAG_MODEL)..."
 chmod +x "$SCRIPT_DIR/download-model.sh"
-"$SCRIPT_DIR/download-model.sh"
+SESSION_RAG_MODEL="$SESSION_RAG_MODEL" "$SCRIPT_DIR/download-model.sh"
 
 # --- Test installation ---
 echo ""
 echo "Testing installation..."
 
-python3 << 'PYEOF'
+SESSION_RAG_MODEL="$SESSION_RAG_MODEL" python3 << 'PYEOF'
 import sys
 sys.path.insert(0, '.')
 
@@ -93,8 +94,9 @@ except Exception as e:
 try:
     emb = rag_engine.embed_texts(["test embedding"])
     dim = len(emb[0])
-    assert dim == 768, f"Expected 768 dims, got {dim}"
-    print(f"  Embedding works ({dim} dimensions)")
+    expected = rag_engine._EMBED_DIM
+    assert dim == expected, f"Expected {expected} dims, got {dim}"
+    print(f"  Embedding works ({dim} dimensions, model: {rag_engine.get_model_name()})")
 except Exception as e:
     print(f"  Embedding test failed: {e}")
     sys.exit(1)
@@ -234,7 +236,7 @@ echo "======================================================================"
 echo "Installation Complete!"
 echo "======================================================================"
 echo ""
-echo "Embedding model: ModernBERT Embed Base (768 dims, 8192 token ctx, MLX)"
+echo "Embedding model: $SESSION_RAG_MODEL (see rag_engine.py for details)"
 echo ""
 echo "Hooks installed in: ~/.claude/settings.json"
 echo "  - SessionStart: auto-start server + register file watcher + backfill"
