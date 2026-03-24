@@ -1,4 +1,4 @@
-pymilvus[milvus-lite]>=2.6.0
+pymilvus[milvus-lite]>=2.6.0,!=2.6.10  # 2.6.10 breaks unix socket address for milvus-lite
 setuptools>=70.0,<82.0
 mlx>=0.30.0
 mlx-embeddings
