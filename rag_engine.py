@@ -228,7 +228,15 @@ def _get_persistent_client(db_path: str) -> MilvusClient:
 
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     try:
-        _persistent_clients[db_path] = MilvusClient(db_path)
+        # Increase gRPC keepalive to 120s to prevent milvus-lite GOAWAY/ENHANCE_YOUR_CALM.
+        # pymilvus defaults to 10s which milvus-lite rejects as too_many_pings under load.
+        _persistent_clients[db_path] = MilvusClient(
+            db_path,
+            grpc_options={
+                "grpc.keepalive_time_ms": 120_000,
+                "grpc.keepalive_timeout_ms": 20_000,
+            },
+        )
         logger.info("Opened client: %s", db_path)
     except Exception as e:
         logger.error("Failed to connect to Milvus at %s: %s", db_path, e)

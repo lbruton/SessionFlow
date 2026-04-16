@@ -411,8 +411,9 @@ class GlobalTranscriptWatcher:
                     _log("Backfill: Milvus error detected, pausing 5s for recovery...")
                     await asyncio.sleep(5)
 
-            # Throttle: yield control + small delay to avoid Milvus gRPC GOAWAY
-            await asyncio.sleep(0.05)
+            # Throttle: yield control + delay to reduce GPU pressure (MLX Metal)
+            # and avoid Milvus gRPC GOAWAY under sustained load
+            await asyncio.sleep(0.2)
 
             # Checkpoint every 100 files so progress survives crashes
             if (i + 1) % 100 == 0:
