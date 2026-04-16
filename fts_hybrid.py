@@ -83,17 +83,27 @@ class FTSIndex:
 
     @staticmethod
     def db_path(milvus_db_path: str) -> str:
-        """Derive the FTS database path. For remote Milvus URIs, use ~/.sessionflow/."""
+        """
+        Derives the filesystem path for the FTS SQLite database associated with a Milvus instance.
+        
+        If `milvus_db_path` is an HTTP or HTTPS URL, returns the per-user sessionflow location `~/.sessionflow/fts.db`.
+        Otherwise returns `fts.db` located in the same directory as `milvus_db_path`.
+        
+        Parameters:
+            milvus_db_path (str): The Milvus instance path or URL.
+        
+        Returns:
+            str: Absolute path to the FTS SQLite database file.
+        """
         if milvus_db_path.startswith("http://") or milvus_db_path.startswith("https://"):
             return str(Path.home() / ".sessionflow" / "fts.db")
         return str(Path(milvus_db_path).parent / "fts.db")
 
     def _check_and_migrate(self, conn: sqlite3.Connection):
-        """Check schema version and recreate FTS table if needed.
-
-        Stores the CREATE SQL in a _fts_schema table. If the schema changes
-        (e.g. column added or UNINDEXED -> indexed), drops and recreates the
-        FTS table. Data will be rebuilt organically via file watcher.
+        """
+        Ensure the FTS virtual table matches the current schema, recreating it when the stored schema differs.
+        
+        Creates the internal `_fts_schema` table if missing, compares the stored CREATE SQL for this index against `self._create_sql`, and when they differ drops and recreates the FTS table. Updates the `_fts_schema` entry for `self.table_name` and commits the change. Data rebuilding after a schema change is expected to occur externally.
         """
         conn.execute("""
             CREATE TABLE IF NOT EXISTS _fts_schema (

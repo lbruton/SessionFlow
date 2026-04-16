@@ -23,11 +23,30 @@ import rag_engine
 
 
 def get_db_path() -> str:
-    """Milvus URI — remote Standalone if SESSIONFLOW_MILVUS_URI is set, else local Lite."""
+    """
+    Determine the filesystem path or URI of the Milvus database used by SessionFlow.
+    
+    If the environment variable `SESSIONFLOW_MILVUS_URI` is set, its value is returned; otherwise the default local path "~/.sessionflow/milvus.db" (expanded to the user's home directory) is returned.
+    
+    Returns:
+        The Milvus database URI or local file path as a string.
+    """
     return os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
 
 
 def cmd_list(args):
+    """
+    List indexed sessions and print a tabular summary to stdout.
+    
+    Fetches sessions from the configured SessionFlow database (optionally filtered by
+    args.project) and prints a table with columns: Session ID, Turns, Branch,
+    First (timestamp), and Last (timestamp). Ends by printing totals for sessions
+    and turns.
+    
+    Parameters:
+        args (argparse.Namespace): Parsed CLI arguments. May include a `project`
+            attribute used to filter sessions by project root.
+    """
     db = get_db_path()
     project = getattr(args, 'project', None)
     sessions = rag_engine.list_sessions(project_root=project, db_path=db)
@@ -121,6 +140,11 @@ def cmd_stats(args):
 
 
 def main():
+    """
+    Entry point for the SessionFlow CLI: parses command-line arguments and dispatches to the appropriate command handler.
+    
+    Sets up subcommands: `list`, `expire`, `delete`, `reset`, and `stats`, each with their respective options, then invokes the corresponding command function based on user input.
+    """
     parser = argparse.ArgumentParser(
         description="Manage SessionFlow index data",
         formatter_class=argparse.RawDescriptionHelpFormatter,

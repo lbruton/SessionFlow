@@ -39,7 +39,12 @@ logger = logging.getLogger("sessionflow.milvus")
 
 
 def _is_remote_uri(uri: str) -> bool:
-    """True when uri points to a remote Milvus Standalone (http:// or https://)."""
+    """
+    Detects whether a URI refers to a remote Milvus Standalone instance.
+    
+    Returns:
+        `true` if the URI starts with 'http://' or 'https://', `false` otherwise.
+    """
     return uri.startswith("http://") or uri.startswith("https://")
 
 
@@ -86,11 +91,19 @@ _IDENTITY_FILE = Path.home() / ".sessionflow" / "model_identity.json"
 
 
 def _check_model_identity(db_path: Optional[str] = None):
-    """Verify that the active model matches what was used to build the index.
-
-    On first run, stamps model_identity.json. On subsequent runs, if the stored
-    model differs and the index has data, raises an error to prevent mixing
-    incompatible vectors.
+    """
+    Ensure the configured embedding model matches the model recorded for the Milvus index.
+    
+    Checks ~/.sessionflow/model_identity.json and:
+    - If no stamp exists, writes the current model name.
+    - If a different model is stamped and the Milvus collection contains data, raises a RuntimeError to prevent mixing incompatible embeddings.
+    - If a different model is stamped but the index appears empty (or cannot be inspected), overwrites the stamp.
+    
+    Parameters:
+        db_path (Optional[str]): Path or URI for the Milvus instance used to determine whether the collection has data; if omitted, the on-disk stamp may be overwritten without inspecting the index.
+    
+    Raises:
+        RuntimeError: If a different model is recorded and the index contains data.
     """
     _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -257,6 +270,18 @@ def _get_persistent_client(db_path: str) -> MilvusClient:
 
 
 def _resolve_db_path(db_path: Optional[str]) -> str:
+    """
+    Ensure a Milvus database path or URI is provided.
+    
+    Parameters:
+        db_path (Optional[str]): Filesystem path to a Milvus Lite database or a Milvus Standalone URI.
+    
+    Returns:
+        str: The validated `db_path` value.
+    
+    Raises:
+        ValueError: If `db_path` is None or an empty string.
+    """
     if not db_path:
         raise ValueError("db_path is required. Global index is at ~/.sessionflow/milvus.db")
     return db_path

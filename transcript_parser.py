@@ -319,7 +319,22 @@ _migrated = False
 
 
 def _migrate_per_project_states(state: Dict):
-    """One-time migration: merge per-project index_state.json files into the global state."""
+    """
+    Merge legacy per-project index_state.json files into the provided global state once per process.
+    
+    Scans common project locations under the user's home directory for
+    <project>/.sessionflow/index_state.json files. For each readable legacy state found,
+    copies transcript entries that are not already present into state["transcripts"],
+    annotating each migrated transcript with a "project_root" key set to the
+    containing project path. Also preserves the maximum "last_expire_check" between
+    legacy files and the provided state. Migration runs at most once per process
+    (drive-controlled by a module-level guard) and writes a short migration summary
+    to stderr when any entries are merged.
+    
+    Parameters:
+        state (Dict): Mutable global index state to be updated in-place; the function
+            ensures state["transcripts"] exists before merging.
+    """
     global _migrated
     if _migrated:
         return
@@ -374,7 +389,15 @@ def _migrate_per_project_states(state: Dict):
 
 
 def load_index_state() -> Dict:
-    """Load centralized index state from ~/.sessionflow/index_state.json."""
+    """
+    Load the centralized index state from ~/.sessionflow/index_state.json.
+    
+    If the file does not exist or cannot be read/parsed, returns an empty dict.
+    Also runs a migration that may merge legacy per-project state into the returned state.
+    
+    Returns:
+        state (Dict): The parsed index state, or an empty dict if missing or invalid.
+    """
     state = {}
     if _STATE_PATH.exists():
         try:
@@ -388,7 +411,14 @@ def load_index_state() -> Dict:
 
 
 def save_index_state(state: Dict):
-    """Save centralized index state to ~/.sessionflow/index_state.json."""
+    """
+    Persist the centralized index state to the user's ~/.sessionflow/index_state.json file.
+    
+    Ensures the ~/.sessionflow directory exists and writes `state` as pretty-printed JSON to the state file.
+    
+    Parameters:
+        state (Dict): The index state mapping to persist.
+    """
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(_STATE_PATH, "w") as f:
         json.dump(state, f, indent=2)

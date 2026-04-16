@@ -36,6 +36,12 @@ _SLUG_MAP_PATH = Path.home() / ".sessionflow" / "slug_map.json"
 
 
 def _log(msg: str):
+    """
+    Write a message to standard error prefixed with "[watcher]".
+    
+    Parameters:
+        msg (str): Message text to emit to stderr.
+    """
     print(f"[watcher] {msg}", file=sys.stderr)
 
 

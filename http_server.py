@@ -88,6 +88,20 @@ _server_mode_ready = False
 
 
 async def health(request: Request) -> JSONResponse:
+    """
+    Provide runtime status and server metadata for health checks.
+    
+    Returns:
+        JSONResponse: Body contains:
+            - `status`: "ok"
+            - `server`: server identifier string ("sessionflow")
+            - `port`: port number the server is configured to use
+            - `model_name`: name/identifier of the loaded embedding/model
+            - `model_loaded`: `true` if the model was successfully preloaded, `false` otherwise
+            - `milvus`: `true` if Milvus/server mode was initialized and ready, `false` otherwise
+            - `milvus_backend`: `"standalone"` when `MILVUS_URI` starts with `http`, otherwise `"lite"`
+            - `watchers`: mapping of file-watcher names to their status info
+    """
     watchers = file_watcher.get_watcher_status()
     return JSONResponse({
         "status": "ok",

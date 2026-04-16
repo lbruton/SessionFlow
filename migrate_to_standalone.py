@@ -143,6 +143,11 @@ def verify(source: MilvusClient, target: MilvusClient):
 
 
 def main():
+    """
+    Run the CLI to migrate the 'sessions' collection from a Milvus Lite database to a Milvus Standalone instance.
+    
+    Parses command-line arguments (--target, --source, --dry-run), exports all rows from the source collection, optionally inserts them into the target in batches, verifies row counts, and prints progress and post-migration instructions. Exits with code 1 if the source DB path does not exist or the source lacks the expected collection.
+    """
     parser = argparse.ArgumentParser(description="Migrate SessionFlow from Milvus Lite to Standalone")
     parser.add_argument("--target", required=True, help="Standalone URI (e.g. http://192.168.1.81:19530)")
     parser.add_argument("--source", default=LITE_DB, help=f"Lite DB path (default: {LITE_DB})")

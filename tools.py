@@ -28,7 +28,14 @@ def get_current_project_root() -> str | None:
 
 
 def get_db_path() -> str:
-    """Milvus URI — remote Standalone if SESSIONFLOW_MILVUS_URI is set, else local Lite."""
+    """
+    Return the Milvus database URI used by SessionFlow.
+    
+    If the environment variable `SESSIONFLOW_MILVUS_URI` is set, its value is returned; otherwise the default local path `~/.sessionflow/milvus.db` is returned.
+    
+    Returns:
+        str: Milvus URI or local database path.
+    """
     return os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
 
 
@@ -130,6 +137,14 @@ def register_tools(server: Server):
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
+        """
+        Register the set of SessionFlow MCP tool definitions exposed to the server.
+        
+        Each tool definition includes a name, human-readable description, and JSON input schema used by the MCP host.
+        
+        Returns:
+            A list of Tool objects for: search_session, search_all_sessions, get_turns, get_session_stats, and cleanup_sessions.
+        """
         return [
             types.Tool(
                 name="search_session",

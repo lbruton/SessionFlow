@@ -22,7 +22,15 @@ SERVER_URL = os.getenv("SESSIONFLOW_URL", "http://127.0.0.1:7102")
 
 
 def get_project_root(cwd: str) -> str:
-    """Derive project root from cwd using git."""
+    """
+    Determine the repository root for the provided working directory using Git.
+    
+    Parameters:
+        cwd (str): Path to the working directory to probe.
+    
+    Returns:
+        str: The repository root path reported by Git (`git rev-parse --show-toplevel`), or the original `cwd` if Git is not available or the determination fails.
+    """
     try:
         result = subprocess.run(
             ["git", "-C", cwd, "rev-parse", "--show-toplevel"],

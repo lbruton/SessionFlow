@@ -48,6 +48,7 @@ stop_watchdog() {
     fi
 }
 
+# start_watchdog starts a background watchdog that regularly checks HEALTH_URL, restarts the server after WATCHDOG_MAX_FAILURES consecutive failures, writes its background PID to WATCHDOG_PID_FILE, and logs actions to LOG_FILE.
 start_watchdog() {
     stop_watchdog
 
@@ -109,6 +110,7 @@ start_watchdog() {
     echo "[sessionflow] Watchdog started (PID $!)" >&2
 }
 
+# do_start starts the SessionFlow HTTP server: it removes stale PID, kills any process holding the configured port, launches the server with required environment variables, waits up to MAX_WAIT seconds for the health endpoint to respond, starts the watchdog on success, and exits non‑zero if the server fails to become healthy.
 do_start() {
     if is_running; then
         echo "[sessionflow] Already running (PID $(cat "$PID_FILE"))" >&2
@@ -157,6 +159,8 @@ do_start() {
     exit 1
 }
 
+# do_stop stops the SessionFlow server and its watchdog, then removes the PID file.
+# If a server PID exists it requests termination, waits up to 10 seconds for exit, and sends SIGKILL if still alive; prints status messages to stderr.
 do_stop() {
     stop_watchdog
 
@@ -185,6 +189,7 @@ do_stop() {
     fi
 }
 
+# do_status prints whether the sessionflow server is running to stderr and exits with status 1 if it is not running.
 do_status() {
     if is_running; then
         echo "[sessionflow] Running (PID $(cat "$PID_FILE"))" >&2
