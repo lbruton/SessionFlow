@@ -27,7 +27,7 @@ When pulling from upstream, review changes against this list to avoid regressing
 
 - **milvus-lite gRPC keepalive** — pymilvus defaults 10s, milvus-lite rejects as `too_many_pings`. Fixed in `rag_engine.py` with `grpc_options: keepalive_time_ms: 120000`.
 - **MLX Metal SIGSEGV under sustained load** — EmbeddingGemma crashes GPU driver after ~50min continuous compute. Backfill throttle is 200ms between inserts. Do not reduce below 100ms.
-- **milvus-lite single-process lock** — only one process can open `milvus.db`. Can't query DB externally while server holds it. See issue #1 for containerized Milvus migration.
+- **milvus-lite single-process lock** — only one process can open `milvus.db`. Can't query DB externally while server holds it. Long-term fix: migrate to containerized Milvus (SRAG-1).
 - **Backfill checkpoints every 100 files** — `index_state.json` saves progress. If server crashes mid-backfill, restart picks up from last checkpoint (not from zero).
 - **`project_root` for `-/` transcripts** — generic bucket sessions have `cwd="/"`. No project tagging possible. Project-dir transcripts get project_root via slug map + `detect_project_root()` fallback.
 - **Never create GitHub issues** — all issues go to DocVault via `/issue`. No `gh issue create`, no GitHub Issues UI. Ever.
