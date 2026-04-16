@@ -58,19 +58,36 @@ def detect_project_root(transcript_path: str, max_lines: int = 30) -> str:
     return ""
 
 
+_git_root_cache: Dict[str, str] = {}
+
+
 def _resolve_git_root(cwd: str) -> str:
-    """Try to resolve *cwd* to the git repo toplevel, fall back to cwd itself."""
-    import subprocess
-    try:
-        result = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return cwd
+    """Resolve *cwd* to its git repo toplevel using pure Python, with caching.
+
+    Walks up from *cwd* looking for a ``.git`` entry (directory or file — git
+    worktrees use a .git *file*).  Results are cached so repeated calls for
+    the same cwd (common during backfill of 10K+ transcripts) never fork a
+    subprocess.  This avoids the macOS fork+exec memory-pressure problem where
+    each subprocess.run() transiently duplicates the parent's VM pages (~600 MB
+    when the embedding model is loaded).
+    """
+    if cwd in _git_root_cache:
+        return _git_root_cache[cwd]
+
+    result = cwd  # fallback
+    current = cwd
+    while True:
+        candidate = os.path.join(current, ".git")
+        if os.path.exists(candidate):
+            result = current
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+    _git_root_cache[cwd] = result
+    return result
 
 
 def parse_transcript(
