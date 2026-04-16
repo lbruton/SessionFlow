@@ -2,15 +2,15 @@
 RAG engine for session transcripts.
 
 Embeds conversation turns via mlx-embeddings. Stores vectors in Milvus — either
-a remote Standalone instance (via SESSION_RAG_MILVUS_URI) or embedded Milvus Lite
-at ~/.session-rag/milvus.db (fallback).
+a remote Standalone instance (via SESSIONFLOW_MILVUS_URI) or embedded Milvus Lite
+at ~/.sessionflow/milvus.db (fallback).
 
 Full-text search via SQLite FTS5 sidecar for hybrid search (vector + keyword).
 Results merged with Reciprocal Rank Fusion (RRF).
 
 Each turn is tagged with a project_root field, enabling per-project or cross-project search.
 
-Supports multiple embedding models via SESSION_RAG_MODEL env var (default: embeddinggemma).
+Supports multiple embedding models via SESSIONFLOW_MODEL env var (default: embeddinggemma).
 """
 
 import hashlib
@@ -35,7 +35,7 @@ import time
 
 from fts_hybrid import FTSIndex, rrf_merge
 
-logger = logging.getLogger("session-rag.milvus")
+logger = logging.getLogger("sessionflow.milvus")
 
 
 def _is_remote_uri(uri: str) -> bool:
@@ -64,7 +64,7 @@ _MODEL_REGISTRY = {
     },
 }
 
-_MODEL_NAME = os.getenv("SESSION_RAG_MODEL", "embeddinggemma").lower()
+_MODEL_NAME = os.getenv("SESSIONFLOW_MODEL", "embeddinggemma").lower()
 if _MODEL_NAME not in _MODEL_REGISTRY:
     raise ValueError(
         f"Unknown model '{_MODEL_NAME}'. "
@@ -82,7 +82,7 @@ COLLECTION_NAME = "sessions"
 
 # --- Model identity check ---
 
-_IDENTITY_FILE = Path.home() / ".session-rag" / "model_identity.json"
+_IDENTITY_FILE = Path.home() / ".sessionflow" / "model_identity.json"
 
 
 def _check_model_identity(db_path: Optional[str] = None):
@@ -117,7 +117,7 @@ def _check_model_identity(db_path: Optional[str] = None):
             if has_data:
                 raise RuntimeError(
                     f"Model mismatch: index was built with '{stored_model}' but "
-                    f"SESSION_RAG_MODEL is '{_MODEL_NAME}'. "
+                    f"SESSIONFLOW_MODEL is '{_MODEL_NAME}'. "
                     f"Run cleanup.py reset or clear the index before switching models."
                 )
             # Index is empty — safe to overwrite the stamp
@@ -258,7 +258,7 @@ def _get_persistent_client(db_path: str) -> MilvusClient:
 
 def _resolve_db_path(db_path: Optional[str]) -> str:
     if not db_path:
-        raise ValueError("db_path is required. Global index is at ~/.session-rag/milvus.db")
+        raise ValueError("db_path is required. Global index is at ~/.sessionflow/milvus.db")
     return db_path
 
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Setup script for session-rag on Apple Silicon Mac.
+# Setup script for SessionFlow on Apple Silicon Mac.
 # Single command to install everything: venv, deps, model, and verify.
 
 set -e
@@ -68,16 +68,16 @@ echo "  All dependencies installed"
 
 # --- Download model ---
 echo ""
-SESSION_RAG_MODEL="${SESSION_RAG_MODEL:-embeddinggemma}"
-echo "Downloading embedding model ($SESSION_RAG_MODEL)..."
+SESSIONFLOW_MODEL="${SESSIONFLOW_MODEL:-embeddinggemma}"
+echo "Downloading embedding model ($SESSIONFLOW_MODEL)..."
 chmod +x "$SCRIPT_DIR/download-model.sh"
-SESSION_RAG_MODEL="$SESSION_RAG_MODEL" "$SCRIPT_DIR/download-model.sh"
+SESSIONFLOW_MODEL="$SESSIONFLOW_MODEL" "$SCRIPT_DIR/download-model.sh"
 
 # --- Test installation ---
 echo ""
 echo "Testing installation..."
 
-SESSION_RAG_MODEL="$SESSION_RAG_MODEL" python3 << 'PYEOF'
+SESSIONFLOW_MODEL="$SESSIONFLOW_MODEL" python3 << 'PYEOF'
 import sys
 sys.path.insert(0, '.')
 
@@ -111,7 +111,7 @@ if [ $? -ne 0 ]; then
 fi
 
 # --- Make scripts executable ---
-chmod +x "$SCRIPT_DIR/session-rag-server.sh"
+chmod +x "$SCRIPT_DIR/sessionflow-server.sh"
 chmod +x "$SCRIPT_DIR/download-model.sh"
 chmod +x "$SCRIPT_DIR/index_hook.py"
 
@@ -136,7 +136,7 @@ our_hooks = {
     "SessionStart": [
         {
             "type": "command",
-            "command": f"{script_dir}/session-rag-server.sh start",
+            "command": f"{script_dir}/sessionflow-server.sh start",
             "timeout": 30000,
         },
         {
@@ -220,15 +220,15 @@ echo "Installing global MCP server..."
 # Create headersHelper script
 MCP_HELPERS_DIR="$HOME/.claude/mcp-helpers"
 mkdir -p "$MCP_HELPERS_DIR"
-cat > "$MCP_HELPERS_DIR/session-rag-headers.sh" << 'HELPEREOF'
+cat > "$MCP_HELPERS_DIR/sessionflow-headers.sh" << 'HELPEREOF'
 #!/bin/bash
-# Dynamic header helper for session-rag MCP server.
+# Dynamic header helper for SessionFlow MCP server.
 # Outputs JSON with X-Project-Root set to the git repo root (or cwd).
 PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 echo "{\"X-Project-Root\": \"$PROJECT_ROOT\"}"
 HELPEREOF
-chmod +x "$MCP_HELPERS_DIR/session-rag-headers.sh"
-echo "  Header helper installed: $MCP_HELPERS_DIR/session-rag-headers.sh"
+chmod +x "$MCP_HELPERS_DIR/sessionflow-headers.sh"
+echo "  Header helper installed: $MCP_HELPERS_DIR/sessionflow-headers.sh"
 
 # Add MCP server to ~/.claude.json (user scope)
 CLAUDE_JSON="$HOME/.claude.json"
@@ -246,10 +246,10 @@ else:
     data = {}
 
 servers = data.setdefault("mcpServers", {})
-servers["session-rag"] = {
+servers["sessionflow"] = {
     "type": "http",
     "url": "http://127.0.0.1:7102/mcp/",
-    "headersHelper": f"{helpers_dir}/session-rag-headers.sh",
+    "headersHelper": f"{helpers_dir}/sessionflow-headers.sh",
 }
 
 with open(claude_json, "w") as f:
@@ -265,7 +265,7 @@ echo "======================================================================"
 echo "Installation Complete!"
 echo "======================================================================"
 echo ""
-echo "Embedding model: $SESSION_RAG_MODEL (see rag_engine.py for details)"
+echo "Embedding model: $SESSIONFLOW_MODEL (see rag_engine.py for details)"
 echo ""
 echo "Hooks installed in: ~/.claude/settings.json"
 echo "  - SessionStart: auto-start server + register file watcher + backfill"

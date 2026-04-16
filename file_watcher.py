@@ -6,7 +6,7 @@ transcript changes across every project. A single Observer handles everything.
 
 Pipeline: FSEvents -> watchdog thread -> asyncio.Queue -> debounce -> incremental parse + index
 
-Slug→root mapping is persisted at ~/.session-rag/slug_map.json, populated by
+Slug→root mapping is persisted at ~/.sessionflow/slug_map.json, populated by
 /watch and /index hooks. Unknown slugs get project_root="" until a hook registers them.
 """
 
@@ -27,12 +27,12 @@ import transcript_parser
 # --- Configuration ---
 
 _watcher_config = {
-    'enabled': os.getenv('SESSION_RAG_WATCH', 'true').lower() in ('true', '1', 'yes'),
-    'debounce_seconds': float(os.getenv('SESSION_RAG_WATCH_DEBOUNCE', '2.0')),
+    'enabled': os.getenv('SESSIONFLOW_WATCH', 'true').lower() in ('true', '1', 'yes'),
+    'debounce_seconds': float(os.getenv('SESSIONFLOW_WATCH_DEBOUNCE', '2.0')),
 }
 
 _CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
-_SLUG_MAP_PATH = Path.home() / ".session-rag" / "slug_map.json"
+_SLUG_MAP_PATH = Path.home() / ".sessionflow" / "slug_map.json"
 
 
 def _log(msg: str):

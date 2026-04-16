@@ -1,77 +1,91 @@
-# @lbruton/claude-code-session-rag
+# SessionFlow
 
-> Actively maintained fork of [mwgreen/claude-code-session-rag](https://github.com/mwgreen/claude-code-session-rag) — hardened for production use with reliable backfill, project-root tagging, and date-range filtering.
+Semantic search over Claude Code conversation history. Persistent HTTP server with hybrid vector + keyword search, real-time transcript indexing, and multi-project support.
 
-## Why this fork?
+## What it does
 
-The upstream `claude-code-session-rag` provides excellent foundations — semantic search over Claude Code transcripts, real-time file watching, and hybrid FTS+vector search. When used at scale (10K+ transcripts, 20+ projects), several issues surface:
-
-- **Empty `project_root` on most rows** — transcripts in generic slug directories get `project_root=""`, making project-scoped search return nothing
-- **Backfill crashes silently** — Milvus-lite gRPC sends `GOAWAY`/`too_many_pings` under heavy insert load, killing the backfill with no recovery
-- **Backfill blocks server startup** — HTTP server can't bind until the async backfill yields, causing health checks to time out
-- **No date-range filtering** — timestamps are stored but not exposed as search parameters, making "what happened last Tuesday?" queries impossible
-- **No progress checkpointing** — if backfill crashes at transcript 5,000 of 10,000, all progress is lost
-
-This fork fixes all of these and adds features for multi-project, date-aware session search.
-
-## Changes from upstream
-
-### Reliable backfill (SR-1)
-1. **50ms throttle between inserts** — prevents Milvus-lite gRPC `GOAWAY` / `ENHANCE_YOUR_CALM` disconnections that silently killed the backfill loop
-2. **Progress checkpoints every 100 files** — `index_state.json` is saved periodically so crashes don't lose all progress
-3. **Milvus error recovery** — on connection errors, backfill pauses 5s for gRPC to recover instead of silently failing all subsequent inserts
-4. **Startup delay** — backfill waits 3s after server init so HTTP can bind before embedding work starts, preventing health check timeouts
-
-### Project-root resolution (SR-2)
-5. **Auto-derive project root from slug** — slug names like `-Volumes-DATA-GitHub-Forge` are resolved to `/Volumes/DATA/GitHub/Forge` by greedy path reconstruction with filesystem verification. Newly derived mappings are cached in `slug_map.json`
-6. **Transcript CWD fallback** — when slug resolution fails (e.g. slugs with dashes in directory names like `spec-workflow-mcp`), the first 30 lines of the transcript are peeked for a `cwd` field, which is resolved to its git root
-7. **Skip bare `-` slug** — the generic unscoped transcript directory no longer maps to `/`, preventing bogus project_root entries
-
-### Date-range filtering (SR-3)
-8. **`date_from` / `date_to` parameters** on `search_all_sessions` — ISO 8601 date strings (e.g. `2026-04-08`) filter both Milvus vector search and FTS5 keyword search
-9. **Inclusive date ranges** — `date_to` automatically appends `T23:59:59` for end-of-day inclusion
-
-## Installation
-
-Same as upstream — see [UPSTREAM-README.md](UPSTREAM-README.md) for full setup docs.
-
-```bash
-./setup.sh        # Sets up venv, deps, model, hooks, global MCP server
-# Restart Claude Code to activate
-```
-
-## MCP Tools
-
-All upstream tools are preserved. New parameters marked with **(fork)**.
-
-| Tool | Description |
-|------|-------------|
-| `search_session` | Search current session with recency bias. |
-| `search_all_sessions` | Cross-session semantic search. Optional `git_branch`, `date_from` **(fork)**, `date_to` **(fork)** filters. |
-| `get_turns` | Retrieve turns around a specific turn index. |
-| `get_session_stats` | Index statistics: turn count, session count, branches. |
-| `cleanup_sessions` | Delete old session data by age, session ID, or branch. |
-
-### Date-range query examples
-
-```
-search_all_sessions("deployment decisions", date_from="2026-04-08", date_to="2026-04-08")
-search_all_sessions("what broke in production", date_from="2026-04-01", date_to="2026-04-07")
-```
+SessionFlow watches your Claude Code session transcripts, embeds them with a local MLX model (EmbeddingGemma-300M on Apple Silicon), and makes them searchable via MCP tools. Every conversation turn is indexed — search by keyword, semantic meaning, date range, project, or git branch.
 
 ## Architecture
 
-See [UPSTREAM-README.md](UPSTREAM-README.md) for the full architecture diagram and detailed component descriptions. This fork modifies:
+```
+Claude Code terminals (6-8 concurrent)
+    ↓ POST /mcp (MCP StreamableHTTP)
+SessionFlow HTTP server (port 7102)
+    ├── Embedding: EmbeddingGemma-300M via MLX Metal (local, ~600 MB)
+    ├── Vectors: Milvus Standalone (remote, HNSW index)
+    ├── Keywords: SQLite FTS5 (local sidecar)
+    ├── Search: Hybrid RRF merge (vector + keyword)
+    └── Watcher: FSEvents → debounce → incremental parse → index
+```
 
-- **`file_watcher.py`** — slug-to-path derivation, transcript CWD fallback, throttled backfill with checkpoints
-- **`transcript_parser.py`** — `detect_project_root()` function for CWD extraction from transcript JSON
-- **`rag_engine.py`** — date filter support in search queries
-- **`fts_hybrid.py`** — date filter support in FTS5 queries
-- **`tools.py`** — `date_from`/`date_to` parameters on `search_all_sessions`
-- **`http_server.py`** — startup delay for backfill task
+- **Embedding model** runs locally on Apple Silicon GPU (Metal) — no API calls
+- **Vector storage** on Milvus Standalone (Portainer) via `SESSIONFLOW_MILVUS_URI` — or embedded Milvus Lite fallback
+- **One server process** serves all terminals — model loaded once, connections pooled
+- **Real-time indexing** via file watcher on `~/.claude/projects/`
 
-## Upstream
+## MCP Tools
 
-- **Repo**: [mwgreen/claude-code-session-rag](https://github.com/mwgreen/claude-code-session-rag)
-- **Upstream README**: [UPSTREAM-README.md](UPSTREAM-README.md)
-- **Fork point**: `637e6f4` (Global MCP server: replace per-project .mcp.json with user-scope headersHelper)
+| Tool | Description |
+|------|-------------|
+| `search_session` | Search current session with recency bias |
+| `search_all_sessions` | Cross-session semantic search. Optional `git_branch`, `date_from`, `date_to`, `project_root` filters |
+| `get_turns` | Retrieve context around a specific turn |
+| `get_session_stats` | Index statistics: turn count, session count, branches |
+| `cleanup_sessions` | Delete session data by age, session ID, or branch |
+
+### Search examples
+
+```
+search_all_sessions("deployment decisions", date_from="2026-04-08", date_to="2026-04-08")
+search_all_sessions("what broke in production", date_from="2026-04-01")
+search_session("the milvus migration", session_id="<CLAUDE_SESSION_ID>")
+```
+
+## Setup
+
+```bash
+./setup.sh                    # venv, deps, model download, hooks
+# Restart Claude Code to activate
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSIONFLOW_MILVUS_URI` | `~/.sessionflow/milvus.db` | Milvus URI — `http://host:port` for Standalone, file path for Lite |
+| `SESSIONFLOW_HOST` | `127.0.0.1` | HTTP server bind address |
+| `SESSIONFLOW_PORT` | `7102` | HTTP server port |
+| `SESSIONFLOW_MODEL` | `embeddinggemma` | Embedding model (`embeddinggemma` or `modernbert`) |
+| `SESSIONFLOW_EXPIRE_DAYS` | `365` | Auto-prune turns older than N days |
+| `SESSIONFLOW_WATCH` | `true` | Enable real-time file watcher |
+| `SESSIONFLOW_URL` | `http://127.0.0.1:7102` | Server URL (used by hooks) |
+
+## Running
+
+```bash
+./sessionflow-server.sh start     # Start server + watchdog
+./sessionflow-server.sh stop      # Stop server
+./sessionflow-server.sh restart   # Restart
+./sessionflow-server.sh status    # Check health
+
+curl http://127.0.0.1:7102/health # Health check
+```
+
+## Key features
+
+- **Hybrid search** — vector similarity (Milvus) + keyword matching (FTS5), merged with Reciprocal Rank Fusion
+- **HNSW index** on Milvus Standalone — O(log n) search over 21K+ turns
+- **Pure Python git root resolver** — no subprocess forks, cached lookups (0.4ms for 10K calls)
+- **Non-blocking startup** — FTS backfill and transcript backfill run as background tasks
+- **Multi-project** — 30+ projects indexed, searchable by `project_root` filter
+- **Date-range filtering** — `date_from` / `date_to` on all search tools
+- **Incremental indexing** — byte-offset tracking per transcript, checkpoint every 100 files
+
+## Origins
+
+Originally forked from [mwgreen/claude-code-session-rag](https://github.com/mwgreen/claude-code-session-rag). Diverged significantly with Milvus Standalone migration, subprocess fork elimination, HNSW indexing, background startup, and multi-terminal hardening. Now an independent project.
+
+## License
+
+MIT

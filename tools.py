@@ -1,5 +1,5 @@
 """
-MCP tool definitions and project context for session-rag.
+MCP tool definitions and project context for SessionFlow.
 """
 
 import asyncio
@@ -28,8 +28,8 @@ def get_current_project_root() -> str | None:
 
 
 def get_db_path() -> str:
-    """Milvus URI — remote Standalone if SESSION_RAG_MILVUS_URI is set, else local Lite."""
-    return os.getenv("SESSION_RAG_MILVUS_URI", str(Path.home() / ".session-rag" / "milvus.db"))
+    """Milvus URI — remote Standalone if SESSIONFLOW_MILVUS_URI is set, else local Lite."""
+    return os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
 
 
 # --- Formatting helpers ---
@@ -126,7 +126,7 @@ def format_stats(stats: dict, db_path: str) -> str:
 # --- Tool registration ---
 
 def register_tools(server: Server):
-    """Register session-rag MCP tools."""
+    """Register SessionFlow MCP tools."""
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:

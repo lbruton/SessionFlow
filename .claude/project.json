@@ -1,7 +1,7 @@
 {
-  "name": "session-rag",
-  "tag": "session-rag",
-  "issuePrefix": "SRAG",
-  "issueTag": "session-rag",
-  "cachePrefix": "session-rag"
+  "name": "SessionFlow",
+  "tag": "sessionflow",
+  "issuePrefix": "SF",
+  "issueTag": "sessionflow",
+  "cachePrefix": "sessionflow"
 }

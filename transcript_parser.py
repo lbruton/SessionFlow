@@ -313,7 +313,7 @@ def _build_turn(
 
 # --- Index state management ---
 
-_STATE_DIR = Path.home() / ".session-rag"
+_STATE_DIR = Path.home() / ".sessionflow"
 _STATE_PATH = _STATE_DIR / "index_state.json"
 _migrated = False
 
@@ -330,13 +330,13 @@ def _migrate_per_project_states(state: Dict):
     if not claude_projects.is_dir():
         return
 
-    # Scan for any .session-rag/index_state.json under common project roots
+    # Scan for any .sessionflow/index_state.json under common project roots
     home = Path.home()
     candidates = []
     for idea_dir in [home / "IdeaProjects", home / "git-repos"]:
         if idea_dir.is_dir():
             for project_dir in idea_dir.iterdir():
-                state_file = project_dir / ".session-rag" / "index_state.json"
+                state_file = project_dir / ".sessionflow" / "index_state.json"
                 if state_file.exists():
                     candidates.append((str(project_dir), state_file))
 
@@ -374,7 +374,7 @@ def _migrate_per_project_states(state: Dict):
 
 
 def load_index_state() -> Dict:
-    """Load centralized index state from ~/.session-rag/index_state.json."""
+    """Load centralized index state from ~/.sessionflow/index_state.json."""
     state = {}
     if _STATE_PATH.exists():
         try:
@@ -388,7 +388,7 @@ def load_index_state() -> Dict:
 
 
 def save_index_state(state: Dict):
-    """Save centralized index state to ~/.session-rag/index_state.json."""
+    """Save centralized index state to ~/.sessionflow/index_state.json."""
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(_STATE_PATH, "w") as f:
         json.dump(state, f, indent=2)

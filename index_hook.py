@@ -3,7 +3,7 @@
 Hook entry point for Claude Code Stop/PreCompact hooks.
 
 Reads hook input JSON from stdin, derives project root, and POSTs
-to the session-rag server to index new transcript turns.
+to the sessionflow server to index new transcript turns.
 
 Exit codes:
   0 = success (or server not running — silently skip)
@@ -18,7 +18,7 @@ import sys
 
 import httpx
 
-SERVER_URL = os.getenv("SESSION_RAG_URL", "http://127.0.0.1:7102")
+SERVER_URL = os.getenv("SESSIONFLOW_URL", "http://127.0.0.1:7102")
 
 
 def get_project_root(cwd: str) -> str:

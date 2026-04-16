@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-CLI tool to manage and clean up session-rag data.
+CLI tool to manage and clean up SessionFlow data.
 
-All data lives in a single global DB at ~/.session-rag/milvus.db.
+All data lives in a single global DB at ~/.sessionflow/milvus.db.
 Use --project to filter to a specific project.
 
 Usage:
@@ -23,8 +23,8 @@ import rag_engine
 
 
 def get_db_path() -> str:
-    """Milvus URI — remote Standalone if SESSION_RAG_MILVUS_URI is set, else local Lite."""
-    return os.getenv("SESSION_RAG_MILVUS_URI", str(Path.home() / ".session-rag" / "milvus.db"))
+    """Milvus URI — remote Standalone if SESSIONFLOW_MILVUS_URI is set, else local Lite."""
+    return os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
 
 
 def cmd_list(args):
@@ -122,7 +122,7 @@ def cmd_stats(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Manage session-rag index data",
+        description="Manage SessionFlow index data",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

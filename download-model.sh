@@ -5,14 +5,14 @@
 #   ./download-model.sh [model_name]
 #
 # model_name can be "modernbert" (default) or "embeddinggemma".
-# Also respects SESSION_RAG_MODEL env var.
+# Also respects SESSIONFLOW_MODEL env var.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${SCRIPT_DIR}/venv/bin/python"
 
-MODEL_NAME="${1:-${SESSION_RAG_MODEL:-embeddinggemma}}"
+MODEL_NAME="${1:-${SESSIONFLOW_MODEL:-embeddinggemma}}"
 MODEL_NAME=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
 
 case "$MODEL_NAME" in

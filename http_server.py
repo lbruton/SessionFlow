@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Persistent HTTP server for session-rag MCP system.
+Persistent HTTP server for SessionFlow MCP system.
 
 Runs as a long-lived process serving MCP via StreamableHTTP.
 Projects are identified by the X-Project-Root header in each request.
-All projects share a single global DB at ~/.session-rag/milvus.db.
+All projects share a single global DB at ~/.sessionflow/milvus.db.
 
-Start: ./session-rag-server.sh
+Start: ./sessionflow-server.sh
 Health: curl http://127.0.0.1:7102/health
 """
 
@@ -36,22 +36,22 @@ import file_watcher
 from file_watcher import register_project, get_global_watcher
 from tools import register_tools, set_current_project_root
 
-logger = logging.getLogger("session-rag")
+logger = logging.getLogger("sessionflow")
 
 
 # --- Configuration ---
 
-HOST = os.getenv("SESSION_RAG_HOST", "127.0.0.1")
-PORT = int(os.getenv("SESSION_RAG_PORT", "7102"))
-AUTO_EXPIRE_DAYS = int(os.getenv("SESSION_RAG_EXPIRE_DAYS", "365"))
+HOST = os.getenv("SESSIONFLOW_HOST", "127.0.0.1")
+PORT = int(os.getenv("SESSIONFLOW_PORT", "7102"))
+AUTO_EXPIRE_DAYS = int(os.getenv("SESSIONFLOW_EXPIRE_DAYS", "365"))
 _EXPIRE_CHECK_INTERVAL = 86400  # Check once per day
 
-_SERVER_DIR = Path.home() / ".session-rag"
+_SERVER_DIR = Path.home() / ".sessionflow"
 PID_FILE = _SERVER_DIR / "server.pid"
 LOG_FILE = _SERVER_DIR / "server.log"
 
 # Milvus backend: remote Standalone URI or local Lite file path.
-MILVUS_URI = os.getenv("SESSION_RAG_MILVUS_URI", str(_SERVER_DIR / "milvus.db"))
+MILVUS_URI = os.getenv("SESSIONFLOW_MILVUS_URI", str(_SERVER_DIR / "milvus.db"))
 
 
 # --- Project middleware ---
@@ -91,7 +91,7 @@ async def health(request: Request) -> JSONResponse:
     watchers = file_watcher.get_watcher_status()
     return JSONResponse({
         "status": "ok",
-        "server": "session-rag",
+        "server": "sessionflow",
         "port": PORT,
         "model_name": rag_engine.get_model_name(),
         "model_loaded": _model_loaded,
@@ -329,7 +329,7 @@ async def lifespan(app: Starlette):
 # --- MCP server setup ---
 
 mcp_server = Server(
-    "session-rag",
+    "sessionflow",
     instructions=(
         "Session-RAG provides semantic search over Claude Code conversation history. "
         "When using search_session, ALWAYS pass the session_id parameter using the "

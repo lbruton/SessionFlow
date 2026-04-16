@@ -2,7 +2,7 @@
 """
 One-time migration: Milvus Lite → Milvus Standalone.
 
-Exports all vectors from the local ~/.session-rag/milvus.db and bulk-inserts
+Exports all vectors from the local ~/.sessionflow/milvus.db and bulk-inserts
 them into a remote Milvus Standalone instance. No re-embedding needed — vectors
 are copied as-is.
 
@@ -12,7 +12,7 @@ Usage:
     python migrate_to_standalone.py --target http://192.168.1.81:19530 [--dry-run]
 
 Requirements:
-    - session-rag server must be STOPPED (Milvus Lite is single-process)
+    - SessionFlow server must be STOPPED (Milvus Lite is single-process)
     - Target Milvus Standalone must be running and reachable
 """
 
@@ -26,7 +26,7 @@ from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
 COLLECTION_NAME = "sessions"
 EMBED_DIM = 768
 BATCH_SIZE = 1000
-LITE_DB = str(Path.home() / ".session-rag" / "milvus.db")
+LITE_DB = str(Path.home() / ".sessionflow" / "milvus.db")
 
 ALL_FIELDS = [
     "id", "vector", "document", "doc_id", "session_id",
@@ -143,7 +143,7 @@ def verify(source: MilvusClient, target: MilvusClient):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate session-rag from Milvus Lite to Standalone")
+    parser = argparse.ArgumentParser(description="Migrate SessionFlow from Milvus Lite to Standalone")
     parser.add_argument("--target", required=True, help="Standalone URI (e.g. http://192.168.1.81:19530)")
     parser.add_argument("--source", default=LITE_DB, help=f"Lite DB path (default: {LITE_DB})")
     parser.add_argument("--dry-run", action="store_true", help="Report counts without writing")
@@ -213,8 +213,8 @@ def main():
     target.close()
 
     print(f"\nNext steps:")
-    print(f"  1. export SESSION_RAG_MILVUS_URI={args.target}")
-    print(f"  2. ./session-rag-server.sh restart")
+    print(f"  1. export SESSIONFLOW_MILVUS_URI={args.target}")
+    print(f"  2. ./sessionflow-server.sh restart")
     print(f"  3. curl http://127.0.0.1:7102/health  # verify milvus_backend=standalone")
 
 

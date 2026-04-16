@@ -1,6 +1,6 @@
 #!/bin/bash
 # SessionStart hook: sets CLAUDE_SESSION_ID env var and registers
-# the project with the session-rag file watcher for real-time indexing.
+# the project with the sessionflow file watcher for real-time indexing.
 
 INPUT=$(cat)
 
@@ -21,7 +21,7 @@ fi
 # Register project with file watcher (fire-and-forget)
 # This starts watching transcripts and backfills any missed sessions.
 if [ -n "$PROJECT_ROOT" ]; then
-    SERVER_URL="${SESSION_RAG_URL:-http://127.0.0.1:7102}"
+    SERVER_URL="${SESSIONFLOW_URL:-http://127.0.0.1:7102}"
     curl -sf --max-time 5 \
         -X POST "$SERVER_URL/watch" \
         -H "Content-Type: application/json" \
