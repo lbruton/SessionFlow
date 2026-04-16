@@ -283,13 +283,20 @@ async def lifespan(app: Starlette):
     except Exception as e:
         print(f"[HTTP] Warning: Could not init server mode: {e}", file=sys.stderr)
 
-    # Backfill FTS from Milvus for any records indexed before FTS was added
-    try:
-        backfilled = rag_engine.backfill_fts(db_path=db_path)
-        if backfilled:
-            print(f"[HTTP] FTS backfill: {backfilled} records", file=sys.stderr)
-    except Exception as e:
-        print(f"[HTTP] Warning: FTS backfill failed: {e}", file=sys.stderr)
+    # Backfill FTS from Milvus for any records indexed before FTS was added.
+    # Runs as a background task so it doesn't block HTTP server binding.
+    async def _fts_backfill():
+        await asyncio.sleep(1)  # Let HTTP server bind first
+        try:
+            loop = asyncio.get_event_loop()
+            backfilled = await loop.run_in_executor(
+                None, lambda: rag_engine.backfill_fts(db_path=db_path))
+            if backfilled:
+                print(f"[HTTP] FTS backfill: {backfilled} records", file=sys.stderr)
+        except Exception as e:
+            print(f"[HTTP] Warning: FTS backfill failed: {e}", file=sys.stderr)
+
+    asyncio.create_task(_fts_backfill())
 
     # Start global file watcher on ~/.claude/projects/
     try:
