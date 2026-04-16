@@ -1,0 +1,7 @@
+{
+  "name": "session-rag",
+  "tag": "session-rag",
+  "issuePrefix": "SRAG",
+  "issueTag": "session-rag",
+  "cachePrefix": "session-rag"
+}
