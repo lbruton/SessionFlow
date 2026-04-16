@@ -1,8 +1,9 @@
 """
 RAG engine for session transcripts.
 
-Embeds conversation turns via mlx-embeddings. Stores vectors in a single global
-Milvus Lite DB at ~/.session-rag/.
+Embeds conversation turns via mlx-embeddings. Stores vectors in Milvus — either
+a remote Standalone instance (via SESSION_RAG_MILVUS_URI) or embedded Milvus Lite
+at ~/.session-rag/milvus.db (fallback).
 
 Full-text search via SQLite FTS5 sidecar for hybrid search (vector + keyword).
 Results merged with Reciprocal Rank Fusion (RRF).
@@ -35,6 +36,12 @@ import time
 from fts_hybrid import FTSIndex, rrf_merge
 
 logger = logging.getLogger("session-rag.milvus")
+
+
+def _is_remote_uri(uri: str) -> bool:
+    """True when uri points to a remote Milvus Standalone (http:// or https://)."""
+    return uri.startswith("http://") or uri.startswith("https://")
+
 
 # --- Model registry ---
 
@@ -226,17 +233,22 @@ def _get_persistent_client(db_path: str) -> MilvusClient:
                 pass
             del _persistent_clients[db_path]
 
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    if not _is_remote_uri(db_path):
+        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     try:
-        # Increase gRPC keepalive to 120s to prevent milvus-lite GOAWAY/ENHANCE_YOUR_CALM.
-        # pymilvus defaults to 10s which milvus-lite rejects as too_many_pings under load.
-        _persistent_clients[db_path] = MilvusClient(
-            db_path,
-            grpc_options={
-                "grpc.keepalive_time_ms": 120_000,
-                "grpc.keepalive_timeout_ms": 20_000,
-            },
-        )
+        if _is_remote_uri(db_path):
+            # Remote Milvus Standalone — default gRPC settings are fine.
+            _persistent_clients[db_path] = MilvusClient(db_path)
+        else:
+            # Milvus Lite — increase gRPC keepalive to 120s to prevent
+            # GOAWAY/ENHANCE_YOUR_CALM (Lite rejects default 10s as too_many_pings).
+            _persistent_clients[db_path] = MilvusClient(
+                db_path,
+                grpc_options={
+                    "grpc.keepalive_time_ms": 120_000,
+                    "grpc.keepalive_timeout_ms": 20_000,
+                },
+            )
         logger.info("Opened client: %s", db_path)
     except Exception as e:
         logger.error("Failed to connect to Milvus at %s: %s", db_path, e)
@@ -250,7 +262,7 @@ def _resolve_db_path(db_path: Optional[str]) -> str:
     return db_path
 
 
-def _ensure_collection(client: MilvusClient):
+def _ensure_collection(client: MilvusClient, db_path: str = ""):
     """Create the sessions collection with explicit schema if it doesn't exist."""
     if client.has_collection(COLLECTION_NAME):
         return
@@ -272,7 +284,17 @@ def _ensure_collection(client: MilvusClient):
     ])
 
     index_params = client.prepare_index_params()
-    index_params.add_index(field_name="vector", index_type="FLAT", metric_type="COSINE")
+    if _is_remote_uri(db_path):
+        # Standalone supports HNSW — O(log n) search vs O(n) FLAT.
+        index_params.add_index(
+            field_name="vector",
+            index_type="HNSW",
+            metric_type="COSINE",
+            params={"M": 16, "efConstruction": 256},
+        )
+    else:
+        # Milvus Lite silently ignores non-FLAT indexes.
+        index_params.add_index(field_name="vector", index_type="FLAT", metric_type="COSINE")
 
     client.create_collection(
         collection_name=COLLECTION_NAME,
@@ -290,12 +312,13 @@ def milvus_client(db_path: Optional[str] = None):
 
     if _server_mode:
         client = _get_persistent_client(path)
-        _ensure_collection(client)
+        _ensure_collection(client, path)
         yield client
     else:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        if not _is_remote_uri(path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
         client = MilvusClient(path)
-        _ensure_collection(client)
+        _ensure_collection(client, path)
         try:
             yield client
         finally:
@@ -418,12 +441,17 @@ def search(query: str, n: int = 5, session_id: Optional[str] = None,
         filters.append(f'timestamp <= "{date_to}T23:59:59"')
     filter_expr = " && ".join(filters) if filters else None
 
+    search_params = {"metric_type": "COSINE"}
+    if _is_remote_uri(db_path or ""):
+        search_params["params"] = {"ef": 128}  # HNSW search parameter
+
     with milvus_client(db_path) as client:
         results = client.search(
             collection_name=COLLECTION_NAME,
             data=[query_embedding],
             limit=fetch_n,
             filter=filter_expr,
+            search_params=search_params,
             output_fields=["document", "doc_id", "session_id", "transcript_file",
                            "turn_index", "timestamp", "git_branch", "chunk_type",
                            "project_root"],

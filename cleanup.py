@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -22,8 +23,8 @@ import rag_engine
 
 
 def get_db_path() -> str:
-    """Global DB path — all projects share one index."""
-    return str(Path.home() / ".session-rag" / "milvus.db")
+    """Milvus URI — remote Standalone if SESSION_RAG_MILVUS_URI is set, else local Lite."""
+    return os.getenv("SESSION_RAG_MILVUS_URI", str(Path.home() / ".session-rag" / "milvus.db"))
 
 
 def cmd_list(args):

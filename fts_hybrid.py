@@ -83,7 +83,9 @@ class FTSIndex:
 
     @staticmethod
     def db_path(milvus_db_path: str) -> str:
-        """Derive the FTS database path from the Milvus DB path."""
+        """Derive the FTS database path. For remote Milvus URIs, use ~/.session-rag/."""
+        if milvus_db_path.startswith("http://") or milvus_db_path.startswith("https://"):
+            return str(Path.home() / ".session-rag" / "fts.db")
         return str(Path(milvus_db_path).parent / "fts.db")
 
     def _check_and_migrate(self, conn: sqlite3.Connection):

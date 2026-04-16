@@ -4,6 +4,7 @@ MCP tool definitions and project context for session-rag.
 
 import asyncio
 import contextvars
+import os
 from pathlib import Path
 from mcp.server import Server
 from mcp import types
@@ -27,8 +28,8 @@ def get_current_project_root() -> str | None:
 
 
 def get_db_path() -> str:
-    """Global DB path — all projects share one index at ~/.session-rag/."""
-    return str(Path.home() / ".session-rag" / "milvus.db")
+    """Milvus URI — remote Standalone if SESSION_RAG_MILVUS_URI is set, else local Lite."""
+    return os.getenv("SESSION_RAG_MILVUS_URI", str(Path.home() / ".session-rag" / "milvus.db"))
 
 
 # --- Formatting helpers ---

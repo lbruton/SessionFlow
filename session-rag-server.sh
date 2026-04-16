@@ -88,6 +88,7 @@ start_watchdog() {
                 export PYTHONPATH="$SCRIPT_DIR"
                 export HF_HUB_OFFLINE=1
                 export TRANSFORMERS_OFFLINE=1
+                [ -n "${SESSION_RAG_MILVUS_URI:-}" ] && export SESSION_RAG_MILVUS_URI
                 nohup "$PYTHON" -u "$SCRIPT_DIR/http_server.py" >> "$LOG_FILE" 2>&1 &
 
                 # Wait for it to be healthy
@@ -130,6 +131,8 @@ do_start() {
     export PYTHONPATH="$SCRIPT_DIR"
     export HF_HUB_OFFLINE=1
     export TRANSFORMERS_OFFLINE=1
+    # Pass through Milvus URI for Standalone mode
+    [ -n "${SESSION_RAG_MILVUS_URI:-}" ] && export SESSION_RAG_MILVUS_URI
     nohup "$PYTHON" -u "$SCRIPT_DIR/http_server.py" >> "$LOG_FILE" 2>&1 &
     local server_pid=$!
 

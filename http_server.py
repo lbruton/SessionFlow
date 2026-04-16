@@ -50,6 +50,9 @@ _SERVER_DIR = Path.home() / ".session-rag"
 PID_FILE = _SERVER_DIR / "server.pid"
 LOG_FILE = _SERVER_DIR / "server.log"
 
+# Milvus backend: remote Standalone URI or local Lite file path.
+MILVUS_URI = os.getenv("SESSION_RAG_MILVUS_URI", str(_SERVER_DIR / "milvus.db"))
+
 
 # --- Project middleware ---
 
@@ -93,6 +96,7 @@ async def health(request: Request) -> JSONResponse:
         "model_name": rag_engine.get_model_name(),
         "model_loaded": _model_loaded,
         "milvus": _server_mode_ready,
+        "milvus_backend": "standalone" if MILVUS_URI.startswith("http") else "lite",
         "watchers": {k: v for k, v in watchers.items()},
     })
 
@@ -142,7 +146,7 @@ async def index_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
-    db_path = str(Path.home() / ".session-rag" / "milvus.db")
+    db_path = MILVUS_URI
 
     # Register slug→root mapping for the global watcher
     register_project(project_root)
@@ -235,7 +239,7 @@ async def watch_endpoint(request: Request) -> JSONResponse:
     # Auto-expiry check
     expired = 0
     if AUTO_EXPIRE_DAYS > 0:
-        db_path = str(Path.home() / ".session-rag" / "milvus.db")
+        db_path = MILVUS_URI
         state = transcript_parser.load_index_state()
         last_expire = state.get("last_expire_check", 0)
         now = time.time()
@@ -276,7 +280,7 @@ async def lifespan(app: Starlette):
     except Exception as e:
         print(f"[HTTP] Warning: Could not pre-load model: {e}", file=sys.stderr)
 
-    db_path = str(_SERVER_DIR / "milvus.db")
+    db_path = MILVUS_URI
     try:
         rag_engine.init_server_mode(db_path=db_path)
         _server_mode_ready = True
