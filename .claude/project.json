@@ -1,7 +1,7 @@
 {
   "name": "SessionFlow",
   "tag": "sessionflow",
-  "issuePrefix": "SF",
+  "issuePrefix": "SESF",
   "issueTag": "sessionflow",
   "cachePrefix": "sessionflow"
 }

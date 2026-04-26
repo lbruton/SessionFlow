@@ -1,0 +1,8 @@
+{
+  "project": "SessionFlow",
+  "docvault": "../DocVault",
+  "issue_prefix": "SESF",
+  "issue_backend": "plane",
+  "plane_workspace": "lbruton",
+  "plane_project_id": "3835ead1-4cc4-4f89-8145-4923068f7403"
+}

@@ -26,11 +26,13 @@ Semantic search over Claude Code session transcripts. Independent project, origi
 - **Milvus Lite gRPC keepalive** — only applies when `SESSIONFLOW_MILVUS_URI` is unset (Lite fallback). Standalone doesn't need the workaround.
 - **Backfill checkpoints every 100 files** — `index_state.json` saves progress. Restart picks up from last checkpoint.
 - **`project_root` for `-/` transcripts** — generic bucket sessions have `cwd="/"`. No project tagging possible.
-- **Never create GitHub issues** — all issues go to DocVault via `/issue`.
+- **Never create GitHub issues** — all issues go to Plane via `/issue` (which dispatches on `.specflow/config.json` `issue_backend`).
 
 ## Issue Tracking
 
-Issues use `SF-` prefix, stored in `DocVault/Projects/SessionFlow/Issues/`.
+Issues use the `SESF-` prefix and are tracked in Plane: <https://plane.lbruton.cc/lbruton/projects/3835ead1-4cc4-4f89-8145-4923068f7403/>.
+
+Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) on 2026-04-26 with the Plane migration. Pre-migration markdown archived at `DocVault/Archive/Issues-Pre-Plane/SessionFlow/`. New issues are created via `/issue` (which dispatches on `.specflow/config.json` `issue_backend`) or directly via `mcp__plane__create_issue`.
 
 ## Git Rules
 
