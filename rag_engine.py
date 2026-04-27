@@ -304,6 +304,12 @@ def _ensure_collection(client: MilvusClient, db_path: str = ""):
 
     print(f"Collection created: {COLLECTION_NAME}", file=sys.stderr)
 
+    # Standalone requires explicit load_collection before query/dedup paths work.
+    # create_collection with index_params does not auto-load.
+    if _is_remote_uri(db_path):
+        client.load_collection(collection_name=COLLECTION_NAME)
+        print(f"Collection loaded: {COLLECTION_NAME}", file=sys.stderr)
+
 
 @contextmanager
 def milvus_client(db_path: Optional[str] = None):
@@ -783,54 +789,79 @@ def delete_older_than(max_age_days: int, db_path: Optional[str] = None) -> int:
 def backfill_fts(db_path: Optional[str] = None) -> int:
     """Populate FTS from Milvus for any records missing from the FTS index.
 
-    Queries all doc_ids from Milvus, checks which are absent from FTS,
-    and inserts the missing ones. Returns count of backfilled records.
+    Two-pass to stay under Milvus's 64MB per-segment query result limit:
+      1. Fetch doc_id only (~100 bytes/row) to identify what's in Milvus.
+      2. Diff against FTS via batched IN-clause to find missing doc_ids.
+      3. Fetch full documents only for missing doc_ids, in chunks of 100.
+    The original single-pass that pulled the wide `document` field on all
+    rows crossed the 64MB ceiling once a segment accumulated enough text
+    and corrupted Woodpecker WAL state. See SESF-2.
     """
     if not db_path:
         return 0
 
-    all_rows = _query_all(
-        ["doc_id", "document", "session_id", "git_branch", "turn_index",
-         "timestamp", "chunk_type", "project_root"],
-        db_path=db_path,
-    )
-    if not all_rows:
+    # Pass 1: doc_ids only
+    id_rows = _query_all(["doc_id"], db_path=db_path)
+    if not id_rows:
+        return 0
+
+    all_doc_ids = [r.get("doc_id", "") for r in id_rows if r.get("doc_id", "")]
+    if not all_doc_ids:
         return 0
 
     fts_conn = _fts.connection(db_path)
+    try:
+        # Diff against FTS in chunks (SQLite default param limit is 999).
+        existing = set()
+        BATCH_DIFF = 500
+        for i in range(0, len(all_doc_ids), BATCH_DIFF):
+            chunk = all_doc_ids[i:i + BATCH_DIFF]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = fts_conn.execute(
+                f"SELECT doc_id FROM {_fts.table_name} WHERE doc_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                existing.add(row[0])
 
-    # Find which doc_ids are already in FTS
-    existing = set()
-    for row in all_rows:
-        doc_id = row.get("doc_id", "")
-        if doc_id:
-            hit = fts_conn.execute(
-                f"SELECT doc_id FROM {_fts.table_name} WHERE doc_id = ?", (doc_id,)
-            ).fetchone()
-            if hit:
-                existing.add(doc_id)
+        missing_doc_ids = [d for d in all_doc_ids if d not in existing]
+        if not missing_doc_ids:
+            return 0
 
-    missing = [r for r in all_rows if r.get("doc_id", "") not in existing]
-    if not missing:
+        # Pass 2: hydrate missing rows in small batches.
+        output_fields = ["doc_id", "document", "session_id", "git_branch",
+                         "turn_index", "timestamp", "chunk_type", "project_root"]
+        BATCH_FETCH = 100
+        records = []
+        with milvus_client(db_path) as client:
+            for i in range(0, len(missing_doc_ids), BATCH_FETCH):
+                chunk = missing_doc_ids[i:i + BATCH_FETCH]
+                ids_quoted = ", ".join(json.dumps(d) for d in chunk)
+                batch = client.query(
+                    collection_name=COLLECTION_NAME,
+                    filter=f"doc_id in [{ids_quoted}]",
+                    limit=len(chunk),
+                    output_fields=output_fields,
+                )
+                for r in batch:
+                    records.append({
+                        "doc_id": r["doc_id"],
+                        "content": r.get("document", ""),
+                        "session_id": r.get("session_id", ""),
+                        "git_branch": r.get("git_branch", ""),
+                        "turn_index": r.get("turn_index", 0),
+                        "timestamp": r.get("timestamp", ""),
+                        "chunk_type": r.get("chunk_type", "turn"),
+                        "project_root": r.get("project_root", ""),
+                    })
+
+        if records:
+            _fts.insert(fts_conn, records)
+
+        logger.info("FTS backfill: inserted %d records", len(records))
+        return len(records)
+    finally:
         _fts.close_ephemeral(fts_conn)
-        return 0
-
-    records = [{
-        "doc_id": r["doc_id"],
-        "content": r.get("document", ""),
-        "session_id": r.get("session_id", ""),
-        "git_branch": r.get("git_branch", ""),
-        "turn_index": r.get("turn_index", 0),
-        "timestamp": r.get("timestamp", ""),
-        "chunk_type": r.get("chunk_type", "turn"),
-        "project_root": r.get("project_root", ""),
-    } for r in missing]
-
-    _fts.insert(fts_conn, records)
-    _fts.close_ephemeral(fts_conn)
-
-    logger.info("FTS backfill: inserted %d records", len(records))
-    return len(records)
 
 
 def clear_collection(db_path: Optional[str] = None):
