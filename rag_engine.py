@@ -810,58 +810,58 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
         return 0
 
     fts_conn = _fts.connection(db_path)
+    try:
+        # Diff against FTS in chunks (SQLite default param limit is 999).
+        existing = set()
+        BATCH_DIFF = 500
+        for i in range(0, len(all_doc_ids), BATCH_DIFF):
+            chunk = all_doc_ids[i:i + BATCH_DIFF]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = fts_conn.execute(
+                f"SELECT doc_id FROM {_fts.table_name} WHERE doc_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+            for row in rows:
+                existing.add(row[0])
 
-    # Diff against FTS in chunks (SQLite default param limit is 999).
-    existing = set()
-    BATCH_DIFF = 500
-    for i in range(0, len(all_doc_ids), BATCH_DIFF):
-        chunk = all_doc_ids[i:i + BATCH_DIFF]
-        placeholders = ",".join("?" for _ in chunk)
-        rows = fts_conn.execute(
-            f"SELECT doc_id FROM {_fts.table_name} WHERE doc_id IN ({placeholders})",
-            chunk,
-        ).fetchall()
-        for row in rows:
-            existing.add(row[0])
+        missing_doc_ids = [d for d in all_doc_ids if d not in existing]
+        if not missing_doc_ids:
+            return 0
 
-    missing_doc_ids = [d for d in all_doc_ids if d not in existing]
-    if not missing_doc_ids:
+        # Pass 2: hydrate missing rows in small batches.
+        output_fields = ["doc_id", "document", "session_id", "git_branch",
+                         "turn_index", "timestamp", "chunk_type", "project_root"]
+        BATCH_FETCH = 100
+        records = []
+        with milvus_client(db_path) as client:
+            for i in range(0, len(missing_doc_ids), BATCH_FETCH):
+                chunk = missing_doc_ids[i:i + BATCH_FETCH]
+                ids_quoted = ", ".join(json.dumps(d) for d in chunk)
+                batch = client.query(
+                    collection_name=COLLECTION_NAME,
+                    filter=f"doc_id in [{ids_quoted}]",
+                    limit=len(chunk),
+                    output_fields=output_fields,
+                )
+                for r in batch:
+                    records.append({
+                        "doc_id": r["doc_id"],
+                        "content": r.get("document", ""),
+                        "session_id": r.get("session_id", ""),
+                        "git_branch": r.get("git_branch", ""),
+                        "turn_index": r.get("turn_index", 0),
+                        "timestamp": r.get("timestamp", ""),
+                        "chunk_type": r.get("chunk_type", "turn"),
+                        "project_root": r.get("project_root", ""),
+                    })
+
+        if records:
+            _fts.insert(fts_conn, records)
+
+        logger.info("FTS backfill: inserted %d records", len(records))
+        return len(records)
+    finally:
         _fts.close_ephemeral(fts_conn)
-        return 0
-
-    # Pass 2: hydrate missing rows in small batches.
-    output_fields = ["doc_id", "document", "session_id", "git_branch",
-                     "turn_index", "timestamp", "chunk_type", "project_root"]
-    BATCH_FETCH = 100
-    records = []
-    with milvus_client(db_path) as client:
-        for i in range(0, len(missing_doc_ids), BATCH_FETCH):
-            chunk = missing_doc_ids[i:i + BATCH_FETCH]
-            ids_quoted = ", ".join(f'"{d}"' for d in chunk)
-            batch = client.query(
-                collection_name=COLLECTION_NAME,
-                filter=f"doc_id in [{ids_quoted}]",
-                limit=len(chunk),
-                output_fields=output_fields,
-            )
-            for r in batch:
-                records.append({
-                    "doc_id": r["doc_id"],
-                    "content": r.get("document", ""),
-                    "session_id": r.get("session_id", ""),
-                    "git_branch": r.get("git_branch", ""),
-                    "turn_index": r.get("turn_index", 0),
-                    "timestamp": r.get("timestamp", ""),
-                    "chunk_type": r.get("chunk_type", "turn"),
-                    "project_root": r.get("project_root", ""),
-                })
-
-    if records:
-        _fts.insert(fts_conn, records)
-    _fts.close_ephemeral(fts_conn)
-
-    logger.info("FTS backfill: inserted %d records", len(records))
-    return len(records)
 
 
 def clear_collection(db_path: Optional[str] = None):
