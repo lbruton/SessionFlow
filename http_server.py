@@ -17,6 +17,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -52,6 +53,59 @@ LOG_FILE = _SERVER_DIR / "server.log"
 
 # Milvus backend: remote Standalone URI or local Lite file path.
 MILVUS_URI = os.getenv("SESSIONFLOW_MILVUS_URI", str(_SERVER_DIR / "milvus.db"))
+HEARTBEAT_FILE = _SERVER_DIR / "heartbeat"
+
+
+# --- Heartbeat ---
+
+class HeartbeatThread:
+    """Daemon thread that writes a JSON heartbeat file at fixed intervals.
+
+    File I/O releases the GIL, so this runs even when MLX Metal holds
+    the GIL during embedding computation.
+    """
+
+    def __init__(self, path: Path, interval: float = 30.0):
+        self._path = path
+        self._interval = interval
+        self._stop_event = threading.Event()
+        self._thread = None
+
+    def _get_activity(self) -> str:
+        try:
+            status = file_watcher.get_watcher_status()
+            if status.get('global', {}).get('processing', False):
+                return "processing"
+        except Exception:
+            pass
+        return "idle"
+
+    def _write_heartbeat(self):
+        data = {
+            "timestamp": time.time(),
+            "pid": os.getpid(),
+            "activity": self._get_activity(),
+        }
+        tmp_path = self._path.parent / ".heartbeat.tmp"
+        try:
+            tmp_path.write_text(json.dumps(data))
+            os.replace(str(tmp_path), str(self._path))
+        except Exception as e:
+            logger.warning("Heartbeat write failed: %s", e)
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            self._write_heartbeat()
+            self._stop_event.wait(self._interval)
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
 
 
 # --- Project middleware ---
@@ -287,6 +341,10 @@ async def lifespan(app: Starlette):
     except Exception as e:
         print(f"[HTTP] Warning: Could not init server mode: {e}", file=sys.stderr)
 
+    heartbeat = HeartbeatThread(HEARTBEAT_FILE)
+    heartbeat.start()
+    print(f"[HTTP] Heartbeat thread started ({HEARTBEAT_FILE})", file=sys.stderr)
+
     # Backfill FTS from Milvus for any records indexed before FTS was added.
     # Runs as a background task so it doesn't block HTTP server binding.
     async def _fts_backfill():
@@ -318,6 +376,10 @@ async def lifespan(app: Starlette):
             yield
         finally:
             pass
+
+    heartbeat.stop()
+    if HEARTBEAT_FILE.exists():
+        HEARTBEAT_FILE.unlink()
 
     await file_watcher.stop_global_watcher()
     rag_engine.close_server_mode()
