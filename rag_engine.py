@@ -47,6 +47,7 @@ from provider_adapters import (
     LEGAL_SORT_BY,
     LEGAL_SOURCE_KINDS,
     default_provider_metadata,
+    is_valid_issue_token,
 )
 
 RECENCY_WEIGHT_DEFAULT = 0.3
@@ -139,7 +140,10 @@ def _extract_issue_ids(text: str) -> str:
             )
             break
         result = candidate
-    return result
+    # Guard the pathological case where even the first token exceeds the cap:
+    # ``result`` would still be the bare delimiter ",", which is neither "" nor a
+    # valid comma-wrapped list. Normalize to "".
+    return result if len(result) > 1 else ""
 
 
 def _truncate_utf8(text: str, max_bytes: int) -> str:
@@ -822,7 +826,12 @@ def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
         date_to_date = date_to.split("T")[0]
         filters.append(f'timestamp <= "{_escape_filter_scalar(date_to_date)}T23:59:59"')
     if issue_id:
-        filters.append(f'issue_ids like "%,{_escape_filter_scalar(issue_id.upper())},%"')
+        # Neutralize LIKE metacharacters (%/_) in the token so a malformed
+        # issue_id can't broaden the match into a wildcard scan; a valid token
+        # (``[A-Z][A-Z0-9]+-\d+``) never contains them, so this is a no-op for
+        # legitimate input. Outer %,...,% remain the intended containment wildcards.
+        token = _escape_filter_scalar(issue_id.upper()).replace("%", "").replace("_", "")
+        filters.append(f'issue_ids like "%,{token},%"')
     return " && ".join(filters) if filters else None
 
 
@@ -1066,9 +1075,9 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         A list of timeline entry dicts, oldest first; ``[]`` when nothing
         references the issue (Req 4.7).
     """
-    canonical = issue_id.strip().upper() if issue_id else ""
-    if not canonical:
-        raise ValueError("issue_id must be a non-empty token like 'SESF-25'")
+    if not is_valid_issue_token(issue_id):
+        raise ValueError("issue_id must be a valid issue token like 'SESF-25'")
+    canonical = issue_id.strip().upper()
     if limit < 1:
         raise ValueError("limit must be a positive integer")
     filter_expr = _build_milvus_filter(

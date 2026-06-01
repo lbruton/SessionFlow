@@ -10,7 +10,12 @@ from mcp.server import Server
 from mcp import types
 
 import rag_engine
-from provider_adapters import LEGAL_PROVIDERS, LEGAL_SORT_BY, LEGAL_SOURCE_KINDS
+from provider_adapters import (
+    LEGAL_PROVIDERS,
+    LEGAL_SORT_BY,
+    LEGAL_SOURCE_KINDS,
+    is_valid_issue_token,
+)
 
 
 # --- Project context ---
@@ -486,6 +491,10 @@ def register_tools(server: Server):
                 return [types.TextContent(type="text", text=format_stats(stats, db))]
 
             elif name == "get_issue_timeline":
+                if not is_valid_issue_token(arguments.get("issue_id")):
+                    return [types.TextContent(
+                        type="text",
+                        text="issue_id must be a valid issue token like SESF-25")]
                 provider = arguments.get("provider")
                 err = _validate_enum_arg("provider", provider, LEGAL_PROVIDERS)
                 if err:

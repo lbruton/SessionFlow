@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Protocol
 import hashlib
+import re
 
 
 LEGAL_PROVIDERS = frozenset({
@@ -37,6 +38,23 @@ LEGAL_SOURCE_CLASSES = frozenset({
     "native",
     "fallback",
 })
+
+# Canonical issue-token shape (e.g. SESF-25), matching the ingestion extractor.
+ISSUE_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+
+
+def is_valid_issue_token(raw: object) -> bool:
+    """Whether ``raw`` is a well-formed issue token like ``SESF-25``.
+
+    Case-insensitive and whitespace-tolerant (callers should ``.strip().upper()``
+    before storing/matching). Rejects empty/non-str input and anything carrying
+    LIKE/FTS metacharacters or whitespace, so a filter token can't broaden a
+    Milvus ``LIKE`` or break an FTS ``MATCH``.
+    """
+    return (
+        isinstance(raw, str)
+        and ISSUE_ID_PATTERN.match(raw.strip().upper()) is not None
+    )
 
 LEGAL_SORT_BY = frozenset({
     "relevance",

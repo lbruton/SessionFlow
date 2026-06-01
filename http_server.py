@@ -35,7 +35,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 import rag_engine
 import transcript_parser
 import file_watcher
-from provider_adapters import LEGAL_PROVIDERS
+from provider_adapters import LEGAL_PROVIDERS, is_valid_issue_token
 from backfill_manager import BackfillManager
 from embedding_control import EmbeddingIdentity, get_embedding_budget
 from provider_antigravity import AntigravityAdapter
@@ -620,6 +620,11 @@ async def timeline_endpoint(request: Request) -> JSONResponse:
     issue_id = params.get("issue_id")
     if not issue_id or not issue_id.strip():
         return JSONResponse({"error": "issue_id is required"}, status_code=400)
+    if not is_valid_issue_token(issue_id):
+        return JSONResponse(
+            {"error": "issue_id must be a valid issue token like SESF-25"},
+            status_code=400,
+        )
 
     raw_limit = params.get("limit")
     limit = 50
