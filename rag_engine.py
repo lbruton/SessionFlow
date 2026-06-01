@@ -73,10 +73,12 @@ DEFAULT_TIMELINE_LIMIT = 50
 # Generous FTS fetch window for the timeline fallback so the chronological slice
 # isn't biased by BM25 rank (the older matching turn may be outside the top-N).
 _TIMELINE_FTS_FETCH_CAP = 500
-# Hard cap on structured rows drained into memory for one issue timeline (OOM
-# safety valve). Far above any realistic per-issue turn count; if hit, the feed
-# is truncated and a warning is logged.
-_TIMELINE_MAX_ROWS = 50000
+# Observability threshold: warn (do NOT truncate) when one issue matches an
+# unexpectedly large structured set. Truncating here would drop arbitrary rows —
+# Milvus query_iterator order is undefined and it can't sort server-side by a
+# scalar — silently breaking the oldest-first guarantee. Memory-bounded
+# oldest-N pagination is tracked in SESF-34.
+_TIMELINE_ROWS_WARN = 50000
 
 # Shared Milvus output_fields for vector search and recency listing. Includes
 # ``issue_ids`` so SESF-25 issue tags propagate through ``_row_to_result``.
@@ -1075,15 +1077,14 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
 
     output_fields = ["document", "doc_id", "session_id", "timestamp",
                      "chunk_type", "provider", "issue_ids"]
-    structured = _query_all(
-        output_fields, filter_expr=filter_expr, db_path=db_path,
-        max_rows=_TIMELINE_MAX_ROWS,
-    )
-    if len(structured) >= _TIMELINE_MAX_ROWS:
+    structured = _query_all(output_fields, filter_expr=filter_expr, db_path=db_path)
+    if len(structured) > _TIMELINE_ROWS_WARN:
+        # Warn but do NOT truncate: an arbitrary-order cap would drop random
+        # (not newest) rows. Correct memory-bounded pagination is SESF-34.
         logger.warning(
-            "issue timeline for %s hit the %d-row structured cap — older turns "
-            "may be truncated from the feed",
-            canonical, _TIMELINE_MAX_ROWS,
+            "issue timeline for %s matched %d structured rows (>%d) — large "
+            "in-memory set; narrow with date_from/date_to (bounded pagination: SESF-34)",
+            canonical, len(structured), _TIMELINE_ROWS_WARN,
         )
 
     # FTS keyword fallback (Req 6.1) for turns not yet tagged with issue_ids
@@ -1398,24 +1399,15 @@ def _query_batches(output_fields: list, batch_size: int = 1000,
 
 def _query_all(output_fields: list, batch_size: int = 1000,
                filter_expr: Optional[str] = None,
-               db_path: Optional[str] = None,
-               max_rows: Optional[int] = None) -> list:
+               db_path: Optional[str] = None) -> list:
     """Query all rows via Milvus query_iterator. Optional filter expression.
 
     Keeps the public list-returning behavior for callers that need aggregate
     results while allowing streaming callers to use _query_batches directly.
-
-    Args:
-        max_rows: Optional hard cap. When set, stops draining once this many
-            rows are collected (truncating the last batch) so an unbounded
-            result set cannot exhaust memory. ``None`` (default) preserves the
-            original unbounded behavior for existing callers.
     """
     all_results = []
     for batch in _query_batches(output_fields, batch_size, filter_expr, db_path):
         all_results.extend(batch)
-        if max_rows is not None and len(all_results) >= max_rows:
-            return all_results[:max_rows]
     return all_results
 
 
