@@ -6,6 +6,10 @@ For upstream changes, see [UPSTREAM-README.md](UPSTREAM-README.md).
 ## [Unreleased]
 
 ### Added
+
+- Issue-ID extraction at ingestion: every turn is scanned for issue references (`[A-Z][A-Z0-9]+-\d+`, with a technical-standard prefix denylist) and tagged into a new `issue_ids` Milvus `VARCHAR(4096)` field + FTS5 metadata column (SESF-25)
+- Optional `issue_id` filter on the `search_all_sessions` and `search_session` MCP tools — structured exact-token pre-filter, combinable with `provider` / `project_root` / `date_from` / `date_to` (SESF-25)
+- `get_issue_timeline` MCP tool and `GET /timeline` HTTP endpoint — cross-harness chronological feed of all turns referencing an issue, merged from the structured field + FTS fallback, deduped by `doc_id`, sorted oldest-first, with `limit` / `provider` / `date_from` / `date_to` (SESF-25, SESF-26)
 - `detect_project_root()` in `transcript_parser.py` — peeks first 30 lines of a transcript for `cwd`, resolves to git root (SR-2)
 - Auto-derive project root from Claude Code slug names via greedy path reconstruction with filesystem verification (SR-2)
 - `date_from` / `date_to` optional parameters on `search_all_sessions` tool for date-range filtering (SR-3)

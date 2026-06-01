@@ -35,6 +35,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 import rag_engine
 import transcript_parser
 import file_watcher
+from provider_adapters import LEGAL_PROVIDERS, is_valid_issue_token
 from backfill_manager import BackfillManager
 from embedding_control import EmbeddingIdentity, get_embedding_budget
 from provider_antigravity import AntigravityAdapter
@@ -604,6 +605,55 @@ async def watch_endpoint(request: Request) -> JSONResponse:
     })
 
 
+# --- Timeline endpoint ---
+
+async def timeline_endpoint(request: Request) -> JSONResponse:
+    """Cross-harness issue timeline over HTTP (mirrors the MCP get_issue_timeline tool).
+
+    Reads the same query params as the MCP tool (``issue_id`` required, plus
+    optional ``limit``, ``provider``, ``date_from``, ``date_to``) and returns the
+    engine's deduplicated, chronological feed as a JSON ``{"timeline": [...]}``
+    envelope. The singular ``provider`` param maps to the engine's ``providers``
+    list. Same matching/sort/limit logic as the MCP transport (Req 5.3).
+    """
+    params = request.query_params
+    issue_id = params.get("issue_id")
+    if not issue_id or not issue_id.strip():
+        return JSONResponse({"error": "issue_id is required"}, status_code=400)
+    if not is_valid_issue_token(issue_id):
+        return JSONResponse(
+            {"error": "issue_id must be a valid issue token like SESF-25"},
+            status_code=400,
+        )
+
+    raw_limit = params.get("limit")
+    limit = 50
+    if raw_limit is not None:
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        if limit < 1:
+            return JSONResponse({"error": "limit must be a positive integer"}, status_code=400)
+
+    provider = params.get("provider")
+    if provider and provider not in LEGAL_PROVIDERS:
+        allowed = ", ".join(sorted(LEGAL_PROVIDERS))
+        return JSONResponse(
+            {"error": f"invalid provider: {provider}; expected one of: {allowed}"},
+            status_code=400,
+        )
+    entries = await rag_engine.get_issue_timeline_async(
+        issue_id,
+        limit=limit,
+        providers=[provider] if provider else None,
+        date_from=params.get("date_from"),
+        date_to=params.get("date_to"),
+        db_path=MILVUS_URI,
+    )
+    return JSONResponse({"timeline": entries})
+
+
 # --- Lifespan ---
 
 @contextlib.asynccontextmanager
@@ -751,6 +801,7 @@ app = Starlette(
         Route("/backfill", backfill_control_endpoint, methods=["GET", "POST"]),
         Route("/index", index_endpoint, methods=["POST"]),
         Route("/watch", watch_endpoint, methods=["POST"]),
+        Route("/timeline", timeline_endpoint, methods=["GET"]),
         Mount("/mcp", app=ProjectMiddleware(session_manager.handle_request)),
     ],
     lifespan=lifespan,

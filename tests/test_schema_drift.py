@@ -24,6 +24,30 @@ def test_no_drift_when_field_names_match():
     assert rag_engine.detect_schema_drift(client) == []
 
 
+def test_expected_schema_includes_issue_ids():
+    """SESF-25 Req 2.1: issue_ids is a first-class field of the collection schema."""
+    import rag_engine
+
+    expected = {f.name for f in rag_engine._expected_schema_fields()}
+    assert "issue_ids" in expected
+
+
+def test_drift_reports_missing_issue_ids():
+    """SESF-25 Req 2.2: a collection lacking issue_ids reports missing:issue_ids."""
+    import rag_engine
+
+    expected = [f.name for f in rag_engine._expected_schema_fields()]
+    # issue_ids must be in the expected set for this test to be meaningful.
+    assert "issue_ids" in expected
+    client = MagicMock()
+    client.has_collection.return_value = True
+    fields = [{"name": name} for name in expected if name != "issue_ids"]
+    client.describe_collection.return_value = {"fields": fields}
+
+    drift = rag_engine.detect_schema_drift(client)
+    assert drift == ["missing:issue_ids"]
+
+
 def test_drift_reports_missing_field():
     import rag_engine
 

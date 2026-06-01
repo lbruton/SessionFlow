@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -46,6 +47,7 @@ from provider_adapters import (
     LEGAL_SORT_BY,
     LEGAL_SOURCE_KINDS,
     default_provider_metadata,
+    is_valid_issue_token,
 )
 
 RECENCY_WEIGHT_DEFAULT = 0.3
@@ -59,6 +61,89 @@ RECENT_LISTING_SCAN_CAP = 16384
 _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_score")
 
 logger = logging.getLogger("sessionflow.milvus")
+
+# Issue-ID extraction (SESF-25): technical-standard prefixes that match the
+# issue-token regex but are never issue references. Dropped during extraction.
+_ISSUE_ID_PREFIX_DENYLIST = frozenset(
+    {"UTF", "SHA", "HTTP", "HTTPS", "ISO", "RFC", "IPV", "MD", "BASE"}
+)
+# Milvus VARCHAR field length the extracted ids are stored in.
+_ISSUE_ID_FIELD_MAX = 4096
+# Default number of timeline entries returned by get_issue_timeline (SESF-25/26).
+DEFAULT_TIMELINE_LIMIT = 50
+# Generous FTS fetch window for the timeline fallback so the chronological slice
+# isn't biased by BM25 rank (the older matching turn may be outside the top-N).
+_TIMELINE_FTS_FETCH_CAP = 500
+# Observability threshold: warn (do NOT truncate) when one issue matches an
+# unexpectedly large structured set. Truncating here would drop arbitrary rows —
+# Milvus query_iterator order is undefined and it can't sort server-side by a
+# scalar — silently breaking the oldest-first guarantee. Memory-bounded
+# oldest-N pagination is tracked in SESF-34.
+_TIMELINE_ROWS_WARN = 50000
+
+# Shared Milvus output_fields for vector search and recency listing. Includes
+# ``issue_ids`` so SESF-25 issue tags propagate through ``_row_to_result``.
+_SEARCH_OUTPUT_FIELDS = [
+    "document", "doc_id", "session_id", "transcript_file",
+    "turn_index", "timestamp", "git_branch", "chunk_type",
+    "project_root", "logical_session_id", "provider",
+    "source_kind", "source_class", "source_id", "source_path",
+    "issue_ids",
+]
+
+
+def _extract_issue_ids(text: str) -> str:
+    """Extract issue references (e.g. ``SESF-25``) from a turn's text.
+
+    Matches the issue-token regex ``\\b[A-Z][A-Z0-9]+-\\d+\\b`` case-insensitively
+    (canonicalizing matches to upper case), drops technical-standard prefixes in
+    ``_ISSUE_ID_PREFIX_DENYLIST`` (UTF-8, SHA-256, HTTP-2, ...), and
+    deduplicates the survivors in first-seen order.
+
+    Args:
+        text: Raw turn text to scan.
+
+    Returns:
+        A delimiter-wrapped, comma-joined string of issue ids with a leading
+        and trailing comma (e.g. ``",SESF-25,SESF-26,"``), or ``""`` when no
+        issue token is found. The result is capped to ``_ISSUE_ID_FIELD_MAX``
+        characters so a Milvus insert cannot overflow the storage field; if the
+        next id would exceed the cap, extraction stops and logs one warning.
+    """
+    if not text or not isinstance(text, str):
+        return ""
+    seen: List[str] = []
+    seen_set: set[str] = set()
+    # Match case-insensitively and canonicalize only the matched tokens, rather
+    # than allocating an uppercased copy of the whole (possibly large) turn text.
+    for match in re.finditer(r"\b[A-Z][A-Z0-9]+-\d+\b", text, re.IGNORECASE):
+        token = match.group(0).upper()
+        prefix = token.split("-", 1)[0]
+        if prefix in _ISSUE_ID_PREFIX_DENYLIST:
+            continue
+        if token in seen_set:
+            continue
+        seen_set.add(token)
+        seen.append(token)
+
+    if not seen:
+        return ""
+
+    result = ","
+    for token in seen:
+        candidate = result + token + ","
+        if len(candidate) > _ISSUE_ID_FIELD_MAX:
+            logger.warning(
+                "issue-id list truncated at %d chars (field cap %d)",
+                len(result),
+                _ISSUE_ID_FIELD_MAX,
+            )
+            break
+        result = candidate
+    # Guard the pathological case where even the first token exceeds the cap:
+    # ``result`` would still be the bare delimiter ",", which is neither "" nor a
+    # valid comma-wrapped list. Normalize to "".
+    return result if len(result) > 1 else ""
 
 
 def _truncate_utf8(text: str, max_bytes: int) -> str:
@@ -264,7 +349,7 @@ _persistent_clients: Dict[str, MilvusClient] = {}
 _fts = FTSIndex("turns_fts", [
     "session_id", "git_branch", "turn_index", "timestamp", "chunk_type",
     "project_root", "logical_session_id", "provider", "source_kind",
-    "source_class", "source_id", "source_path",
+    "source_class", "source_id", "source_path", "issue_ids",
 ])
 _write_lock: Optional[asyncio.Lock] = None
 _embed_semaphore: Optional[asyncio.Semaphore] = None
@@ -378,6 +463,7 @@ def _expected_schema_fields() -> List[FieldSchema]:
         FieldSchema(name="git_branch", dtype=DataType.VARCHAR, max_length=256),
         FieldSchema(name="chunk_type", dtype=DataType.VARCHAR, max_length=64),
         FieldSchema(name="project_root", dtype=DataType.VARCHAR, max_length=512),
+        FieldSchema(name="issue_ids", dtype=DataType.VARCHAR, max_length=_ISSUE_ID_FIELD_MAX),
     ]
 
 
@@ -627,6 +713,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             "git_branch": turn.get("git_branch", ""),
             "chunk_type": turn.get("chunk_type", "turn"),
             "project_root": turn.get("project_root", ""),
+            "issue_ids": _extract_issue_ids(turn.get("text", "")),
         })
 
     with milvus_client(db_path) as client:
@@ -651,6 +738,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
                 "timestamp": t.get("timestamp", ""),
                 "chunk_type": t.get("chunk_type", "turn"),
                 "project_root": t.get("project_root", ""),
+                "issue_ids": _extract_issue_ids(t.get("text", "")),
             } for t in new_turns]
             _fts.insert(fts_conn, fts_records)
             _fts.close_ephemeral(fts_conn)
@@ -702,6 +790,7 @@ def _row_to_result(entity: Dict, defaults: Dict, distance: float = 1.0) -> Dict:
         "git_branch": entity.get("git_branch", ""),
         "chunk_type": entity.get("chunk_type", ""),
         "project_root": entity.get("project_root", ""),
+        "issue_ids": entity.get("issue_ids", ""),
         "distance": distance,
     }
 
@@ -709,7 +798,8 @@ def _row_to_result(entity: Dict, defaults: Dict, distance: float = 1.0) -> Dict:
 def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
                          project_root: Optional[str], provider: Optional[str],
                          source_kind: Optional[str], date_from: Optional[str],
-                         date_to: Optional[str]) -> Optional[str]:
+                         date_to: Optional[str],
+                         issue_id: Optional[str] = None) -> Optional[str]:
     """Compose the Milvus boolean-expression filter shared by vector search and
     the query-less recency listing. Returns None when no filters apply.
 
@@ -735,6 +825,13 @@ def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
         # datetime string.
         date_to_date = date_to.split("T")[0]
         filters.append(f'timestamp <= "{_escape_filter_scalar(date_to_date)}T23:59:59"')
+    if issue_id:
+        # Neutralize LIKE metacharacters (%/_) in the token so a malformed
+        # issue_id can't broaden the match into a wildcard scan; a valid token
+        # (``[A-Z][A-Z0-9]+-\d+``) never contains them, so this is a no-op for
+        # legitimate input. Outer %,...,% remain the intended containment wildcards.
+        token = _escape_filter_scalar(issue_id.upper()).replace("%", "").replace("_", "")
+        filters.append(f'issue_ids like "%,{token},%"')
     return " && ".join(filters) if filters else None
 
 
@@ -743,6 +840,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
            sort_by: str = "hybrid",
            date_from: Optional[str] = None, date_to: Optional[str] = None,
            provider: Optional[str] = None, source_kind: Optional[str] = None,
+           issue_id: Optional[str] = None,
            db_path: Optional[str] = None) -> List[Dict]:
     """Hybrid search: vector similarity + FTS5 keyword search, merged with RRF.
 
@@ -755,6 +853,8 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     searches across all projects (cross-project search).
     date_from/date_to: ISO 8601 date strings (e.g. '2026-04-02') to restrict
     results to a time range. Timestamps are VARCHAR and sort lexicographically.
+    issue_id: when set, restricts results to turns tagged with that issue id
+    (e.g. 'SESF-25'); uppercased and matched as an exact comma-delimited token.
     """
     # Validate sort_by before any embedding/Milvus work (mirrors the
     # provider/source_kind entry-point validation below).
@@ -787,7 +887,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
             n, session_id=session_id, git_branch=git_branch,
             project_root=project_root, provider=provider,
             source_kind=source_kind, date_from=date_from, date_to=date_to,
-            db_path=db_path,
+            issue_id=issue_id, db_path=db_path,
         )
 
     # Expanded candidate pool for both engines
@@ -798,7 +898,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
 
     filter_expr = _build_milvus_filter(
         session_id, git_branch, project_root, provider, source_kind,
-        date_from, date_to,
+        date_from, date_to, issue_id,
     )
 
     search_params = {"metric_type": "COSINE"}
@@ -812,10 +912,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
             limit=fetch_n,
             filter=filter_expr,
             search_params=search_params,
-            output_fields=["document", "doc_id", "session_id", "transcript_file",
-                           "turn_index", "timestamp", "git_branch", "chunk_type",
-                           "project_root", "logical_session_id", "provider",
-                           "source_kind", "source_class", "source_id", "source_path"],
+            output_fields=_SEARCH_OUTPUT_FIELDS,
         )
 
     provider_defaults = default_provider_metadata()
@@ -841,7 +938,10 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     if date_from:
         fts_filters["timestamp_gte"] = (">=", date_from)
     if date_to:
-        fts_filters["timestamp_lte"] = ("<=", f"{date_to}T23:59:59")
+        # Strip any existing time component before appending end-of-day so the
+        # bound stays a valid ISO-8601 timestamp (date_to may arrive as a date
+        # or a full datetime).
+        fts_filters["timestamp_lte"] = ("<=", date_to.split("T")[0] + "T23:59:59")
     fts_results = _fts.search(query, n=fetch_n, filters=fts_filters or None, db_path=db_path)
 
     # --- Merge with RRF ---
@@ -887,6 +987,7 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
                     source_kind: Optional[str] = None,
                     date_from: Optional[str] = None,
                     date_to: Optional[str] = None,
+                    issue_id: Optional[str] = None,
                     db_path: Optional[str] = None) -> List[Dict]:
     """Query-less chronological listing: filter-only Milvus scan re-ranked by
     timestamp descending (SESF-16).
@@ -898,17 +999,14 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     """
     filter_expr = _build_milvus_filter(
         session_id, git_branch, project_root, provider, source_kind,
-        date_from, date_to,
+        date_from, date_to, issue_id,
     )
 
     with milvus_client(db_path) as client:
         rows = client.query(
             collection_name=COLLECTION_NAME,
             filter=filter_expr or "",
-            output_fields=["document", "doc_id", "session_id", "transcript_file",
-                           "turn_index", "timestamp", "git_branch", "chunk_type",
-                           "project_root", "logical_session_id", "provider",
-                           "source_kind", "source_class", "source_id", "source_path"],
+            output_fields=_SEARCH_OUTPUT_FIELDS,
             limit=RECENT_LISTING_SCAN_CAP,
         )
 
@@ -922,6 +1020,163 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     mapped = [_row_to_result(row, defaults, distance=1.0) for row in rows]
 
     return _rank_results(mapped, "recency", n)
+
+
+def _timeline_entry(row: Dict) -> Dict:
+    """Normalize a structured or FTS source row to the timeline entry shape.
+
+    Both sources are reduced to one shape so the merge/dedup/sort logic is
+    source-agnostic. ``text`` is read from any of ``text``/``document``/
+    ``content`` (the structured field uses ``document``; the FTS sidecar uses
+    ``content``). Each entry carries provider, session_id, timestamp, role and
+    chunk_type, text, doc_id, and issue_ids (Req 4.6).
+    """
+    role = row.get("role", row.get("chunk_type", ""))
+    return {
+        "doc_id": row.get("doc_id", ""),
+        "timestamp": row.get("timestamp", ""),
+        "provider": row.get("provider", ""),
+        "session_id": row.get("session_id", ""),
+        "role": role,
+        "chunk_type": row.get("chunk_type", role),
+        "text": row.get("text", row.get("document", row.get("content", ""))),
+        "issue_ids": row.get("issue_ids", ""),
+    }
+
+
+def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
+                       providers: Optional[List[str]] = None,
+                       date_from: Optional[str] = None,
+                       date_to: Optional[str] = None,
+                       db_path: Optional[str] = None) -> List[Dict]:
+    """Cross-harness, deduplicated, chronological feed of turns for an issue.
+
+    Unions a structured Milvus source (``issue_ids like "%,ID,%"`` drained
+    uncapped via ``_query_all``) with an FTS keyword fallback (a literal MATCH on
+    the issue token) so any un-tagged turn remains visible (Req 6.1). Both
+    sources are normalized to the same shape, merged and deduplicated by
+    ``doc_id`` (Req 4.2/6.2), filtered to an optional ``providers`` subset
+    (Req 4.4) and ``date_from``/``date_to`` bounds (Req 4.3), sorted oldest-first
+    by ``(timestamp asc, doc_id asc)`` (Req 4.1), and sliced to ``limit``
+    (Req 4.5). An FTS failure is non-fatal — the feed degrades to the structured
+    source with a logged warning.
+
+    Args:
+        issue_id: The tracker issue token (e.g. ``"SESF-25"``); uppercased and
+            escaped at this boundary before it reaches Milvus.
+        limit: Maximum number of entries to return (default
+            ``DEFAULT_TIMELINE_LIMIT``).
+        providers: Optional allow-list of provider names to keep.
+        date_from: Optional inclusive ISO-8601 lower bound on ``timestamp``.
+        date_to: Optional inclusive ISO-8601 upper bound on ``timestamp``.
+        db_path: Optional Milvus DB path override (also drives the FTS sidecar).
+
+    Returns:
+        A list of timeline entry dicts, oldest first; ``[]`` when nothing
+        references the issue (Req 4.7).
+    """
+    if not is_valid_issue_token(issue_id):
+        raise ValueError("issue_id must be a valid issue token like 'SESF-25'")
+    canonical = issue_id.strip().upper()
+    if limit < 1:
+        raise ValueError("limit must be a positive integer")
+    filter_expr = _build_milvus_filter(
+        None, None, None, None, None, date_from, date_to, issue_id=canonical,
+    )
+
+    output_fields = ["document", "doc_id", "session_id", "timestamp",
+                     "chunk_type", "provider", "issue_ids"]
+    structured = _query_all(output_fields, filter_expr=filter_expr, db_path=db_path)
+    if len(structured) > _TIMELINE_ROWS_WARN:
+        # Warn but do NOT truncate: an arbitrary-order cap would drop random
+        # (not newest) rows. Correct memory-bounded pagination is SESF-34.
+        logger.warning(
+            "issue timeline for %s matched %d structured rows (>%d) — large "
+            "in-memory set; narrow with date_from/date_to (bounded pagination: SESF-34)",
+            canonical, len(structured), _TIMELINE_ROWS_WARN,
+        )
+
+    # FTS keyword fallback (Req 6.1) for turns not yet tagged with issue_ids
+    # (e.g. pre-DEVS-39-reindex rows). Quote the token as an FTS5 phrase so the
+    # hyphen isn't parsed as query syntax (a bare ``SESF-25`` MATCH errors/misses);
+    # the boundary guard below enforces the exact issue token. Push the date
+    # bounds into the FTS query so the fetch window isn't spent on out-of-range
+    # rows (provider is a list, so it stays a post-filter below). Fetch a generous
+    # window (not just ``limit``) so the chronological slice isn't biased by BM25
+    # rank. Non-fatal — degrade to the structured source on any FTS error.
+    fts_filters: Dict = {}
+    if date_from:
+        fts_filters["timestamp_gte"] = (">=", date_from)
+    if date_to:
+        fts_filters["timestamp_lte"] = ("<=", date_to.split("T")[0] + "T23:59:59")
+    try:
+        fts_hits = _fts.search(
+            f'"{canonical}"', n=max(limit, _TIMELINE_FTS_FETCH_CAP),
+            filters=fts_filters or None, db_path=db_path,
+        )
+    except Exception as e:
+        logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s", canonical, e)
+        fts_hits = []
+
+    merged: Dict[str, Dict] = {}
+    for row in list(structured) + list(fts_hits):
+        entry = _timeline_entry(row)
+        merged.setdefault(entry["doc_id"], entry)
+
+    entries = list(merged.values())
+
+    if providers:
+        allowed = set(providers)
+        entries = [e for e in entries if e.get("provider") in allowed]
+    if date_from:
+        entries = [e for e in entries if e.get("timestamp", "") >= date_from]
+    if date_to:
+        upper = date_to.split("T")[0] + "T23:59:59"
+        entries = [e for e in entries if e.get("timestamp", "") <= upper]
+    # Boundary-aware FTS guard: keep only turns that actually reference the token
+    # (FTS may surface substring/word-stem noise). The structured source is
+    # already exact via the comma-wrapped LIKE.
+    token = f",{canonical},"
+    entries = [
+        e for e in entries
+        if token in (e.get("issue_ids") or "")
+        or _references_issue(e.get("text", ""), canonical)
+    ]
+
+    entries.sort(key=lambda e: (e.get("timestamp", ""), e.get("doc_id", "")))
+    return entries[:limit]
+
+
+def _references_issue(text: str, canonical: str) -> bool:
+    """Whether text contains the issue token as a whole word (case-insensitive).
+
+    Boundary-anchored so ``SESF-42`` does not match ``SESF-420`` (Req 6.3).
+    """
+    if not text:
+        return False
+    pattern = r"\b" + re.escape(canonical) + r"\b"
+    return re.search(pattern, text.upper()) is not None
+
+
+async def get_issue_timeline_async(issue_id: str, *,
+                                   limit: int = DEFAULT_TIMELINE_LIMIT,
+                                   providers: Optional[List[str]] = None,
+                                   date_from: Optional[str] = None,
+                                   date_to: Optional[str] = None,
+                                   db_path: Optional[str] = None) -> List[Dict]:
+    """Async wrapper over ``get_issue_timeline`` (mirrors ``search_async``).
+
+    Runs the synchronous core in the default executor. The timeline does no
+    embedding, so it does not require the MLX embed semaphore.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: get_issue_timeline(
+            issue_id, limit=limit, providers=providers,
+            date_from=date_from, date_to=date_to, db_path=db_path,
+        ),
+    )
 
 
 def _parse_timestamp_utc(ts: str) -> Optional[datetime]:
@@ -1282,7 +1537,7 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
         output_fields = ["doc_id", "document", "session_id", "git_branch",
                          "turn_index", "timestamp", "chunk_type", "project_root",
                          "logical_session_id", "provider", "source_kind",
-                         "source_class", "source_id", "source_path"]
+                         "source_class", "source_id", "source_path", "issue_ids"]
         backfill_defaults = default_provider_metadata()
         BATCH_FETCH = 100
         inserted = 0
@@ -1315,6 +1570,7 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
                             "timestamp": r.get("timestamp", ""),
                             "chunk_type": r.get("chunk_type", "turn"),
                             "project_root": r.get("project_root", ""),
+                            "issue_ids": r.get("issue_ids", ""),
                         }
                         for r in batch
                     ]

@@ -10,7 +10,12 @@ from mcp.server import Server
 from mcp import types
 
 import rag_engine
-from provider_adapters import LEGAL_PROVIDERS, LEGAL_SORT_BY, LEGAL_SOURCE_KINDS
+from provider_adapters import (
+    LEGAL_PROVIDERS,
+    LEGAL_SORT_BY,
+    LEGAL_SOURCE_KINDS,
+    is_valid_issue_token,
+)
 
 
 # --- Project context ---
@@ -150,6 +155,46 @@ def format_stats(stats: dict, db_path: str) -> str:
     return "\n".join(lines)
 
 
+def format_timeline(entries: list[dict]) -> str:
+    """Format an issue timeline feed as markdown (oldest first).
+
+    Renders each entry's matched ``doc_id`` alongside provider/session/timestamp
+    metadata so the rendered text references every turn in the feed (the MCP
+    transport contract; mirrors the HTTP route's structured feed).
+    """
+    if not entries:
+        return "No turns reference that issue."
+
+    output = []
+    for i, e in enumerate(entries, 1):
+        ts = (e.get("timestamp", "") or "")[:19]
+        provider = e.get("provider", "")
+        session_id = e.get("session_id", "")
+        role = e.get("role", e.get("chunk_type", ""))
+        doc_id = e.get("doc_id", "")
+
+        header_parts = [f"**{i}.**"]
+        if ts:
+            header_parts.append(f"({ts})")
+        if provider:
+            header_parts.append(f"provider:{provider}")
+        if session_id:
+            header_parts.append(f"session:{session_id}")
+        if role:
+            header_parts.append(f"role:{role}")
+        if doc_id:
+            header_parts.append(f"doc_id:{doc_id}")
+
+        output.append(" ".join(header_parts))
+        output.append("")
+        output.append(e.get("text", "") or e.get("content", ""))
+        output.append("")
+        output.append("---")
+        output.append("")
+
+    return "\n".join(output)
+
+
 # --- Tool registration ---
 
 
@@ -196,6 +241,10 @@ def build_search_all_sessions_schema() -> dict:
                 "type": "string",
                 "description": "ISO date upper bound, inclusive (e.g., '2026-04-02'). Only returns turns on or before this date.",
             },
+            "issue_id": {
+                "type": "string",
+                "description": "Optional issue id filter (e.g., 'SESF-25'). Restricts results to turns tagged with that issue; case-insensitive.",
+            },
         },
         "required": [],
     }
@@ -239,6 +288,10 @@ def register_tools(server: Server):
                             "enum": ["relevance", "recency", "hybrid"],
                             "description": "Ranking strategy: 'relevance' (pure semantic), 'recency' (newest first), or 'hybrid' (blended, default).",
                             "default": "hybrid",
+                        },
+                        "issue_id": {
+                            "type": "string",
+                            "description": "Optional issue id filter (e.g., 'SESF-25'). Restricts results to turns tagged with that issue; case-insensitive.",
                         },
                     },
                     "required": [],
@@ -295,6 +348,43 @@ def register_tools(server: Server):
                 },
             ),
             types.Tool(
+                name="get_issue_timeline",
+                description=(
+                    "Return a deduplicated, chronological (oldest-first) cross-harness "
+                    "feed of every conversation turn that references a tracker issue "
+                    "(e.g. 'SESF-25'). Unions the structured issue_ids field with an FTS "
+                    "keyword fallback so un-tagged turns remain visible. Optionally filter "
+                    "by provider and date range, and cap the feed length with limit."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "issue_id": {
+                            "type": "string",
+                            "description": "Tracker issue token to build the timeline for (e.g. 'SESF-25'); case-insensitive.",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of turns to return (default: 50).",
+                            "default": 50,
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Optional provider filter (e.g. codex, opencode, antigravity_cli). Restricts the feed to that single provider.",
+                        },
+                        "date_from": {
+                            "type": "string",
+                            "description": "ISO date lower bound, inclusive (e.g. '2026-04-02').",
+                        },
+                        "date_to": {
+                            "type": "string",
+                            "description": "ISO date upper bound, inclusive (e.g. '2026-04-30').",
+                        },
+                    },
+                    "required": ["issue_id"],
+                },
+            ),
+            types.Tool(
                 name="cleanup_sessions",
                 description=(
                     "Delete old session data from the index. "
@@ -337,12 +427,18 @@ def register_tools(server: Server):
                 err = _validate_enum_arg("sort_by", sort_by_arg, LEGAL_SORT_BY)
                 if err:
                     return [err]
+                issue_id_arg = arguments.get("issue_id")
+                if issue_id_arg is not None and not is_valid_issue_token(issue_id_arg):
+                    return [types.TextContent(
+                        type="text",
+                        text="issue_id must be a valid issue token like SESF-25")]
                 results = rag_engine.search(
                     arguments.get("query") or "",
                     arguments.get("n", 5),
                     session_id=session_id,
                     project_root=current_project,
                     sort_by=sort_by_arg,
+                    issue_id=issue_id_arg,
                     db_path=db,
                 )
                 return [types.TextContent(type="text", text=format_results(results))]
@@ -368,6 +464,12 @@ def register_tools(server: Server):
                     if err:
                         return [err]
 
+                issue_id_arg = arguments.get("issue_id")
+                if issue_id_arg is not None and not is_valid_issue_token(issue_id_arg):
+                    return [types.TextContent(
+                        type="text",
+                        text="issue_id must be a valid issue token like SESF-25")]
+
                 results = rag_engine.search(
                     arguments.get("query") or "",
                     arguments.get("n", 10),
@@ -378,6 +480,7 @@ def register_tools(server: Server):
                     date_to=arguments.get("date_to"),
                     provider=arguments.get("provider"),
                     source_kind=arguments.get("source_kind"),
+                    issue_id=issue_id_arg,
                     db_path=db,
                 )
                 return [types.TextContent(type="text", text=format_results(results))]
@@ -397,6 +500,29 @@ def register_tools(server: Server):
                     db_path=db,
                 )
                 return [types.TextContent(type="text", text=format_stats(stats, db))]
+
+            elif name == "get_issue_timeline":
+                if not is_valid_issue_token(arguments.get("issue_id")):
+                    return [types.TextContent(
+                        type="text",
+                        text="issue_id must be a valid issue token like SESF-25")]
+                provider = arguments.get("provider")
+                err = _validate_enum_arg("provider", provider, LEGAL_PROVIDERS)
+                if err:
+                    return [err]
+                limit = arguments.get("limit", 50)
+                if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+                    return [types.TextContent(
+                        type="text", text="limit must be a positive integer")]
+                entries = await rag_engine.get_issue_timeline_async(
+                    arguments["issue_id"],
+                    limit=limit,
+                    providers=[provider] if provider else None,
+                    date_from=arguments.get("date_from"),
+                    date_to=arguments.get("date_to"),
+                    db_path=db,
+                )
+                return [types.TextContent(type="text", text=format_timeline(entries))]
 
             elif name == "cleanup_sessions":
                 max_age = arguments.get("max_age_days")
