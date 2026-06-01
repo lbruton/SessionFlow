@@ -490,9 +490,13 @@ def register_tools(server: Server):
                 err = _validate_enum_arg("provider", provider, LEGAL_PROVIDERS)
                 if err:
                     return [err]
+                limit = arguments.get("limit", 50)
+                if not isinstance(limit, int) or limit < 1:
+                    return [types.TextContent(
+                        type="text", text="limit must be a positive integer")]
                 entries = await rag_engine.get_issue_timeline_async(
                     arguments["issue_id"],
-                    limit=arguments.get("limit", 50),
+                    limit=limit,
                     providers=[provider] if provider else None,
                     date_from=arguments.get("date_from"),
                     date_to=arguments.get("date_to"),

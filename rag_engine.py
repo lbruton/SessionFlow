@@ -70,6 +70,22 @@ _ISSUE_ID_PREFIX_DENYLIST = frozenset(
 _ISSUE_ID_FIELD_MAX = 4096
 # Default number of timeline entries returned by get_issue_timeline (SESF-25/26).
 DEFAULT_TIMELINE_LIMIT = 50
+# Generous FTS fetch window for the timeline fallback so the chronological slice
+# isn't biased by BM25 rank (the older matching turn may be outside the top-N).
+_TIMELINE_FTS_FETCH_CAP = 500
+# Observability threshold: warn if a single issue drains an unexpectedly large
+# structured result set into memory (OOM risk).
+_TIMELINE_MAX_ROWS_WARN = 50000
+
+# Shared Milvus output_fields for vector search and recency listing. Includes
+# ``issue_ids`` so SESF-25 issue tags propagate through ``_row_to_result``.
+_SEARCH_OUTPUT_FIELDS = [
+    "document", "doc_id", "session_id", "transcript_file",
+    "turn_index", "timestamp", "git_branch", "chunk_type",
+    "project_root", "logical_session_id", "provider",
+    "source_kind", "source_class", "source_id", "source_path",
+    "issue_ids",
+]
 
 
 def _extract_issue_ids(text: str) -> str:
@@ -90,6 +106,8 @@ def _extract_issue_ids(text: str) -> str:
         characters so a Milvus insert cannot overflow the storage field; if the
         next id would exceed the cap, extraction stops and logs one warning.
     """
+    if not text or not isinstance(text, str):
+        return ""
     seen: List[str] = []
     seen_set: set[str] = set()
     for match in re.finditer(r"\b[A-Z][A-Z0-9]+-\d+\b", text.upper()):
@@ -880,10 +898,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
             limit=fetch_n,
             filter=filter_expr,
             search_params=search_params,
-            output_fields=["document", "doc_id", "session_id", "transcript_file",
-                           "turn_index", "timestamp", "git_branch", "chunk_type",
-                           "project_root", "logical_session_id", "provider",
-                           "source_kind", "source_class", "source_id", "source_path"],
+            output_fields=_SEARCH_OUTPUT_FIELDS,
         )
 
     provider_defaults = default_provider_metadata()
@@ -974,10 +989,7 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
         rows = client.query(
             collection_name=COLLECTION_NAME,
             filter=filter_expr or "",
-            output_fields=["document", "doc_id", "session_id", "transcript_file",
-                           "turn_index", "timestamp", "git_branch", "chunk_type",
-                           "project_root", "logical_session_id", "provider",
-                           "source_kind", "source_class", "source_id", "source_path"],
+            output_fields=_SEARCH_OUTPUT_FIELDS,
             limit=RECENT_LISTING_SCAN_CAP,
         )
 
@@ -1046,7 +1058,11 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         A list of timeline entry dicts, oldest first; ``[]`` when nothing
         references the issue (Req 4.7).
     """
-    canonical = issue_id.upper()
+    canonical = issue_id.strip().upper() if issue_id else ""
+    if not canonical:
+        raise ValueError("issue_id must be a non-empty token like 'SESF-25'")
+    if limit < 1:
+        raise ValueError("limit must be a positive integer")
     filter_expr = _build_milvus_filter(
         None, None, None, None, None, date_from, date_to, issue_id=canonical,
     )
@@ -1054,11 +1070,23 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     output_fields = ["document", "doc_id", "session_id", "timestamp",
                      "chunk_type", "provider", "issue_ids"]
     structured = _query_all(output_fields, filter_expr=filter_expr, db_path=db_path)
+    if len(structured) > _TIMELINE_MAX_ROWS_WARN:
+        logger.warning(
+            "issue timeline for %s loaded %d structured rows into memory (>%d) — "
+            "possible OOM risk",
+            canonical, len(structured), _TIMELINE_MAX_ROWS_WARN,
+        )
 
-    # FTS keyword fallback (Req 6.1): boundary-aware literal match on the token.
-    # Non-fatal — degrade to the structured source on any FTS error (structure.md).
+    # FTS keyword fallback (Req 6.1) for turns not yet tagged with issue_ids
+    # (e.g. pre-DEVS-39-reindex rows). Quote the token as an FTS5 phrase so the
+    # hyphen isn't parsed as query syntax (a bare ``SESF-25`` MATCH errors/misses);
+    # the boundary guard below enforces the exact issue token. Fetch a generous
+    # window (not just ``limit``) so the chronological slice isn't biased by BM25
+    # rank. Non-fatal — degrade to the structured source on any FTS error.
     try:
-        fts_hits = _fts.search(canonical, n=limit, db_path=db_path)
+        fts_hits = _fts.search(
+            f'"{canonical}"', n=max(limit, _TIMELINE_FTS_FETCH_CAP), db_path=db_path,
+        )
     except Exception as e:
         logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s", canonical, e)
         fts_hits = []

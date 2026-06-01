@@ -35,6 +35,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 import rag_engine
 import transcript_parser
 import file_watcher
+from provider_adapters import LEGAL_PROVIDERS
 from backfill_manager import BackfillManager
 from embedding_control import EmbeddingIdentity, get_embedding_budget
 from provider_antigravity import AntigravityAdapter
@@ -617,7 +618,7 @@ async def timeline_endpoint(request: Request) -> JSONResponse:
     """
     params = request.query_params
     issue_id = params.get("issue_id")
-    if not issue_id:
+    if not issue_id or not issue_id.strip():
         return JSONResponse({"error": "issue_id is required"}, status_code=400)
 
     raw_limit = params.get("limit")
@@ -627,8 +628,16 @@ async def timeline_endpoint(request: Request) -> JSONResponse:
             limit = int(raw_limit)
         except (TypeError, ValueError):
             return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        if limit < 1:
+            return JSONResponse({"error": "limit must be a positive integer"}, status_code=400)
 
     provider = params.get("provider")
+    if provider and provider not in LEGAL_PROVIDERS:
+        allowed = ", ".join(sorted(LEGAL_PROVIDERS))
+        return JSONResponse(
+            {"error": f"invalid provider: {provider}; expected one of: {allowed}"},
+            status_code=400,
+        )
     entries = await rag_engine.get_issue_timeline_async(
         issue_id,
         limit=limit,

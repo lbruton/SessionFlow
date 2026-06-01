@@ -6,6 +6,8 @@ the FTS record dict, uniformly across every provider adapter's turns.
 """
 
 import importlib
+import os
+import tempfile
 from contextlib import contextmanager
 
 import pytest
@@ -69,7 +71,7 @@ def _capture_add_turns(monkeypatch, turns):
     )
     monkeypatch.setattr(rag_engine._fts, "close_ephemeral", lambda conn: None)
 
-    rag_engine.add_turns(turns, db_path="/tmp/sessionflow-ingest-test.db")
+    rag_engine.add_turns(turns, db_path=os.path.join(tempfile.gettempdir(), "sessionflow-ingest-test.db"))
     return client.inserted, fts_records
 
 
@@ -171,7 +173,7 @@ def test_backfill_fts_rehydrates_issue_ids(monkeypatch):
     )
     monkeypatch.setattr(rag_engine._fts, "close_ephemeral", lambda conn: None)
 
-    inserted = rag_engine.backfill_fts(db_path="/tmp/sessionflow-backfill-test.db")
+    inserted = rag_engine.backfill_fts(db_path=os.path.join(tempfile.gettempdir(), "sessionflow-backfill-test.db"))
 
     assert inserted == 1
     assert fts_records

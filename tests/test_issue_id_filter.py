@@ -19,13 +19,15 @@ a real (non-empty) query through ``rag_engine.search`` with a fake client.
 from __future__ import annotations
 
 import importlib
+import os
+import tempfile
 from contextlib import contextmanager
 
 import pytest
 
 rag_engine = importlib.import_module("rag_engine")
 
-DB = "/tmp/sessionflow-issueid-test.db"
+DB = os.path.join(tempfile.gettempdir(), "sessionflow-issueid-test.db")
 
 
 class _CapturingClient:

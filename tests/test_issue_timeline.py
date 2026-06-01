@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import os
+import tempfile
 from contextlib import contextmanager
 
 import pytest
@@ -66,7 +68,7 @@ def _patch_sources(monkeypatch, structured, fts):
     monkeypatch.setattr(rag_engine, "milvus_client", _fake_client)
 
 
-DB = "/tmp/sessionflow-timeline-test.db"
+DB = os.path.join(tempfile.gettempdir(), "sessionflow-timeline-test.db")
 
 
 # ---------------------------------------------------------------------------
