@@ -491,7 +491,7 @@ def register_tools(server: Server):
                 if err:
                     return [err]
                 limit = arguments.get("limit", 50)
-                if not isinstance(limit, int) or limit < 1:
+                if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
                     return [types.TextContent(
                         type="text", text="limit must be a positive integer")]
                 entries = await rag_engine.get_issue_timeline_async(
