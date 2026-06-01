@@ -73,9 +73,10 @@ DEFAULT_TIMELINE_LIMIT = 50
 # Generous FTS fetch window for the timeline fallback so the chronological slice
 # isn't biased by BM25 rank (the older matching turn may be outside the top-N).
 _TIMELINE_FTS_FETCH_CAP = 500
-# Observability threshold: warn if a single issue drains an unexpectedly large
-# structured result set into memory (OOM risk).
-_TIMELINE_MAX_ROWS_WARN = 50000
+# Hard cap on structured rows drained into memory for one issue timeline (OOM
+# safety valve). Far above any realistic per-issue turn count; if hit, the feed
+# is truncated and a warning is logged.
+_TIMELINE_MAX_ROWS = 50000
 
 # Shared Milvus output_fields for vector search and recency listing. Includes
 # ``issue_ids`` so SESF-25 issue tags propagate through ``_row_to_result``.
@@ -91,8 +92,8 @@ _SEARCH_OUTPUT_FIELDS = [
 def _extract_issue_ids(text: str) -> str:
     """Extract issue references (e.g. ``SESF-25``) from a turn's text.
 
-    Uppercases the input, matches the issue-token regex
-    ``\\b[A-Z][A-Z0-9]+-\\d+\\b``, drops technical-standard prefixes in
+    Matches the issue-token regex ``\\b[A-Z][A-Z0-9]+-\\d+\\b`` case-insensitively
+    (canonicalizing matches to upper case), drops technical-standard prefixes in
     ``_ISSUE_ID_PREFIX_DENYLIST`` (UTF-8, SHA-256, HTTP-2, ...), and
     deduplicates the survivors in first-seen order.
 
@@ -110,8 +111,10 @@ def _extract_issue_ids(text: str) -> str:
         return ""
     seen: List[str] = []
     seen_set: set[str] = set()
-    for match in re.finditer(r"\b[A-Z][A-Z0-9]+-\d+\b", text.upper()):
-        token = match.group(0)
+    # Match case-insensitively and canonicalize only the matched tokens, rather
+    # than allocating an uppercased copy of the whole (possibly large) turn text.
+    for match in re.finditer(r"\b[A-Z][A-Z0-9]+-\d+\b", text, re.IGNORECASE):
+        token = match.group(0).upper()
         prefix = token.split("-", 1)[0]
         if prefix in _ISSUE_ID_PREFIX_DENYLIST:
             continue
@@ -924,7 +927,10 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     if date_from:
         fts_filters["timestamp_gte"] = (">=", date_from)
     if date_to:
-        fts_filters["timestamp_lte"] = ("<=", f"{date_to}T23:59:59")
+        # Strip any existing time component before appending end-of-day so the
+        # bound stays a valid ISO-8601 timestamp (date_to may arrive as a date
+        # or a full datetime).
+        fts_filters["timestamp_lte"] = ("<=", date_to.split("T")[0] + "T23:59:59")
     fts_results = _fts.search(query, n=fetch_n, filters=fts_filters or None, db_path=db_path)
 
     # --- Merge with RRF ---
@@ -1069,23 +1075,34 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
 
     output_fields = ["document", "doc_id", "session_id", "timestamp",
                      "chunk_type", "provider", "issue_ids"]
-    structured = _query_all(output_fields, filter_expr=filter_expr, db_path=db_path)
-    if len(structured) > _TIMELINE_MAX_ROWS_WARN:
+    structured = _query_all(
+        output_fields, filter_expr=filter_expr, db_path=db_path,
+        max_rows=_TIMELINE_MAX_ROWS,
+    )
+    if len(structured) >= _TIMELINE_MAX_ROWS:
         logger.warning(
-            "issue timeline for %s loaded %d structured rows into memory (>%d) — "
-            "possible OOM risk",
-            canonical, len(structured), _TIMELINE_MAX_ROWS_WARN,
+            "issue timeline for %s hit the %d-row structured cap — older turns "
+            "may be truncated from the feed",
+            canonical, _TIMELINE_MAX_ROWS,
         )
 
     # FTS keyword fallback (Req 6.1) for turns not yet tagged with issue_ids
     # (e.g. pre-DEVS-39-reindex rows). Quote the token as an FTS5 phrase so the
     # hyphen isn't parsed as query syntax (a bare ``SESF-25`` MATCH errors/misses);
-    # the boundary guard below enforces the exact issue token. Fetch a generous
+    # the boundary guard below enforces the exact issue token. Push the date
+    # bounds into the FTS query so the fetch window isn't spent on out-of-range
+    # rows (provider is a list, so it stays a post-filter below). Fetch a generous
     # window (not just ``limit``) so the chronological slice isn't biased by BM25
     # rank. Non-fatal — degrade to the structured source on any FTS error.
+    fts_filters: Dict = {}
+    if date_from:
+        fts_filters["timestamp_gte"] = (">=", date_from)
+    if date_to:
+        fts_filters["timestamp_lte"] = ("<=", date_to.split("T")[0] + "T23:59:59")
     try:
         fts_hits = _fts.search(
-            f'"{canonical}"', n=max(limit, _TIMELINE_FTS_FETCH_CAP), db_path=db_path,
+            f'"{canonical}"', n=max(limit, _TIMELINE_FTS_FETCH_CAP),
+            filters=fts_filters or None, db_path=db_path,
         )
     except Exception as e:
         logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s", canonical, e)
@@ -1381,15 +1398,24 @@ def _query_batches(output_fields: list, batch_size: int = 1000,
 
 def _query_all(output_fields: list, batch_size: int = 1000,
                filter_expr: Optional[str] = None,
-               db_path: Optional[str] = None) -> list:
+               db_path: Optional[str] = None,
+               max_rows: Optional[int] = None) -> list:
     """Query all rows via Milvus query_iterator. Optional filter expression.
 
     Keeps the public list-returning behavior for callers that need aggregate
     results while allowing streaming callers to use _query_batches directly.
+
+    Args:
+        max_rows: Optional hard cap. When set, stops draining once this many
+            rows are collected (truncating the last batch) so an unbounded
+            result set cannot exhaust memory. ``None`` (default) preserves the
+            original unbounded behavior for existing callers.
     """
     all_results = []
     for batch in _query_batches(output_fields, batch_size, filter_expr, db_path):
         all_results.extend(batch)
+        if max_rows is not None and len(all_results) >= max_rows:
+            return all_results[:max_rows]
     return all_results
 
 
