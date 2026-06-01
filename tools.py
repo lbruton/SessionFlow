@@ -427,13 +427,18 @@ def register_tools(server: Server):
                 err = _validate_enum_arg("sort_by", sort_by_arg, LEGAL_SORT_BY)
                 if err:
                     return [err]
+                issue_id_arg = arguments.get("issue_id")
+                if issue_id_arg is not None and not is_valid_issue_token(issue_id_arg):
+                    return [types.TextContent(
+                        type="text",
+                        text="issue_id must be a valid issue token like SESF-25")]
                 results = rag_engine.search(
                     arguments.get("query") or "",
                     arguments.get("n", 5),
                     session_id=session_id,
                     project_root=current_project,
                     sort_by=sort_by_arg,
-                    issue_id=arguments.get("issue_id"),
+                    issue_id=issue_id_arg,
                     db_path=db,
                 )
                 return [types.TextContent(type="text", text=format_results(results))]
@@ -459,6 +464,12 @@ def register_tools(server: Server):
                     if err:
                         return [err]
 
+                issue_id_arg = arguments.get("issue_id")
+                if issue_id_arg is not None and not is_valid_issue_token(issue_id_arg):
+                    return [types.TextContent(
+                        type="text",
+                        text="issue_id must be a valid issue token like SESF-25")]
+
                 results = rag_engine.search(
                     arguments.get("query") or "",
                     arguments.get("n", 10),
@@ -469,7 +480,7 @@ def register_tools(server: Server):
                     date_to=arguments.get("date_to"),
                     provider=arguments.get("provider"),
                     source_kind=arguments.get("source_kind"),
-                    issue_id=arguments.get("issue_id"),
+                    issue_id=issue_id_arg,
                     db_path=db,
                 )
                 return [types.TextContent(type="text", text=format_results(results))]
