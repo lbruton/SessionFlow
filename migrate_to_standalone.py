@@ -142,7 +142,14 @@ def verify(source: MilvusClient, target: MilvusClient):
     return source_count, target_count
 
 
-def main():
+def main() -> None:
+    """Migrate SessionFlow from Milvus Lite to Standalone.
+
+    Parses the command-line arguments --target (destination Standalone URI),
+    --source (Milvus Lite DB path), and --dry-run (report counts without
+    writing), then exports vectors from Lite and bulk-inserts them into the
+    target. Returns nothing (implicit None).
+    """
     parser = argparse.ArgumentParser(description="Migrate SessionFlow from Milvus Lite to Standalone")
     parser.add_argument("--target", required=True, help="Standalone URI (e.g. http://192.168.1.83:19530)")
     parser.add_argument("--source", default=LITE_DB, help=f"Lite DB path (default: {LITE_DB})")
