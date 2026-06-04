@@ -9,7 +9,7 @@ are copied as-is.
 The collection is created with an HNSW index (vs FLAT on Lite) for O(log n) search.
 
 Usage:
-    python migrate_to_standalone.py --target http://192.168.1.81:19530 [--dry-run]
+    python migrate_to_standalone.py --target http://192.168.1.83:19530 [--dry-run]
 
 Requirements:
     - SessionFlow server must be STOPPED (Milvus Lite is single-process)
@@ -144,7 +144,7 @@ def verify(source: MilvusClient, target: MilvusClient):
 
 def main():
     parser = argparse.ArgumentParser(description="Migrate SessionFlow from Milvus Lite to Standalone")
-    parser.add_argument("--target", required=True, help="Standalone URI (e.g. http://192.168.1.81:19530)")
+    parser.add_argument("--target", required=True, help="Standalone URI (e.g. http://192.168.1.83:19530)")
     parser.add_argument("--source", default=LITE_DB, help=f"Lite DB path (default: {LITE_DB})")
     parser.add_argument("--dry-run", action="store_true", help="Report counts without writing")
     args = parser.parse_args()

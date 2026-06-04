@@ -13,7 +13,7 @@ Semantic search over Claude Code session transcripts. Independent project, origi
 ## Tech Stack
 
 - Python 3.13, venv at `./venv/`
-- Milvus Standalone at `192.168.1.81:19530` via `SESSIONFLOW_MILVUS_URI` (fallback: Milvus Lite at `~/.sessionflow/milvus.db`)
+- Milvus Standalone at `192.168.1.83:19530` via `SESSIONFLOW_MILVUS_URI` (fallback: Milvus Lite at `~/.sessionflow/milvus.db`)
 - HNSW index (COSINE, M=16, efConstruction=256) on Standalone
 - mlx-embeddings with EmbeddingGemma-300M (Apple Silicon Metal)
 - HTTP MCP server on port 7102 (Starlette + Uvicorn)
