@@ -35,7 +35,7 @@ _Avoid_: log, session file
 ## Storage & Indexing
 
 **Milvus Standalone**:
-The primary vector store at `192.168.1.81:19530`; Milvus Lite is the local fallback.
+The primary vector store at `192.168.1.83:19530`; Milvus Lite is the local fallback.
 _Avoid_: the database, vector db
 
 **FTS Sidecar**:
