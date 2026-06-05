@@ -196,6 +196,18 @@ def test_fts_path_omits_issue_id_filter_when_unset(monkeypatch):
     assert "issue_ids" not in fts_filters
 
 
+def test_issue_id_surrounding_whitespace_is_stripped(monkeypatch):
+    # SESF-32 follow-up — a padded id like " sesf-25 " must normalize to the same
+    # token on both halves, not a never-matching "%, SESF-25 ,%".
+    client = _CapturingClient()
+    cap = _patch_search_capturing_fts(monkeypatch, client)
+    rag_engine.search("real query", issue_id="  sesf-25  ", db_path=DB)
+    assert cap.calls
+    fts_filters = cap.calls[0]["filters"] or {}
+    assert fts_filters.get("issue_ids") == ("like", "%,SESF-25,%")
+    assert 'issue_ids like "%,SESF-25,%"' in (client.search_calls[0].get("filter") or "")
+
+
 def test_fts_index_like_filter_excludes_untagged_rows(tmp_path):
     # SESF-32 — the containment filter the fix plumbs through actually excludes
     # untagged rows at the SQLite layer (guards the (op, operand) mechanism).
@@ -208,9 +220,12 @@ def test_fts_index_like_filter_excludes_untagged_rows(tmp_path):
     ])
     db_path = str(tmp_path / "milvus.db")
     conn = fts.connection(db_path)
-    fts.insert(conn, [
-        {"doc_id": "tagged", "content": "auth token refresh", "issue_ids": ",SESF-25,"},
-        {"doc_id": "untagged", "content": "auth token refresh", "issue_ids": ""},
-    ])
-    hits = fts.search("auth", filters={"issue_ids": ("like", "%,SESF-25,%")}, db_path=db_path)
-    assert {h["doc_id"] for h in hits} == {"tagged"}
+    try:
+        fts.insert(conn, [
+            {"doc_id": "tagged", "content": "auth token refresh", "issue_ids": ",SESF-25,"},
+            {"doc_id": "untagged", "content": "auth token refresh", "issue_ids": ""},
+        ])
+        hits = fts.search("auth", filters={"issue_ids": ("like", "%,SESF-25,%")}, db_path=db_path)
+        assert {h["doc_id"] for h in hits} == {"tagged"}
+    finally:
+        fts.close_ephemeral(conn)

@@ -764,15 +764,21 @@ def _escape_filter_scalar(value: str) -> str:
 
 
 def _issue_id_containment_token(issue_id: str) -> str:
-    """Uppercase an issue id and strip LIKE wildcards for a containment match.
+    """Normalize an issue id into a safe ``%,TOKEN,%`` containment token.
 
     The token is matched as ``%,TOKEN,%`` against the comma-wrapped ``issue_ids``
-    field. Stripping ``%``/``_`` stops a malformed id from broadening the match
-    into a wildcard scan; a valid token (``[A-Z][A-Z0-9]+-\\d+``) never contains
-    them, so this is a no-op for legitimate input. Shared by the Milvus filter
-    and the FTS filter so both halves of hybrid search stay in lockstep (SESF-32).
+    field. Surrounding whitespace is stripped so ``" sesf-25 "`` can't yield a
+    never-matching ``%, SESF-25 ,%``; ``%``/``_`` are stripped so a malformed id
+    can't broaden the match into a wildcard scan; a valid token
+    (``[A-Z][A-Z0-9]+-\\d+``) contains none of these, so this is a no-op for
+    legitimate input. NUL bytes are rejected outright (mirroring
+    ``_escape_filter_scalar``) since the FTS path consumes this token without
+    going through that guard. Shared by the Milvus filter and the FTS filter so
+    both halves of hybrid search stay in lockstep (SESF-32).
     """
-    return issue_id.upper().replace("%", "").replace("_", "")
+    if "\x00" in issue_id:
+        raise ValueError("issue_id must not contain NUL bytes")
+    return issue_id.strip().upper().replace("%", "").replace("_", "")
 
 
 def _row_to_result(entity: Dict, defaults: Dict, distance: float = 1.0) -> Dict:
