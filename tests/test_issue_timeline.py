@@ -213,10 +213,11 @@ def test_oldest_n_collector_robust_to_zero_limit_and_null_fields():
     assert zero.result() == []
 
     collector = rag_engine._OldestN(3)
-    collector.add({"doc_id": None, "timestamp": None})  # null fields, must not raise
+    collector.add({"doc_id": None, "timestamp": None})        # null fields, must not raise
+    collector.add({"doc_id": 12345, "timestamp": 1700000000})  # truthy non-str fields, must not raise
     collector.add(_entry("b", "2026-05-02T10:00:00"))
     assert len(collector) <= 3
-    assert "b" in [r.get("doc_id") for r in collector.result()]  # sort survives the null entry
+    assert "b" in [r.get("doc_id") for r in collector.result()]  # sort survives null + non-str entries
 
 
 def test_timeline_retains_oldest_n_from_shuffled_large_input(monkeypatch):

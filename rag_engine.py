@@ -1117,12 +1117,13 @@ class _OldestN:
         No-op when its ``doc_id`` is already retained (dedup) or when the set is
         full and the entry is not strictly older than the newest currently kept.
         """
-        # Coerce to str: a present-but-null timestamp/doc_id (FTS rows may carry
-        # SQLite NULLs) would otherwise raise TypeError in the key comparison.
-        doc_id = entry.get("doc_id") or ""
+        # Coerce to str so a null (FTS rows may carry SQLite NULLs) or any
+        # non-str field can't raise TypeError in the heap-key comparison: `or ""`
+        # maps falsy/None to "", str() handles a truthy non-str (e.g. int epoch).
+        doc_id = str(entry.get("doc_id") or "")
         if doc_id in self._ids:
             return
-        key = (entry.get("timestamp") or "", doc_id)
+        key = (str(entry.get("timestamp") or ""), doc_id)
         item = (_ReverseKey(key), doc_id, entry)
         if len(self._heap) < self._limit:
             heapq.heappush(self._heap, item)
@@ -1140,7 +1141,7 @@ class _OldestN:
         """Return the retained entries sorted oldest-first by (timestamp, doc_id)."""
         return sorted(
             (entry for _, _, entry in self._heap),
-            key=lambda e: (e.get("timestamp") or "", e.get("doc_id") or ""),
+            key=lambda e: (str(e.get("timestamp") or ""), str(e.get("doc_id") or "")),
         )
 
 
@@ -1200,7 +1201,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         """Whether one entry clears the provider, date-bound and issue-token guards."""
         if allowed is not None and entry.get("provider") not in allowed:  # Req 4.4
             return False
-        ts = entry.get("timestamp") or ""  # coerce null → "" so date compares can't TypeError
+        ts = str(entry.get("timestamp") or "")  # coerce null/non-str so date compares can't TypeError
         if date_from and ts < date_from:  # Req 4.3 lower bound
             return False
         if upper and ts > upper:          # Req 4.3 upper bound
