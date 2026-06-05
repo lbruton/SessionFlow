@@ -763,6 +763,24 @@ def _escape_filter_scalar(value: str) -> str:
     return value.replace('"', '""')
 
 
+def _issue_id_containment_token(issue_id: str) -> str:
+    """Normalize an issue id into a safe ``%,TOKEN,%`` containment token.
+
+    The token is matched as ``%,TOKEN,%`` against the comma-wrapped ``issue_ids``
+    field. Surrounding whitespace is stripped so ``" sesf-25 "`` can't yield a
+    never-matching ``%, SESF-25 ,%``; ``%``/``_`` are stripped so a malformed id
+    can't broaden the match into a wildcard scan; a valid token
+    (``[A-Z][A-Z0-9]+-\\d+``) contains none of these, so this is a no-op for
+    legitimate input. NUL bytes are rejected outright (mirroring
+    ``_escape_filter_scalar``) since the FTS path consumes this token without
+    going through that guard. Shared by the Milvus filter and the FTS filter so
+    both halves of hybrid search stay in lockstep (SESF-32).
+    """
+    if "\x00" in issue_id:
+        raise ValueError("issue_id must not contain NUL bytes")
+    return issue_id.strip().upper().replace("%", "").replace("_", "")
+
+
 def _row_to_result(entity: Dict, defaults: Dict, distance: float = 1.0) -> Dict:
     """Map a Milvus entity dict to the standard internal result format.
 
@@ -826,11 +844,10 @@ def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
         date_to_date = date_to.split("T")[0]
         filters.append(f'timestamp <= "{_escape_filter_scalar(date_to_date)}T23:59:59"')
     if issue_id:
-        # Neutralize LIKE metacharacters (%/_) in the token so a malformed
-        # issue_id can't broaden the match into a wildcard scan; a valid token
-        # (``[A-Z][A-Z0-9]+-\d+``) never contains them, so this is a no-op for
-        # legitimate input. Outer %,...,% remain the intended containment wildcards.
-        token = _escape_filter_scalar(issue_id.upper()).replace("%", "").replace("_", "")
+        # Outer %,...,% are the intended containment wildcards; the token itself
+        # is wildcard-stripped (see _issue_id_containment_token) then escaped for
+        # the Milvus double-quoted literal.
+        token = _escape_filter_scalar(_issue_id_containment_token(issue_id))
         filters.append(f'issue_ids like "%,{token},%"')
     return " && ".join(filters) if filters else None
 
@@ -942,6 +959,12 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         # bound stays a valid ISO-8601 timestamp (date_to may arrive as a date
         # or a full datetime).
         fts_filters["timestamp_lte"] = ("<=", date_to.split("T")[0] + "T23:59:59")
+    if issue_id:
+        # SESF-32 — apply the same comma-delimited containment match the Milvus
+        # half uses (issue_ids is an FTS metadata column as of SESF-25), so the
+        # hybrid FTS results can't leak turns that aren't tagged with the issue.
+        token = _issue_id_containment_token(issue_id)
+        fts_filters["issue_ids"] = ("like", f"%,{token},%")
     fts_results = _fts.search(query, n=fetch_n, filters=fts_filters or None, db_path=db_path)
 
     # --- Merge with RRF ---

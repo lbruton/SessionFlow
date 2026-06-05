@@ -134,3 +134,98 @@ def test_issue_id_no_match_returns_empty_without_error(monkeypatch):
     _patch_search(monkeypatch, client)
     out = rag_engine.search("real query", issue_id="SESF-99999", db_path=DB)
     assert out == []
+
+
+# ---------------------------------------------------------------------------
+# SESF-32 — hybrid FTS half must honor issue_id too (not just the Milvus half)
+# ---------------------------------------------------------------------------
+
+class _CapturingFTS:
+    """Records the filters handed to ``_fts.search`` and returns canned rows.
+
+    The pre-SESF-32 tests mock ``_fts.search`` to ``[]``, which never exercises
+    the leak: with no FTS rows there is nothing to (mis)merge. This double both
+    captures the filter dict and can replay tagged/untagged rows.
+    """
+
+    def __init__(self, rows=None):
+        self.calls: list[dict] = []
+        self._rows = rows or []
+
+    def __call__(self, query, n=15, filters=None, db_path=None):
+        self.calls.append({"query": query, "n": n, "filters": filters, "db_path": db_path})
+        return self._rows
+
+
+def _patch_search_capturing_fts(monkeypatch, client, fts_rows=None) -> _CapturingFTS:
+    """Like ``_patch_search`` but swaps in a filter-capturing FTS double."""
+    monkeypatch.setattr(rag_engine, "embed_texts", lambda *a, **kw: [[0.0] * 768])
+
+    @contextmanager
+    def _fake_client(db_path=None):
+        yield client
+
+    monkeypatch.setattr(rag_engine, "milvus_client", _fake_client)
+    cap = _CapturingFTS(fts_rows)
+    monkeypatch.setattr(rag_engine._fts, "search", cap)
+
+    import fts_hybrid
+    monkeypatch.setattr(fts_hybrid, "fts_backfill_required", lambda *a, **kw: False)
+    return cap
+
+
+def test_fts_path_receives_issue_id_containment_filter(monkeypatch):
+    # SESF-32 — issue_id must reach the FTS filter as a comma-wrapped LIKE clause
+    # mirroring the Milvus side, so the hybrid FTS half can't leak untagged rows.
+    client = _CapturingClient()
+    cap = _patch_search_capturing_fts(monkeypatch, client)
+    rag_engine.search("real query", issue_id="sesf-25", db_path=DB)
+    assert cap.calls, "expected the FTS search path to run"
+    fts_filters = cap.calls[0]["filters"] or {}
+    assert fts_filters.get("issue_ids") == ("like", "%,SESF-25,%")
+
+
+def test_fts_path_omits_issue_id_filter_when_unset(monkeypatch):
+    # SESF-32 — with no issue_id, no issue_ids clause should appear in the FTS
+    # filter (mirrors Req 3.4 on the Milvus side).
+    client = _CapturingClient()
+    cap = _patch_search_capturing_fts(monkeypatch, client)
+    rag_engine.search("real query", provider="codex", db_path=DB)
+    assert cap.calls
+    fts_filters = cap.calls[0]["filters"] or {}
+    assert "issue_ids" not in fts_filters
+
+
+def test_issue_id_surrounding_whitespace_is_stripped(monkeypatch):
+    # SESF-32 follow-up — a padded id like " sesf-25 " must normalize to the same
+    # token on both halves, not a never-matching "%, SESF-25 ,%".
+    client = _CapturingClient()
+    cap = _patch_search_capturing_fts(monkeypatch, client)
+    rag_engine.search("real query", issue_id="  sesf-25  ", db_path=DB)
+    assert cap.calls
+    fts_filters = cap.calls[0]["filters"] or {}
+    assert fts_filters.get("issue_ids") == ("like", "%,SESF-25,%")
+    assert 'issue_ids like "%,SESF-25,%"' in (client.search_calls[0].get("filter") or "")
+
+
+def test_fts_index_like_filter_excludes_untagged_rows(tmp_path):
+    # SESF-32 — the containment filter the fix plumbs through actually excludes
+    # untagged rows at the SQLite layer (guards the (op, operand) mechanism).
+    from fts_hybrid import FTSIndex
+
+    fts = FTSIndex("turns_fts", [
+        "session_id", "git_branch", "turn_index", "timestamp", "chunk_type",
+        "project_root", "logical_session_id", "provider", "source_kind",
+        "source_class", "source_id", "source_path", "issue_ids",
+    ])
+    db_path = str(tmp_path / "milvus.db")
+    conn = fts.connection(db_path)
+    try:
+        fts.insert(conn, [
+            {"doc_id": "tagged", "content": "auth token refresh", "issue_ids": ",SESF-25,"},
+            {"doc_id": "untagged", "content": "auth token refresh", "issue_ids": ""},
+        ])
+        hits = fts.search("auth", filters={"issue_ids": ("like", "%,SESF-25,%")}, db_path=db_path)
+        assert {h["doc_id"] for h in hits} == {"tagged"}
+    finally:
+        fts.close_ephemeral(conn)
