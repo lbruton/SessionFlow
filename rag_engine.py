@@ -1117,17 +1117,19 @@ class _OldestN:
         No-op when its ``doc_id`` is already retained (dedup) or when the set is
         full and the entry is not strictly older than the newest currently kept.
         """
-        doc_id = entry.get("doc_id", "")
+        # Coerce to str: a present-but-null timestamp/doc_id (FTS rows may carry
+        # SQLite NULLs) would otherwise raise TypeError in the key comparison.
+        doc_id = entry.get("doc_id") or ""
         if doc_id in self._ids:
             return
-        key = (entry.get("timestamp", ""), doc_id)
+        key = (entry.get("timestamp") or "", doc_id)
         item = (_ReverseKey(key), doc_id, entry)
         if len(self._heap) < self._limit:
             heapq.heappush(self._heap, item)
             self._ids.add(doc_id)
-        elif key < self._heap[0][0].key:          # older than the newest kept
-            self._ids.discard(self._heap[0][1])   # drop the evicted doc_id
-            heapq.heapreplace(self._heap, item)   # evict newest, insert candidate
+        elif self._heap and key < self._heap[0][0].key:  # older than the newest kept
+            self._ids.discard(self._heap[0][1])          # drop the evicted doc_id
+            heapq.heapreplace(self._heap, item)          # evict newest, insert candidate
             self._ids.add(doc_id)
 
     def __len__(self) -> int:
@@ -1138,7 +1140,7 @@ class _OldestN:
         """Return the retained entries sorted oldest-first by (timestamp, doc_id)."""
         return sorted(
             (entry for _, _, entry in self._heap),
-            key=lambda e: (e.get("timestamp", ""), e.get("doc_id", "")),
+            key=lambda e: (e.get("timestamp") or "", e.get("doc_id") or ""),
         )
 
 
@@ -1198,7 +1200,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         """Whether one entry clears the provider, date-bound and issue-token guards."""
         if allowed is not None and entry.get("provider") not in allowed:  # Req 4.4
             return False
-        ts = entry.get("timestamp", "")
+        ts = entry.get("timestamp") or ""  # coerce null → "" so date compares can't TypeError
         if date_from and ts < date_from:  # Req 4.3 lower bound
             return False
         if upper and ts > upper:          # Req 4.3 upper bound

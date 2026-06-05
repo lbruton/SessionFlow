@@ -203,6 +203,22 @@ def test_oldest_n_collector_keeps_bound_and_oldest():
     assert [r["doc_id"] for r in collector.result()] == ["d0", "d1", "d2"]
 
 
+def test_oldest_n_collector_robust_to_zero_limit_and_null_fields():
+    # SESF-34 hardening (PR #29 bot review) — a zero-capacity collector is a
+    # no-op (no IndexError on the eviction branch), and null timestamp/doc_id
+    # fields don't crash the heap key comparison or the final sort (an unguarded
+    # ``None`` vs ``str`` compare raises TypeError; FTS NULLs make this reachable).
+    zero = rag_engine._OldestN(0)
+    zero.add(_entry("a", "2026-05-01T10:00:00"))  # must not raise
+    assert zero.result() == []
+
+    collector = rag_engine._OldestN(3)
+    collector.add({"doc_id": None, "timestamp": None})  # null fields, must not raise
+    collector.add(_entry("b", "2026-05-02T10:00:00"))
+    assert len(collector) <= 3
+    assert "b" in [r.get("doc_id") for r in collector.result()]  # sort survives the null entry
+
+
 def test_timeline_retains_oldest_n_from_shuffled_large_input(monkeypatch):
     # SESF-34 (core) — a pathologically large structured set is streamed in
     # shuffled timestamp order across many batches; the bounded collector must
