@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+import random
 import tempfile
 from contextlib import contextmanager
 
@@ -47,11 +48,19 @@ def _entry(doc_id, ts, provider="claude_code_cli", text=None, role="user"):
 
 
 def _patch_sources(monkeypatch, structured, fts):
-    """Patch the structured (_query_all) and FTS (_fts.search) timeline sources.
+    """Patch the structured (_query_batches) and FTS (_fts.search) timeline sources.
 
     Both are patched to return pre-shaped entry dicts so the test exercises the
-    engine's merge/dedup/sort/limit logic rather than Milvus/FTS internals.
+    engine's stream/bound/dedup/sort/limit logic rather than Milvus/FTS internals.
+    ``get_issue_timeline`` streams the structured source via ``_query_batches``
+    (a single batch here) and routes both sources through the bounded oldest-N
+    collector (SESF-34). ``_query_all`` is patched too in case any other path
+    reaches for it, but the timeline no longer drains it.
     """
+    monkeypatch.setattr(
+        rag_engine, "_query_batches",
+        lambda *a, **kw: iter([[dict(r) for r in structured]]),
+    )
     monkeypatch.setattr(rag_engine, "_query_all", lambda *a, **kw: [dict(r) for r in structured])
     monkeypatch.setattr(rag_engine._fts, "search", lambda *a, **kw: [dict(r) for r in fts])
 
@@ -178,6 +187,63 @@ def test_timeline_entry_carries_required_fields(monkeypatch):
     for key in ("provider", "session_id", "timestamp", "doc_id", "text"):
         assert key in entry
     assert "role" in entry or "chunk_type" in entry
+
+
+# ---------------------------------------------------------------------------
+# SESF-34: memory-bounded oldest-N pagination
+# ---------------------------------------------------------------------------
+
+def test_oldest_n_collector_keeps_bound_and_oldest():
+    # SESF-34 — the bounded collector never exceeds ``limit`` mid-stream and
+    # yields the globally-oldest entries regardless of insertion order.
+    collector = rag_engine._OldestN(3)
+    for i in [5, 1, 4, 2, 0, 3]:  # deliberately out of chronological order
+        collector.add(_entry(f"d{i}", f"2026-05-01T00:00:0{i}"))
+        assert len(collector) <= 3
+    assert [r["doc_id"] for r in collector.result()] == ["d0", "d1", "d2"]
+
+
+def test_timeline_retains_oldest_n_from_shuffled_large_input(monkeypatch):
+    # SESF-34 (core) — a pathologically large structured set is streamed in
+    # shuffled timestamp order across many batches; the bounded collector must
+    # still return the true oldest ``limit``, not an arbitrary iterator prefix.
+    # Milvus query_iterator order is undefined, so order-independence is the
+    # guarantee. The timeline must STREAM (_query_batches), not drain _query_all.
+    n = 5000
+    # Strictly-increasing, zero-padded ISO timestamps so lexicographic order ==
+    # chronological order, and doc_id ordering tracks timestamp ordering.
+    rows = [
+        _entry(f"{i:05d}", f"2026-05-01T{i // 3600:02d}:{(i // 60) % 60:02d}:{i % 60:02d}")
+        for i in range(n)
+    ]
+    shuffled = list(rows)
+    random.Random(1234).shuffle(shuffled)
+    batches = [shuffled[i:i + 256] for i in range(0, len(shuffled), 256)]
+    monkeypatch.setattr(
+        rag_engine, "_query_batches",
+        lambda *a, **kw: iter([[dict(r) for r in b] for b in batches]),
+    )
+    monkeypatch.setattr(rag_engine._fts, "search", lambda *a, **kw: [])
+
+    def _no_query_all(*a, **kw):
+        raise AssertionError("timeline must stream via _query_batches, not drain _query_all (SESF-34)")
+    monkeypatch.setattr(rag_engine, "_query_all", _no_query_all)
+
+    out = rag_engine.get_issue_timeline("SESF-25", limit=50, db_path=DB)
+    assert [r["doc_id"] for r in out] == [f"{i:05d}" for i in range(50)]
+
+
+def test_timeline_bound_applies_across_structured_and_fts(monkeypatch):
+    # SESF-34 — the FTS fallback flows through the SAME bound: an older FTS-only
+    # turn displaces the newest structured turn when the feed is already at limit.
+    structured = [_entry(f"s{i:03d}", f"2026-05-02T00:{i:02d}:00") for i in range(50)]
+    fts = [_entry("fts-old", "2026-05-01T00:00:00")]  # older than every structured row
+    _patch_sources(monkeypatch, structured, fts)
+    out = rag_engine.get_issue_timeline("SESF-25", limit=50, db_path=DB)
+    ids = [r["doc_id"] for r in out]
+    assert len(out) == 50
+    assert ids[0] == "fts-old"   # the oldest turn overall is retained
+    assert "s049" not in ids     # the newest structured turn is displaced by the bound
 
 
 # ---------------------------------------------------------------------------
