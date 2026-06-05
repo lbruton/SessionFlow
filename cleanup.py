@@ -84,6 +84,7 @@ def _print_server_rejected(action: str, exc: error.HTTPError) -> None:
 
 
 def cmd_list(args):
+    """List indexed sessions with per-session turn and branch counts."""
     db = get_db_path()
     project = getattr(args, 'project', None)
     sessions = rag_engine.list_sessions(project_root=project, db_path=db)
@@ -104,6 +105,7 @@ def cmd_list(args):
 
 
 def cmd_expire(args):
+    """Delete turns older than ``args.days`` and report before/after counts."""
     db = get_db_path()
     days = args.days
 
@@ -120,6 +122,7 @@ def cmd_expire(args):
 
 
 def cmd_delete(args):
+    """Delete indexed turns by ``--session`` or ``--branch``."""
     db = get_db_path()
 
     if args.session:
@@ -134,6 +137,7 @@ def cmd_delete(args):
 
 
 def cmd_reset(args):
+    """Delete all indexed data across every project (with confirmation)."""
     db = get_db_path()
 
     if not args.yes:
@@ -156,6 +160,7 @@ def cmd_reset(args):
 
 
 def cmd_stats(args):
+    """Print index statistics, optionally scoped to ``--project``."""
     db = get_db_path()
     project = getattr(args, 'project', None)
     stats = rag_engine.get_stats(project_root=project, db_path=db)
@@ -377,6 +382,7 @@ def cmd_backfill(args) -> int:
 
 
 def build_parser():
+    """Build the argparse parser for the cleanup CLI subcommands."""
     parser = argparse.ArgumentParser(
         description="Manage SessionFlow index data",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -444,6 +450,7 @@ def build_parser():
 
 
 def main():
+    """Parse arguments and dispatch to the selected subcommand."""
     parser = build_parser()
 
     args = parser.parse_args()

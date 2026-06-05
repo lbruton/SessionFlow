@@ -38,6 +38,7 @@ def get_project_root(cwd: str) -> str:
 
 
 def main():
+    """Read the hook payload from stdin and enqueue the transcript for indexing."""
     # Read hook input from stdin
     try:
         raw = sys.stdin.read()

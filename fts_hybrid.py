@@ -34,10 +34,12 @@ FTS_BACKFILL_SENTINEL = Path.home() / ".sessionflow" / "fts_backfill_required"
 
 
 def fts_backfill_required() -> bool:
+    """Whether the FTS backfill sentinel file is present."""
     return FTS_BACKFILL_SENTINEL.exists()
 
 
 def clear_fts_backfill_sentinel() -> None:
+    """Remove the FTS backfill sentinel if it exists."""
     try:
         FTS_BACKFILL_SENTINEL.unlink()
     except FileNotFoundError:
@@ -58,6 +60,7 @@ class FTSIndex:
 
     def __init__(self, table_name: str, metadata_columns: List[str],
                  indexed_metadata: Optional[Set[str]] = None):
+        """Configure the FTS5 table name and metadata columns (see class Args)."""
         self.table_name = table_name
         self.metadata_columns = metadata_columns
         self._indexed_metadata = indexed_metadata or set()
@@ -92,6 +95,7 @@ class FTSIndex:
         self._bm25_call = f"bm25({table_name}, {bm25_weights})"
 
     def set_server_mode(self, enabled: bool):
+        """Enable or disable per-thread persistent connection caching."""
         self._server_mode = enabled
 
     def _connections(self) -> Dict[str, sqlite3.Connection]:

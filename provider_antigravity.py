@@ -210,7 +210,10 @@ def _load_summaries(root: Path) -> Dict[str, str]:
 
 
 class AntigravityAdapter:
+    """Adapter for Antigravity transcripts (CLI and Desktop variants)."""
+
     def __init__(self, home: str | Path | None = None, source_kind: str = "cli"):
+        """Set the home and select the CLI or Desktop provider variant."""
         self.home = Path(home).expanduser() if home is not None else Path.home()
         self.variant = source_kind
         if source_kind == "desktop":
@@ -249,6 +252,7 @@ class AntigravityAdapter:
         return mapping
 
     def discover_sources(self) -> List[ProviderSource]:
+        """Enumerate Antigravity transcripts under the brain directory."""
         transcript_glob = "brain/*/.system_generated/logs/transcript.jsonl"
         history = self._load_history()
         # Desktop history.jsonl is empty; consult the summaries metadata as a
@@ -285,6 +289,7 @@ class AntigravityAdapter:
         source: ProviderSource,
         cursor: Optional[Dict],
     ) -> ProviderParseResult:
+        """Parse an Antigravity transcript into normalized turns, resuming from ``cursor``."""
         last_step = int((cursor or {}).get("last_step_index", -1))
         emitted = set((cursor or {}).get("emitted_ids", []))
         turns = []
@@ -373,9 +378,11 @@ class AntigravityAdapter:
         return any(self.root.glob("brain/**/*.pb")) or any(self.root.glob("brain/**/*.db"))
 
     def watch_roots(self) -> List[ProviderWatchRoot]:
+        """Return the brain directory as the single recursive watch root."""
         return [ProviderWatchRoot(self.provider, self.source_kind, str(self.root / "brain"), recursive=True)]
 
     def health(self) -> ProviderHealth:
+        """Report adapter health for the active CLI or Desktop variant."""
         sources = self.discover_sources()
         if self.variant == "desktop":
             # SESF-17 (AC-8 / D-7): root summaries metadata is now parsed and

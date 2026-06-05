@@ -26,10 +26,12 @@ _current_project_root: contextvars.ContextVar[str | None] = contextvars.ContextV
 
 
 def set_current_project_root(root: str | None):
+    """Set the per-request project root in the context var."""
     _current_project_root.set(root)
 
 
 def get_current_project_root() -> str | None:
+    """Return the per-request project root from the context var."""
     return _current_project_root.get()
 
 
@@ -199,6 +201,7 @@ def format_timeline(entries: list[dict]) -> str:
 
 
 def build_search_all_sessions_schema() -> dict:
+    """Return the JSON-schema for the ``search_all_sessions`` tool input."""
     return {
         "type": "object",
         "properties": {

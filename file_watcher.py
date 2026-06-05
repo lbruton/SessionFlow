@@ -142,6 +142,7 @@ class TranscriptChangeHandler(FileSystemEventHandler):
 
     def __init__(self, change_queue: asyncio.Queue,
                  loop: asyncio.AbstractEventLoop):
+        """Store the change queue and event loop used to enqueue paths."""
         super().__init__()
         self.change_queue = change_queue
         self.loop = loop
@@ -158,10 +159,12 @@ class TranscriptChangeHandler(FileSystemEventHandler):
             pass  # Loop closed during shutdown
 
     def on_modified(self, event):
+        """Enqueue a modified ``.jsonl`` transcript for reindexing."""
         if not event.is_directory and self._should_handle(event.src_path):
             self._enqueue(event.src_path)
 
     def on_created(self, event):
+        """Enqueue a newly created ``.jsonl`` transcript for indexing."""
         if not event.is_directory and self._should_handle(event.src_path):
             self._enqueue(event.src_path)
 
@@ -172,6 +175,7 @@ class GlobalTranscriptWatcher:
     """Watches ~/.claude/projects/ recursively and indexes new turns from all projects."""
 
     def __init__(self, db_path: str, debounce_seconds: float = 2.0):
+        """Set the target DB path and debounce window for batched indexing."""
         self.db_path = db_path
         self.debounce_seconds = debounce_seconds
 
