@@ -14,6 +14,7 @@ Supports multiple embedding models via SESSIONFLOW_MODEL env var (default: embed
 """
 
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -74,11 +75,12 @@ DEFAULT_TIMELINE_LIMIT = 50
 # Generous FTS fetch window for the timeline fallback so the chronological slice
 # isn't biased by BM25 rank (the older matching turn may be outside the top-N).
 _TIMELINE_FTS_FETCH_CAP = 500
-# Observability threshold: warn (do NOT truncate) when one issue matches an
-# unexpectedly large structured set. Truncating here would drop arbitrary rows —
-# Milvus query_iterator order is undefined and it can't sort server-side by a
-# scalar — silently breaking the oldest-first guarantee. Memory-bounded
-# oldest-N pagination is tracked in SESF-34.
+# Observability threshold: warn when one issue matches an unexpectedly large
+# structured set. Memory is bounded (SESF-34: rows stream through `_OldestN`
+# rather than draining into a list), so this is now a scan-cost heads-up — narrow
+# with date_from/date_to to shrink the iterator window. A server-side cap is still
+# impossible: Milvus query_iterator order is undefined and it can't sort by a
+# scalar, so any first-N truncation would drop arbitrary (not newest) rows.
 _TIMELINE_ROWS_WARN = 50000
 
 # Shared Milvus output_fields for vector search and recency listing. Includes
@@ -1067,6 +1069,82 @@ def _timeline_entry(row: Dict) -> Dict:
     }
 
 
+class _ReverseKey:
+    """Wraps a sort key so ``heapq`` (a min-heap) surfaces the *largest* key.
+
+    ``heapq`` always pops the smallest element; inverting the comparison turns it
+    into a max-heap, so ``heap[0]`` is the newest-kept timeline entry — the one
+    evicted first when a strictly-older candidate arrives.
+    """
+
+    __slots__ = ("key",)
+
+    def __init__(self, key):
+        """Store the wrapped ``(timestamp, doc_id)`` sort key."""
+        self.key = key
+
+    def __lt__(self, other: "_ReverseKey") -> bool:
+        """Invert ordering so a larger key compares as "smaller" to heapq."""
+        return self.key > other.key
+
+
+class _OldestN:
+    """Bounded collector that retains the globally-oldest ``limit`` entries.
+
+    Replaces draining every structured match into a list (SESF-34): rows stream
+    in via :meth:`add` and at most ``limit`` are ever held, so memory is O(limit)
+    no matter how many turns reference an issue. Correctness is preserved because
+    the newest-kept entry is evicted only when a strictly-older candidate arrives,
+    so the kept set always equals the true oldest ``limit`` seen so far — even
+    though Milvus ``query_iterator`` yields rows in an undefined order.
+
+    Entries are keyed by ``(timestamp, doc_id)`` and deduplicated by ``doc_id``
+    (first writer wins, so the structured source — streamed before the FTS
+    fallback — takes precedence, matching the prior ``setdefault`` merge). Once a
+    ``doc_id`` is rejected or evicted the kept maximum only decreases, so a later
+    re-arrival of the same key is rejected again: no duplicates, no resurrection.
+    """
+
+    def __init__(self, limit: int):
+        """Create a collector bounded to ``limit`` entries."""
+        self._limit = limit
+        self._heap: List = []   # (_ReverseKey(key), doc_id, entry); heap[0] = newest kept
+        self._ids: set = set()  # doc_ids currently retained
+
+    def add(self, entry: Dict) -> None:
+        """Offer one timeline entry to the bounded set.
+
+        No-op when its ``doc_id`` is already retained (dedup) or when the set is
+        full and the entry is not strictly older than the newest currently kept.
+        """
+        # Coerce to str so a null (FTS rows may carry SQLite NULLs) or any
+        # non-str field can't raise TypeError in the heap-key comparison: `or ""`
+        # maps falsy/None to "", str() handles a truthy non-str (e.g. int epoch).
+        doc_id = str(entry.get("doc_id") or "")
+        if doc_id in self._ids:
+            return
+        key = (str(entry.get("timestamp") or ""), doc_id)
+        item = (_ReverseKey(key), doc_id, entry)
+        if len(self._heap) < self._limit:
+            heapq.heappush(self._heap, item)
+            self._ids.add(doc_id)
+        elif self._heap and key < self._heap[0][0].key:  # older than the newest kept
+            self._ids.discard(self._heap[0][1])          # drop the evicted doc_id
+            heapq.heapreplace(self._heap, item)          # evict newest, insert candidate
+            self._ids.add(doc_id)
+
+    def __len__(self) -> int:
+        """Number of entries currently retained (never exceeds ``limit``)."""
+        return len(self._heap)
+
+    def result(self) -> List[Dict]:
+        """Return the retained entries sorted oldest-first by (timestamp, doc_id)."""
+        return sorted(
+            (entry for _, _, entry in self._heap),
+            key=lambda e: (str(e.get("timestamp") or ""), str(e.get("doc_id") or "")),
+        )
+
+
 def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
                        providers: Optional[List[str]] = None,
                        date_from: Optional[str] = None,
@@ -1074,15 +1152,17 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
                        db_path: Optional[str] = None) -> List[Dict]:
     """Cross-harness, deduplicated, chronological feed of turns for an issue.
 
-    Unions a structured Milvus source (``issue_ids like "%,ID,%"`` drained
-    uncapped via ``_query_all``) with an FTS keyword fallback (a literal MATCH on
-    the issue token) so any un-tagged turn remains visible (Req 6.1). Both
-    sources are normalized to the same shape, merged and deduplicated by
-    ``doc_id`` (Req 4.2/6.2), filtered to an optional ``providers`` subset
-    (Req 4.4) and ``date_from``/``date_to`` bounds (Req 4.3), sorted oldest-first
-    by ``(timestamp asc, doc_id asc)`` (Req 4.1), and sliced to ``limit``
-    (Req 4.5). An FTS failure is non-fatal — the feed degrades to the structured
-    source with a logged warning.
+    Unions a structured Milvus source (``issue_ids like "%,ID,%"`` streamed batch
+    by batch via ``_query_batches``) with an FTS keyword fallback (a literal MATCH
+    on the issue token) so any un-tagged turn remains visible (Req 6.1). Both
+    sources are normalized to the same shape and routed through an ``_OldestN``
+    collector that bounds memory to O(``limit``) while retaining the true oldest
+    matches (SESF-34): it deduplicates by ``doc_id`` (Req 4.2/6.2, structured
+    wins) and yields entries sorted oldest-first by ``(timestamp asc, doc_id asc)``
+    (Req 4.1), capped at ``limit`` (Req 4.5). Each row is filtered to an optional
+    ``providers`` subset (Req 4.4) and ``date_from``/``date_to`` bounds (Req 4.3)
+    before it reaches the collector. An FTS failure is non-fatal — the feed
+    degrades to the structured source with a logged warning.
 
     Args:
         issue_id: The tracker issue token (e.g. ``"SESF-25"``); uppercased and
@@ -1109,29 +1189,66 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
 
     output_fields = ["document", "doc_id", "session_id", "timestamp",
                      "chunk_type", "provider", "issue_ids"]
-    structured = _query_all(output_fields, filter_expr=filter_expr, db_path=db_path)
-    if len(structured) > _TIMELINE_ROWS_WARN:
-        # Warn but do NOT truncate: an arbitrary-order cap would drop random
-        # (not newest) rows. Correct memory-bounded pagination is SESF-34.
+
+    # Per-entry filters, hoisted so they run during the stream over each source
+    # row rather than over a fully-materialized list — only survivors reach the
+    # bounded collector. Equivalent to the prior post-merge filtering.
+    allowed = set(providers) if providers else None
+    upper = date_to.split("T")[0] + "T23:59:59" if date_to else None
+    token = f",{canonical},"
+
+    def _passes(entry: Dict) -> bool:
+        """Whether one entry clears the provider, date-bound and issue-token guards."""
+        if allowed is not None and entry.get("provider") not in allowed:  # Req 4.4
+            return False
+        ts = str(entry.get("timestamp") or "")  # coerce null/non-str so date compares can't TypeError
+        if date_from and ts < date_from:  # Req 4.3 lower bound
+            return False
+        if upper and ts > upper:          # Req 4.3 upper bound
+            return False
+        # Boundary-aware guard: keep only turns that actually reference the token
+        # (FTS may surface substring/word-stem noise; the structured source is
+        # already exact via the comma-wrapped LIKE, so this is a no-op for it).
+        return (token in (entry.get("issue_ids") or "")
+                or _references_issue(entry.get("text", ""), canonical))
+
+    # Structured source: stream Milvus matches batch by batch into a memory-bounded
+    # oldest-N collector rather than draining them into a list (SESF-34). The
+    # collector retains only the true oldest ``limit``, so memory is O(limit) no
+    # matter how many turns reference the issue — and a server-side cap stays
+    # impossible (Milvus query_iterator order is undefined; it can't sort by a
+    # scalar), so streaming is the only correctness-preserving bound.
+    collector = _OldestN(limit)
+    structured_count = 0
+    for batch in _query_batches(output_fields, filter_expr=filter_expr, db_path=db_path):
+        structured_count += len(batch)
+        for row in batch:
+            entry = _timeline_entry(row)
+            if _passes(entry):
+                collector.add(entry)
+    if structured_count > _TIMELINE_ROWS_WARN:
         logger.warning(
-            "issue timeline for %s matched %d structured rows (>%d) — large "
-            "in-memory set; narrow with date_from/date_to (bounded pagination: SESF-34)",
-            canonical, len(structured), _TIMELINE_ROWS_WARN,
+            "issue timeline for %s matched %d structured rows (>%d) — oldest-%d "
+            "retained via bounded pagination; narrow with date_from/date_to to "
+            "shrink the scan",
+            canonical, structured_count, _TIMELINE_ROWS_WARN, limit,
         )
 
     # FTS keyword fallback (Req 6.1) for turns not yet tagged with issue_ids
     # (e.g. pre-DEVS-39-reindex rows). Quote the token as an FTS5 phrase so the
     # hyphen isn't parsed as query syntax (a bare ``SESF-25`` MATCH errors/misses);
-    # the boundary guard below enforces the exact issue token. Push the date
-    # bounds into the FTS query so the fetch window isn't spent on out-of-range
-    # rows (provider is a list, so it stays a post-filter below). Fetch a generous
-    # window (not just ``limit``) so the chronological slice isn't biased by BM25
-    # rank. Non-fatal — degrade to the structured source on any FTS error.
+    # the boundary guard in ``_passes`` enforces the exact issue token. Push the
+    # date bounds into the FTS query so the fetch window isn't spent on out-of-range
+    # rows (provider is a list, so it stays a post-filter in ``_passes``). Fetch a
+    # generous window (not just ``limit``) so the chronological slice isn't biased
+    # by BM25 rank, then route the hits through the SAME bounded collector so the
+    # combined feed stays bounded. Non-fatal — degrade to the structured source on
+    # any FTS error.
     fts_filters: Dict = {}
     if date_from:
         fts_filters["timestamp_gte"] = (">=", date_from)
     if date_to:
-        fts_filters["timestamp_lte"] = ("<=", date_to.split("T")[0] + "T23:59:59")
+        fts_filters["timestamp_lte"] = ("<=", upper)
     try:
         fts_hits = _fts.search(
             f'"{canonical}"', n=max(limit, _TIMELINE_FTS_FETCH_CAP),
@@ -1141,33 +1258,14 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s", canonical, e)
         fts_hits = []
 
-    merged: Dict[str, Dict] = {}
-    for row in list(structured) + list(fts_hits):
+    for row in fts_hits:
         entry = _timeline_entry(row)
-        merged.setdefault(entry["doc_id"], entry)
+        if _passes(entry):
+            collector.add(entry)
 
-    entries = list(merged.values())
-
-    if providers:
-        allowed = set(providers)
-        entries = [e for e in entries if e.get("provider") in allowed]
-    if date_from:
-        entries = [e for e in entries if e.get("timestamp", "") >= date_from]
-    if date_to:
-        upper = date_to.split("T")[0] + "T23:59:59"
-        entries = [e for e in entries if e.get("timestamp", "") <= upper]
-    # Boundary-aware FTS guard: keep only turns that actually reference the token
-    # (FTS may surface substring/word-stem noise). The structured source is
-    # already exact via the comma-wrapped LIKE.
-    token = f",{canonical},"
-    entries = [
-        e for e in entries
-        if token in (e.get("issue_ids") or "")
-        or _references_issue(e.get("text", ""), canonical)
-    ]
-
-    entries.sort(key=lambda e: (e.get("timestamp", ""), e.get("doc_id", "")))
-    return entries[:limit]
+    # Dedup by doc_id (structured wins, streamed first), the oldest-first sort and
+    # the ``limit`` slice all happen inside the collector (Req 4.1/4.2/4.5/6.2).
+    return collector.result()
 
 
 def _references_issue(text: str, canonical: str) -> bool:
