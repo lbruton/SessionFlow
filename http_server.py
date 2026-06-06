@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -75,6 +76,11 @@ def _parse_backfill_drain_interval() -> float:
 BACKFILL_DRAIN_INTERVAL = _parse_backfill_drain_interval()
 if BACKFILL_DRAIN_INTERVAL <= 0:
     raise ValueError("SESSIONFLOW_BACKFILL_DRAIN_INTERVAL_SECONDS must be > 0")
+
+# Upper bound on the FTS heal exponential backoff (SESF-38 AC-2). The schedule
+# escalates as ``BACKFILL_DRAIN_INTERVAL * 2**(n-1)`` per consecutive failure and
+# is held at this cap so the heal loop retries forever without runaway delays.
+FTS_HEAL_BACKOFF_CAP = 300.0
 
 # Milvus backend: remote Standalone URI or local Lite file path.
 MILVUS_URI = os.getenv("SESSIONFLOW_MILVUS_URI", str(_SERVER_DIR / "milvus.db"))
@@ -185,22 +191,85 @@ class FtsHealState:
 
     consecutive_failures: int = 0
     last_error_signature: str | None = None
-    current_backoff_seconds: float = 0.0
+    current_backoff_seconds: float = BACKFILL_DRAIN_INTERVAL
+
+    @staticmethod
+    def _signature(exc) -> str:
+        """Derive a stable log-once signature from an exception.
+
+        Combines the exception type name with a stable message prefix. The clean
+        message payload is preferred (Milvus exceptions expose ``.message``), with
+        ``str(exc)`` as the fallback. A trailing parenthetical suffix (request id,
+        timestamp) is stripped so it does not churn the latch, while distinct
+        message bodies and exception types remain distinct signatures.
+
+        Args:
+            exc: The exception raised by a heal attempt.
+
+        Returns:
+            A ``"<TypeName>:<stable message prefix>"`` signature string.
+        """
+        message = getattr(exc, "message", None)
+        if not isinstance(message, str):
+            message = str(exc)
+        stable_prefix = re.sub(r"\s*\([^()]*\)\s*$", "", message).strip()
+        return f"{type(exc).__name__}:{stable_prefix}"
 
     def record_failure(self, exc):
-        """Record a transient heal failure (stub — C.5 implements backoff escalation)."""
-        ...
+        """Record a transient heal failure and escalate the bounded backoff.
+
+        Increments the consecutive-failure streak and sets the current backoff to
+        ``BACKFILL_DRAIN_INTERVAL * 2**(n-1)`` capped at ``FTS_HEAL_BACKOFF_CAP``.
+        Never raises and never signals a terminal "give up": the heal loop keeps
+        retrying at the capped delay.
+
+        Args:
+            exc: The exception raised by the failed heal attempt.
+        """
+        self.consecutive_failures += 1
+        raw = BACKFILL_DRAIN_INTERVAL * (2 ** (self.consecutive_failures - 1))
+        self.current_backoff_seconds = min(raw, FTS_HEAL_BACKOFF_CAP)
 
     def record_success(self):
-        """Reset backoff / log-once state after a successful heal (stub — C.5)."""
-        ...
+        """Reset backoff and log-once state after a successful heal.
+
+        Zeroes the failure streak, restores the backoff to the base drain
+        interval, and clears the error signature so a later failure warns again.
+        """
+        self.consecutive_failures = 0
+        self.current_backoff_seconds = BACKFILL_DRAIN_INTERVAL
+        self.last_error_signature = None
 
     def next_delay(self):
-        """Return the next backoff delay in seconds (stub 0.0 — C.5)."""
-        return 0.0
+        """Return the next backoff delay in seconds.
+
+        Yields the base drain interval when there have been no failures since the
+        last reset, otherwise the current (escalated, capped) backoff.
+
+        Returns:
+            The delay in seconds before the next heal attempt.
+        """
+        if self.consecutive_failures == 0:
+            return BACKFILL_DRAIN_INTERVAL
+        return self.current_backoff_seconds
 
     def should_warn(self, exc):
-        """Whether to emit a warning for exc under log-once dedup (stub True — C.5)."""
+        """Decide whether to emit a warning for ``exc`` under log-once dedup.
+
+        Returns ``True`` on the first sighting of a signature and whenever the
+        signature changes, ``False`` while the same signature repeats. Records the
+        signature as a side effect so a repeat is suppressed.
+
+        Args:
+            exc: The exception raised by the failed heal attempt.
+
+        Returns:
+            ``True`` to log a warning, ``False`` to suppress a duplicate.
+        """
+        signature = self._signature(exc)
+        if signature == self.last_error_signature:
+            return False
+        self.last_error_signature = signature
         return True
 
 
