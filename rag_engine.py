@@ -1795,11 +1795,9 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
             # Pass 2: hydrate missing rows in small batches and stream into FTS
             # one batch at a time so peak memory stays at O(BATCH_FETCH) regardless
             # of how many rows are missing — see SESF-5.
-            output_fields = ["doc_id", "document", "session_id", "git_branch",
-                             "turn_index", "timestamp", "chunk_type", "project_root",
-                             "logical_session_id", "provider", "source_kind",
-                             "source_class", "source_id", "source_path",
-                             "transcript_file", "issue_ids"]
+            # Reuse the shared search field list so backfill and vector search
+            # stay in sync — a drifted copy is how transcript_file went missing.
+            output_fields = _SEARCH_OUTPUT_FIELDS
             backfill_defaults = default_provider_metadata()
             BATCH_FETCH = 100
             inserted = 0
