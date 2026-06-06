@@ -12,7 +12,7 @@ Health: curl http://127.0.0.1:7102/health
 
 import asyncio
 import contextlib
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 import json
 import logging
 import os
@@ -170,6 +170,38 @@ class HeartbeatThread:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+
+
+# --- FTS heal state ---
+
+@dataclass
+class FtsHealState:
+    """Worker-owned backoff + log-once state for the FTS heal loop (SESF-38 AC-2/AC-5).
+
+    Skeleton — C.5 implements the bounded-backoff schedule and the log-once latch
+    (signature = exception type + stable message prefix). Owned by the heal worker in
+    http_server; surfaced only via /health, never through rag_engine.get_stats.
+    """
+
+    consecutive_failures: int = 0
+    last_error_signature: str | None = None
+    current_backoff_seconds: float = 0.0
+
+    def record_failure(self, exc):
+        """Record a transient heal failure (stub — C.5 implements backoff escalation)."""
+        ...
+
+    def record_success(self):
+        """Reset backoff / log-once state after a successful heal (stub — C.5)."""
+        ...
+
+    def next_delay(self):
+        """Return the next backoff delay in seconds (stub 0.0 — C.5)."""
+        return 0.0
+
+    def should_warn(self, exc):
+        """Whether to emit a warning for exc under log-once dedup (stub True — C.5)."""
+        return True
 
 
 # --- Project middleware ---
