@@ -186,9 +186,13 @@ class HeartbeatThread:
 class FtsHealState:
     """Worker-owned backoff + log-once state for the FTS heal loop (SESF-38 AC-2/AC-5).
 
-    Skeleton — C.5 implements the bounded-backoff schedule and the log-once latch
-    (signature = exception type + stable message prefix). Owned by the heal worker in
-    http_server; surfaced only via /health, never through rag_engine.get_stats.
+    Implements the bounded-backoff schedule (``BACKFILL_DRAIN_INTERVAL * 2**(n-1)``
+    capped at ``FTS_HEAL_BACKOFF_CAP``) and the log-once latch (signature =
+    exception type + stable message prefix) so a persistent failure warns once per
+    distinct signature. Owned by the heal worker in http_server. This worker state
+    (``consecutive_failures`` / ``last_error``) is exposed only via ``/health``;
+    ``rag_engine.get_stats`` carries the static lag fields (fts_row_count, fts_lag,
+    fts_backfill_required) and never this worker state.
     """
 
     consecutive_failures: int = 0
@@ -425,7 +429,7 @@ async def _fts_heal_run_once(state: "FtsHealState", *, first_tick: bool) -> None
     _ensure_fts_heal_primitives()
     executor = _fts_heal_executor
     db_path = MILVUS_URI
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         backfilled = await loop.run_in_executor(
             executor, lambda: rag_engine.backfill_fts(db_path=db_path)
@@ -566,7 +570,7 @@ def _fts_lag_payload() -> dict:
     if _fts_lag_cache is not None and (now - _fts_lag_cache_ts) < _FTS_LAG_TTL:
         return _fts_lag_cache
     try:
-        payload = dict(rag_engine.fts_lag_status(project_root=None))
+        payload = dict(rag_engine.fts_lag_status(db_path=MILVUS_URI, project_root=None))
         state = _fts_heal_state
         payload["consecutive_failures"] = (
             state.consecutive_failures if state is not None else 0
@@ -585,6 +589,10 @@ async def health(request: Request) -> JSONResponse:
     """Return server health JSON; ``?deep=1`` bypasses the provider-status cache."""
     deep = request is not None and request.query_params.get("deep") == "1"
     watchers = file_watcher.get_watcher_status()
+    # _fts_lag_payload does synchronous Milvus/SQLite I/O on a cache miss; offload
+    # it to the loop's default executor so the scan never blocks the event loop.
+    loop = asyncio.get_running_loop()
+    fts_payload = await loop.run_in_executor(None, _fts_lag_payload)
     return JSONResponse({
         "status": "ok",
         "server": "sessionflow",
@@ -597,7 +605,7 @@ async def health(request: Request) -> JSONResponse:
         "providers": _provider_health(deep=deep),
         "backfill": _backfill_status_payload(),
         "embedding": _embedding_status_payload(),
-        "fts": _fts_lag_payload(),
+        "fts": fts_payload,
     })
 
 
