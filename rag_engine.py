@@ -1530,7 +1530,7 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
         provider_name = r.get("provider", defaults["provider"])
         providers[provider_name] = providers.get(provider_name, 0) + 1
 
-    return {
+    stats = {
         "total_turns": total,
         "sessions": len(sessions),
         "branches": sorted(branches),
@@ -1538,22 +1538,55 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
         "providers": providers,
     }
 
+    # Additive, project-scoped FTS lag keys (SESF-38 AC-6). Pass the Milvus total
+    # we just computed so fts_lag_status does not re-enter get_stats.
+    lag = fts_lag_status(
+        db_path=db_path, project_root=project_root, milvus_turn_count=total
+    )
+    stats["fts_row_count"] = lag["fts_row_count"]
+    stats["fts_lag"] = lag["fts_lag"]
+    stats["fts_backfill_required"] = lag["fts_backfill_required"]
+    return stats
 
-def fts_lag_status(db_path=None, project_root=None):
+
+def fts_lag_status(db_path=None, project_root=None, milvus_turn_count=None):
     """Return static FTS-vs-Milvus lag data for observability (SESF-38 AC-6).
 
-    Skeleton — C.4 implements the real counts (Milvus count via milvus_client_for_migration,
-    FTS count via FTSIndex.count_rows), both filtered by project_root when provided. Returns
-    static lag only; worker state (consecutive_failures/last_error) is NOT included here.
+    Computes the difference between the Milvus turn count and the FTS row count,
+    both scoped to ``project_root`` when provided. The lag is static — no worker
+    state (``consecutive_failures``/``last_error``) is included here.
+
+    Args:
+        db_path: Milvus DB path; also derives the FTS sidecar path.
+        project_root: when provided, scope both counts to that project.
+        milvus_turn_count: pre-computed Milvus total; when None it is read from
+            ``get_stats`` (get_stats passes its own total to avoid recursion).
 
     Returns:
-        dict: keys milvus_turn_count, fts_row_count, fts_lag, fts_backfill_required.
+        dict: keys ``milvus_turn_count``, ``fts_row_count``, ``fts_lag``
+        (milvus_turn_count - fts_row_count), and ``fts_backfill_required``.
     """
+    if milvus_turn_count is None:
+        milvus_turn_count = get_stats(
+            project_root=project_root, db_path=db_path
+        )["total_turns"]
+
+    # FTS count on the calling thread (SESF-13 thread affinity): open an
+    # ephemeral connection, count, and close it.
+    conn = _fts.connection(db_path)
+    try:
+        fts_row_count = _fts.count_rows(conn, project_root=project_root)
+    finally:
+        _fts.close_ephemeral(conn)
+
+    from fts_hybrid import fts_backfill_required
+
+    fts_lag = milvus_turn_count - fts_row_count
     return {
-        "milvus_turn_count": 0,
-        "fts_row_count": 0,
-        "fts_lag": 0,
-        "fts_backfill_required": False,
+        "milvus_turn_count": milvus_turn_count,
+        "fts_row_count": fts_row_count,
+        "fts_lag": fts_lag,
+        "fts_backfill_required": fts_lag > 0 or fts_backfill_required(),
     }
 
 
