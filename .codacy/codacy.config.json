@@ -1,0 +1,798 @@
+{
+  "version": 1,
+  "metadata": {
+    "source": "remote",
+    "provider": "gh",
+    "organization": "lbruton",
+    "repositoryId": "860712",
+    "repositoryName": "SessionFlow",
+    "createdAt": "2026-06-06T17:20:12.508Z",
+    "updatedAt": "2026-06-06T17:20:12.508Z",
+    "languages": [
+      "JSON",
+      "Markdown",
+      "Python",
+      "Shell",
+      "YAML"
+    ]
+  },
+  "tools": [
+    {
+      "toolId": "Agentlinter",
+      "patterns": [
+        {
+          "patternId": "Agentlinter_token-budget_under-150-tokens"
+        },
+        {
+          "patternId": "Agentlinter_token-budget_total-tokens"
+        },
+        {
+          "patternId": "Agentlinter_token-budget_section-weight"
+        },
+        {
+          "patternId": "Agentlinter_token-budget_compressible-padding"
+        },
+        {
+          "patternId": "Agentlinter_structure_position-risk-warning"
+        },
+        {
+          "patternId": "Agentlinter_structure_no-empty-sections"
+        },
+        {
+          "patternId": "Agentlinter_structure_modular-files"
+        },
+        {
+          "patternId": "Agentlinter_structure_heading-hierarchy"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-version-or-update-date"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-sections"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-main-file"
+        },
+        {
+          "patternId": "Agentlinter_structure_has-file-map"
+        },
+        {
+          "patternId": "Agentlinter_structure_file-size"
+        },
+        {
+          "patternId": "Agentlinter_structure_dead-import"
+        },
+        {
+          "patternId": "Agentlinter_structure_circular-import"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_skill-name-match-dir"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_skill-description-when-to-use"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_sensitive-paths"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_injection-vectors"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_has-metadata"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_excessive-permissions"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_data-exfiltration"
+        },
+        {
+          "patternId": "Agentlinter_skill-safety_dangerous-commands"
+        },
+        {
+          "patternId": "Agentlinter_security_prompt-injection-vulnerability"
+        },
+        {
+          "patternId": "Agentlinter_security_no-secrets"
+        },
+        {
+          "patternId": "Agentlinter_security_no-pii-exposure"
+        },
+        {
+          "patternId": "Agentlinter_security_no-injection-defense"
+        },
+        {
+          "patternId": "Agentlinter_security_has-permission-boundaries"
+        },
+        {
+          "patternId": "Agentlinter_security_has-injection-defense"
+        },
+        {
+          "patternId": "Agentlinter_security_env-var-references"
+        },
+        {
+          "patternId": "Agentlinter_security_api-key-exposure"
+        },
+        {
+          "patternId": "Agentlinter_runtime_token-strength"
+        },
+        {
+          "patternId": "Agentlinter_runtime_group-policy"
+        },
+        {
+          "patternId": "Agentlinter_runtime_gateway-bind"
+        },
+        {
+          "patternId": "Agentlinter_runtime_dm-policy"
+        },
+        {
+          "patternId": "Agentlinter_runtime_config-secrets"
+        },
+        {
+          "patternId": "Agentlinter_runtime_config-exists"
+        },
+        {
+          "patternId": "Agentlinter_runtime_auth-mode"
+        },
+        {
+          "patternId": "Agentlinter_remote-ready_workspace-path-specified"
+        },
+        {
+          "patternId": "Agentlinter_remote-ready_model-settings-specified"
+        },
+        {
+          "patternId": "Agentlinter_remote-ready_env-vars-documented"
+        },
+        {
+          "patternId": "Agentlinter_memory_no-mental-notes"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-state-tracking"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-memory-strategy"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-learning-loop"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-handoff-protocol"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-file-based-notes"
+        },
+        {
+          "patternId": "Agentlinter_memory_has-context-window-awareness"
+        },
+        {
+          "patternId": "Agentlinter_consistency_tone-voice-alignment"
+        },
+        {
+          "patternId": "Agentlinter_consistency_timezone-locale-drift"
+        },
+        {
+          "patternId": "Agentlinter_consistency_stale-package-reference"
+        },
+        {
+          "patternId": "Agentlinter_consistency_stale-file-reference"
+        },
+        {
+          "patternId": "Agentlinter_consistency_stale-date"
+        },
+        {
+          "patternId": "Agentlinter_consistency_priority-conflict"
+        },
+        {
+          "patternId": "Agentlinter_consistency_permission-conflict"
+        },
+        {
+          "patternId": "Agentlinter_consistency_outdated-cross-references"
+        },
+        {
+          "patternId": "Agentlinter_consistency_no-duplicate-instructions"
+        },
+        {
+          "patternId": "Agentlinter_consistency_naming-convention"
+        },
+        {
+          "patternId": "Agentlinter_consistency_language-mixing"
+        },
+        {
+          "patternId": "Agentlinter_consistency_identity-alignment"
+        },
+        {
+          "patternId": "Agentlinter_consistency_circular-dependency"
+        },
+        {
+          "patternId": "Agentlinter_completeness_verification-criteria-required"
+        },
+        {
+          "patternId": "Agentlinter_completeness_session-learning-hooks"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-workflow"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-user-context"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-tools"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-priorities"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-output-format"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-identity"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-error-handling"
+        },
+        {
+          "patternId": "Agentlinter_completeness_has-boundaries"
+        },
+        {
+          "patternId": "Agentlinter_completeness_freshness-file-paths"
+        },
+        {
+          "patternId": "Agentlinter_completeness_command-coverage"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_skills-vs-commands"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_relevance-trap"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_progressive-disclosure"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_instruction-count"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_hooks-structure"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_descriptive-ratio"
+        },
+        {
+          "patternId": "Agentlinter_claude-code_agent-focus"
+        },
+        {
+          "patternId": "Agentlinter_clarity_token-efficiency-score"
+        },
+        {
+          "patternId": "Agentlinter_clarity_token-budget-range"
+        },
+        {
+          "patternId": "Agentlinter_clarity_sentence-complexity"
+        },
+        {
+          "patternId": "Agentlinter_clarity_priority-signal-missing"
+        },
+        {
+          "patternId": "Agentlinter_clarity_obvious-statements"
+        },
+        {
+          "patternId": "Agentlinter_consistency_referenced-files-exist"
+        },
+        {
+          "patternId": "Agentlinter_clarity_no-vague-instructions"
+        },
+        {
+          "patternId": "Agentlinter_clarity_no-contradictions"
+        },
+        {
+          "patternId": "Agentlinter_clarity_naked-conditional"
+        },
+        {
+          "patternId": "Agentlinter_clarity_instruction-density"
+        },
+        {
+          "patternId": "Agentlinter_clarity_has-examples"
+        },
+        {
+          "patternId": "Agentlinter_clarity_escape-hatch-missing"
+        },
+        {
+          "patternId": "Agentlinter_clarity_english-config-files"
+        },
+        {
+          "patternId": "Agentlinter_clarity_duplicate-content"
+        },
+        {
+          "patternId": "Agentlinter_clarity_compound-instruction"
+        },
+        {
+          "patternId": "Agentlinter_clarity_ambiguous-pronoun"
+        },
+        {
+          "patternId": "Agentlinter_clarity_action-without-context"
+        },
+        {
+          "patternId": "Agentlinter_clarity_actionable-instructions"
+        },
+        {
+          "patternId": "Agentlinter_blueprint_identity-defined"
+        },
+        {
+          "patternId": "Agentlinter_blueprint_coverage"
+        },
+        {
+          "patternId": "Agentlinter_blueprint_constraints-defined"
+        }
+      ]
+    },
+    {
+      "toolId": "Trivy",
+      "patterns": [
+        {
+          "patternId": "Trivy_malicious_packages"
+        },
+        {
+          "patternId": "Trivy_vulnerability_high"
+        },
+        {
+          "patternId": "Trivy_vulnerability_critical"
+        },
+        {
+          "patternId": "Trivy_vulnerability_minor"
+        },
+        {
+          "patternId": "Trivy_vulnerability_medium"
+        },
+        {
+          "patternId": "Trivy_secret"
+        }
+      ]
+    },
+    {
+      "toolId": "shellcheck",
+      "patterns": [
+        {
+          "patternId": "shellcheck_SC2035"
+        },
+        {
+          "patternId": "shellcheck_SC2086"
+        },
+        {
+          "patternId": "shellcheck_SC2025"
+        },
+        {
+          "patternId": "shellcheck_SC2148"
+        },
+        {
+          "patternId": "shellcheck_SC2029"
+        },
+        {
+          "patternId": "shellcheck_SC2006"
+        },
+        {
+          "patternId": "shellcheck_SC2016"
+        },
+        {
+          "patternId": "shellcheck_SC2001"
+        },
+        {
+          "patternId": "shellcheck_SC2024"
+        },
+        {
+          "patternId": "shellcheck_SC2028"
+        },
+        {
+          "patternId": "shellcheck_SC2004"
+        },
+        {
+          "patternId": "shellcheck_SC2002"
+        },
+        {
+          "patternId": "shellcheck_SC2026"
+        },
+        {
+          "patternId": "shellcheck_SC2033"
+        },
+        {
+          "patternId": "shellcheck_SC2015"
+        },
+        {
+          "patternId": "shellcheck_SC2034"
+        },
+        {
+          "patternId": "shellcheck_SC2020"
+        },
+        {
+          "patternId": "shellcheck_SC2027"
+        },
+        {
+          "patternId": "shellcheck_SC2036"
+        },
+        {
+          "patternId": "shellcheck_SC2003"
+        },
+        {
+          "patternId": "shellcheck_SC2031"
+        },
+        {
+          "patternId": "shellcheck_SC2022"
+        }
+      ]
+    },
+    {
+      "toolId": "markdownlint",
+      "patterns": [
+        {
+          "patternId": "markdownlint_MD056"
+        },
+        {
+          "patternId": "markdownlint_MD055",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD054",
+          "parameters": {
+            "collapsed": "true",
+            "full": "true",
+            "inline": "true",
+            "autolink": "true",
+            "shortcut": "true",
+            "url_inline": "true"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD053",
+          "parameters": {
+            "ignored_definitions": "[\"//\"]"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD052",
+          "parameters": {
+            "ignored_labels": "[\"x\"]",
+            "shortcut_syntax": "false"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD051",
+          "parameters": {
+            "ignore_case": "false",
+            "ignored_pattern": ""
+          }
+        },
+        {
+          "patternId": "markdownlint_MD050",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD049",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD048",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD046",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD045"
+        },
+        {
+          "patternId": "markdownlint_MD044",
+          "parameters": {
+            "names": "[]",
+            "code_blocks": "true",
+            "html_elements": "true"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD042"
+        },
+        {
+          "patternId": "markdownlint_MD039"
+        },
+        {
+          "patternId": "markdownlint_MD038"
+        },
+        {
+          "patternId": "markdownlint_MD037"
+        },
+        {
+          "patternId": "markdownlint_MD036",
+          "parameters": {
+            "punctuation": ".,;:!?。，；：！？"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD035",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD034"
+        },
+        {
+          "patternId": "markdownlint_MD033",
+          "parameters": {
+            "allowed_elements": "[]",
+            "table_allowed_elements": "[]"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD032"
+        },
+        {
+          "patternId": "markdownlint_MD030",
+          "parameters": {
+            "ol_multi": "1",
+            "ul_multi": "1",
+            "ol_single": "1",
+            "ul_single": "1"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD029",
+          "parameters": {
+            "style": "one_or_ordered"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD028"
+        },
+        {
+          "patternId": "markdownlint_MD027",
+          "parameters": {
+            "list_items": "true"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD026",
+          "parameters": {
+            "punctuation": ".,;:!。，；：！"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD025",
+          "parameters": {
+            "level": "1",
+            "front_matter_title": "^\\s*title\\s*[:=]"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD024",
+          "parameters": {
+            "siblings_only": "false"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD023"
+        },
+        {
+          "patternId": "markdownlint_MD022",
+          "parameters": {
+            "lines_above": "1",
+            "lines_below": "1"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD021"
+        },
+        {
+          "patternId": "markdownlint_MD020"
+        },
+        {
+          "patternId": "markdownlint_MD019"
+        },
+        {
+          "patternId": "markdownlint_MD018"
+        },
+        {
+          "patternId": "markdownlint_MD014"
+        },
+        {
+          "patternId": "markdownlint_MD012",
+          "parameters": {
+            "maximum": "1"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD011"
+        },
+        {
+          "patternId": "markdownlint_MD010",
+          "parameters": {
+            "code_blocks": "true",
+            "spaces_per_tab": "1",
+            "ignore_code_languages": "[]"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD007",
+          "parameters": {
+            "indent": "2",
+            "start_indent": "2",
+            "start_indented": "false"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD005"
+        },
+        {
+          "patternId": "markdownlint_MD004",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD003",
+          "parameters": {
+            "style": "consistent"
+          }
+        },
+        {
+          "patternId": "markdownlint_MD001",
+          "parameters": {
+            "front_matter_title": "^\\s*title\\s*[:=]"
+          }
+        }
+      ]
+    },
+    {
+      "toolId": "Semgrep",
+      "patterns": [
+        {
+          "patternId": "Semgrep_codacy.bash.security.hard-coded-password"
+        },
+        {
+          "patternId": "Semgrep_codacy.k8s.ingress.nginx.retirement.ingress-resource"
+        },
+        {
+          "patternId": "Semgrep_codacy.k8s.ingress.nginx.retirement.ingress-class"
+        },
+        {
+          "patternId": "Semgrep_codacy.k8s.ingress.nginx.retirement.workload"
+        },
+        {
+          "patternId": "Semgrep_codacy.csharp.security.sql-injection.dynamic-query"
+        },
+        {
+          "patternId": "Semgrep_codacy.python.openai.import-without-guardrails"
+        },
+        {
+          "patternId": "Semgrep_codacy.python.openai.non-guardrails-client-usage"
+        },
+        {
+          "patternId": "Semgrep_codacy.python.openai.non-guardrails-direct-call"
+        },
+        {
+          "patternId": "Semgrep_codacy.generic.security.detect-invisible-unicode"
+        },
+        {
+          "patternId": "Semgrep_codacy.generic.plsql.resource-injection"
+        },
+        {
+          "patternId": "Semgrep_codacy.generic.plsql.find-all-passwords"
+        },
+        {
+          "patternId": "Semgrep_ai.typescript.detect-vercel-ai.detect-vercel-ai"
+        },
+        {
+          "patternId": "Semgrep_ai.typescript.detect-promptfoo.detect-promptfoo"
+        },
+        {
+          "patternId": "Semgrep_ai.typescript.detect-openai.detect-openai"
+        },
+        {
+          "patternId": "Semgrep_ai.typescript.detect-mistral.detect-mistral"
+        },
+        {
+          "patternId": "Semgrep_ai.typescript.detect-gemini.detect-gemini"
+        },
+        {
+          "patternId": "Semgrep_ai.typescript.detect-anthropic.detect-anthropic"
+        },
+        {
+          "patternId": "Semgrep_ai.swift.detect-gemini.detect-gemini"
+        },
+        {
+          "patternId": "Semgrep_ai.swift.detect-apple-core-ml.detect-apple-core-ml"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-tensorflow.detect-tensorflow"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-pytorch.detect-pytorch"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-openai.detect-openai"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-mistral.detect-mistral"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-langchain.detect-langchain"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-huggingface.detect-huggingface"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-gemini.detect-gemini"
+        },
+        {
+          "patternId": "Semgrep_ai.python.detect-anthropic.detect-anthropic"
+        },
+        {
+          "patternId": "Semgrep_ai.kotlin.detect-gemini.detect-gemini"
+        },
+        {
+          "patternId": "Semgrep_ai.go.detect-openai.detect-openai"
+        },
+        {
+          "patternId": "Semgrep_ai.go.detect-gemini.detect-gemini"
+        },
+        {
+          "patternId": "Semgrep_ai.dart.detect-gemini.detect-gemini"
+        },
+        {
+          "patternId": "Semgrep_ai.csharp.detect-openai.detect-openai"
+        },
+        {
+          "patternId": "Semgrep_codacy.csharp.security.hard-coded-password"
+        },
+        {
+          "patternId": "Semgrep_python.lang.security.audit.sqli.aiopg-sqli.aiopg-sqli"
+        }
+      ]
+    },
+    {
+      "toolId": "jackson",
+      "patterns": [
+        {
+          "patternId": "jackson_duplicate-keys"
+        },
+        {
+          "patternId": "jackson_parse-error"
+        }
+      ]
+    },
+    {
+      "toolId": "Checkov",
+      "patterns": [
+        {
+          "patternId": "Checkov_CKV2_GCP_36"
+        },
+        {
+          "patternId": "Checkov_CKV2_GCP_35"
+        },
+        {
+          "patternId": "Checkov_CKV_AZURE_144"
+        },
+        {
+          "patternId": "Checkov_CKV_AZURE_142"
+        },
+        {
+          "patternId": "Checkov_CKV2_GCP_3"
+        },
+        {
+          "patternId": "Checkov_CKV_GCP_3"
+        }
+      ]
+    }
+  ],
+  "exclude": [
+    "CLAUDE.md"
+  ]
+}
