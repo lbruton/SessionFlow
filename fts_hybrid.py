@@ -252,9 +252,14 @@ class FTSIndex:
             project_root: when provided, count only rows whose project_root matches.
 
         Returns:
-            int: row count (stub 0 until C.3 implements the query).
+            int: row count, optionally filtered by project_root.
         """
-        return 0
+        sql = f"SELECT count(*) FROM {self.table_name}"
+        params: tuple = ()
+        if project_root is not None:
+            sql += " WHERE project_root = ?"
+            params = (project_root,)
+        return int(conn.execute(sql, params).fetchone()[0])
 
     def delete(self, conn: sqlite3.Connection, column: str, value):
         """Delete rows where column == value."""
