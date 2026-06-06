@@ -1555,10 +1555,9 @@ def _count_milvus_turns(db_path=None, project_root=None) -> int:
     ``fts_lag_status`` cannot route this count through ``get_stats`` (which opens
     the drift-GUARDED ``milvus_client`` and RAISES under persistent schema drift):
     the lag readout must survive the very incident it exists to report. This helper
-    streams ``doc_id`` rows via the migration client's ``query_iterator`` — the same
-    batching shape ``_query_batches`` uses — counting them without materializing the
-    full set, and applies the same ``project_root`` filter ``get_stats`` builds so
-    the lag stays apples-to-apples.
+    issues a server-side ``count(*)`` query via the migration client, applying the
+    same ``project_root`` filter ``get_stats`` builds so the lag stays
+    apples-to-apples — without streaming every ``doc_id`` row back to the client.
 
     Args:
         db_path: Milvus DB path.
@@ -1572,25 +1571,15 @@ def _count_milvus_turns(db_path=None, project_root=None) -> int:
         if project_root
         else None
     )
-    count = 0
     with milvus_client_for_migration(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
             return 0
-        iterator = client.query_iterator(
+        res = client.query(
             collection_name=COLLECTION_NAME,
-            batch_size=1000,
             filter=filter_expr or "",
-            output_fields=["doc_id"],
+            output_fields=["count(*)"],
         )
-        try:
-            while True:
-                batch = iterator.next()
-                if not batch:
-                    break
-                count += len(batch)
-        finally:
-            iterator.close()
-    return count
+        return int(res[0]["count(*)"]) if res else 0
 
 
 def fts_lag_status(db_path=None, project_root=None, milvus_turn_count=None):
@@ -1805,7 +1794,8 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
             output_fields = ["doc_id", "document", "session_id", "git_branch",
                              "turn_index", "timestamp", "chunk_type", "project_root",
                              "logical_session_id", "provider", "source_kind",
-                             "source_class", "source_id", "source_path", "issue_ids"]
+                             "source_class", "source_id", "source_path",
+                             "transcript_file", "issue_ids"]
             backfill_defaults = default_provider_metadata()
             BATCH_FETCH = 100
             inserted = 0
