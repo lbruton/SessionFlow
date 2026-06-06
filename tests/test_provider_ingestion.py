@@ -182,6 +182,91 @@ def test_backfill_fts_rehydrates_issue_ids(monkeypatch):
     assert rec["issue_ids"] == ",SESF-25,"
 
 
+def _run_backfill_with_counts(monkeypatch, *, milvus_count, fts_count_after):
+    """Drive backfill_fts() offline with controllable Milvus + post-hydrate FTS counts.
+
+    Returns the number of ``clear_fts_backfill_sentinel`` invocations observed so
+    the D-5 sentinel-clear gate can be asserted in both directions.
+
+    Arrangement:
+      * Milvus exposes ``milvus_count`` distinct doc_ids (the "truth" row count).
+      * FTS starts empty, so every doc is treated as missing and re-hydrated.
+      * After hydration, ``_fts.count_rows`` reports ``fts_count_after`` — the lever
+        that decides whether the sentinel may be cleared.
+    """
+    import fts_hybrid
+
+    doc_ids = [f"doc-{i}" for i in range(milvus_count)]
+
+    class _FTSConn:
+        def execute(self, *args, **kwargs):
+            class _Cursor:
+                def fetchall(self):
+                    return []  # FTS empty → every Milvus doc is "missing"
+
+            return _Cursor()
+
+    class _BackfillMilvus:
+        def query(self, *args, **kwargs):
+            return [
+                {
+                    "doc_id": d,
+                    "document": "Working on SESF-38",
+                    "session_id": "s1",
+                    "timestamp": "2026-05-01T10:00:00",
+                    "issue_ids": ",SESF-38,",
+                }
+                for d in doc_ids
+            ]
+
+    @contextmanager
+    def _fake_client(db_path=None):
+        yield _BackfillMilvus()
+
+    monkeypatch.setattr(rag_engine, "milvus_client", _fake_client)
+    monkeypatch.setattr(
+        rag_engine, "_query_batches",
+        lambda *args, **kwargs: iter([[{"doc_id": d} for d in doc_ids]]),
+    )
+
+    monkeypatch.setattr(rag_engine._fts, "connection", lambda db_path: _FTSConn())
+    monkeypatch.setattr(rag_engine._fts, "insert", lambda conn, records: None)
+    monkeypatch.setattr(rag_engine._fts, "close_ephemeral", lambda conn: None)
+    # Post-hydrate FTS row count is the gate input for clearing the sentinel.
+    monkeypatch.setattr(
+        rag_engine._fts, "count_rows", lambda conn, project_root=None: fts_count_after
+    )
+
+    cleared = {"count": 0}
+
+    def _spy_clear():
+        cleared["count"] += 1
+
+    # backfill_fts imports clear_fts_backfill_sentinel from fts_hybrid at call time.
+    monkeypatch.setattr(fts_hybrid, "clear_fts_backfill_sentinel", _spy_clear)
+
+    rag_engine.backfill_fts(
+        db_path=os.path.join(tempfile.gettempdir(), "sessionflow-d5-test.db")
+    )
+    return cleared["count"]
+
+
+def test_backfill_fts_keeps_sentinel_when_hydration_incomplete(monkeypatch):
+    # D-5 — if the post-hydrate FTS count is still BELOW the Milvus count, the
+    # sentinel MUST remain set (keyword search is still degraded). Today
+    # backfill_fts clears it unconditionally, so this asserts 0 clears and fails RED.
+    clears = _run_backfill_with_counts(monkeypatch, milvus_count=10, fts_count_after=4)
+    assert clears == 0
+
+
+def test_backfill_fts_clears_sentinel_when_hydration_complete(monkeypatch):
+    # D-5 — once the FTS count reaches (or exceeds) the Milvus count, the sentinel
+    # IS cleared. This direction passes today (unconditional clear) and must keep
+    # passing after C gates the clear, pinning the positive branch.
+    clears = _run_backfill_with_counts(monkeypatch, milvus_count=10, fts_count_after=10)
+    assert clears == 1
+
+
 @pytest.mark.anyio
 async def test_provider_ingestion_drains_codex_job_to_index_and_cursor(
     tmp_path,
