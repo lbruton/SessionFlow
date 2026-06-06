@@ -766,11 +766,17 @@ def _escape_filter_scalar(value: str) -> str:
         introduced when escaping a quote would itself be doubled. This also stops
         a trailing backslash from escaping the literal's closing quote and
         consuming the rest of the filter expression (SESF-33).
+      - A literal newline or carriage return is not a valid character inside a
+        Milvus string literal (the grammar's DoubleSChar excludes them), so each
+        is rewritten to its escape form (backslash-n / backslash-r); tabs are
+        likewise escaped for consistency. These run after the backslash doubling
+        so the escape backslash they introduce is not itself re-doubled.
     """
     if "\x00" in value:
         raise ValueError("Filter scalar value must not contain NUL bytes")
     value = value.replace("\\", "\\\\")
-    return value.replace('"', '\\"')
+    value = value.replace('"', '\\"')
+    return value.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
 
 
 def _issue_id_containment_token(issue_id: str) -> str:

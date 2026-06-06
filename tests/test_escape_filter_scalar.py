@@ -99,6 +99,33 @@ def test_whitespace_is_preserved():
     assert esc("  spaced value  ") == "  spaced value  "
 
 
+def test_newline_is_escaped():
+    # A literal newline is not a valid Milvus string char (grammar); -> \n.
+    assert esc("a\nb") == "a" + BACKSLASH + "nb"
+
+
+def test_carriage_return_is_escaped():
+    # A literal CR is likewise grammar-forbidden inside the literal; -> \r.
+    assert esc("a\rb") == "a" + BACKSLASH + "rb"
+
+
+def test_tab_is_escaped():
+    # Tabs are legal literals but escaped for consistency; -> \t.
+    assert esc("a\tb") == "a" + BACKSLASH + "tb"
+
+
+def test_crlf_is_escaped_to_both_sequences():
+    # CRLF -> \r\n; the two control chars escape independently.
+    assert esc("a\r\nb") == "a" + BACKSLASH + "r" + BACKSLASH + "nb"
+
+
+def test_literal_backslash_n_is_not_treated_as_newline():
+    # Input is backslash + 'n' (two chars), not a newline: only the backslash is
+    # doubled, the 'n' is untouched — proves control-char escaping runs after,
+    # and only on, real control characters.
+    assert esc("a" + BACKSLASH + "nb") == "a" + BACKSLASH * 2 + "nb"
+
+
 # ---------------------------------------------------------------------------
 # _build_milvus_filter — backslash-bearing values across every escaped scalar
 # ---------------------------------------------------------------------------
@@ -120,6 +147,14 @@ def test_project_root_quote_and_backslash_escaped():
     expr = _build(project_root="/a" + QUOTE + "b" + BACKSLASH)
     assert expr == 'project_root == "/a' + BACKSLASH + QUOTE + "b" + BACKSLASH * 2 + '"'
     assert _trailing_backslashes_before_closing_quote(expr) % 2 == 0
+
+
+def test_project_root_newline_does_not_reach_filter_raw():
+    # Reviewer example (PR #31): a newline in a path field must be escaped, not
+    # interpolated raw, or Milvus rejects the literal (DoubleSChar excludes LF).
+    expr = _build(project_root="/a\nb")
+    assert expr == 'project_root == "/a' + BACKSLASH + 'nb"'
+    assert "\n" not in expr
 
 
 def test_date_from_trailing_backslash_is_doubled():
