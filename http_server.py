@@ -11,6 +11,7 @@ Health: curl http://127.0.0.1:7102/health
 """
 
 import asyncio
+import concurrent.futures
 import contextlib
 from dataclasses import asdict, dataclass
 import json
@@ -36,6 +37,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 import rag_engine
 import transcript_parser
 import file_watcher
+import fts_hybrid
 from provider_adapters import LEGAL_PROVIDERS, is_valid_issue_token
 from backfill_manager import BackfillManager
 from embedding_control import EmbeddingIdentity, get_embedding_budget
@@ -311,6 +313,13 @@ _backfill_manager = BackfillManager(_BACKFILL_STATE)
 _backfill_drain_event: asyncio.Event | None = None
 _backfill_drain_lock: asyncio.Lock | None = None
 
+# FTS heal worker primitives (SESF-38). The heal loop reuses the drain cadence
+# but owns a dedicated single-thread executor so a long blocking backfill never
+# competes with MLX embedding work on rag_engine's _embed_executor.
+_fts_heal_event: asyncio.Event | None = None
+_fts_heal_state: "FtsHealState | None" = None
+_fts_heal_executor: concurrent.futures.ThreadPoolExecutor | None = None
+
 # TTL cache for provider health — avoid expensive I/O on every /health probe.
 _PROVIDER_HEALTH_TTL = 30  # seconds
 _provider_health_cache: dict | None = None
@@ -366,6 +375,93 @@ async def _backfill_drain_worker(interval: float = BACKFILL_DRAIN_INTERVAL) -> N
 
         try:
             await asyncio.wait_for(event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            pass
+
+
+def _ensure_fts_heal_primitives() -> None:
+    """Create the heal Event, state, and dedicated executor lazily.
+
+    Mirrors ``_ensure_backfill_drain_primitives`` so the loop-bound ``asyncio``
+    primitive and the heal worker's single-thread ThreadPoolExecutor are built
+    inside the running event loop on first use. The executor is kept SEPARATE
+    from rag_engine's MLX ``_embed_executor`` (SESF-38 D-8) so a blocking FTS
+    backfill never contends with embedding work.
+    """
+    global _fts_heal_event, _fts_heal_state, _fts_heal_executor
+    if _fts_heal_event is None:
+        _fts_heal_event = asyncio.Event()
+    if _fts_heal_state is None:
+        _fts_heal_state = FtsHealState()
+    if _fts_heal_executor is None:
+        _fts_heal_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="fts-heal"
+        )
+
+
+async def _fts_heal_run_once(state: "FtsHealState", *, first_tick: bool) -> None:
+    """Make and attempt one FTS heal decision for a single cadence tick.
+
+    On the first tick the backfill runs unconditionally (preserving the startup
+    catch-up of the old one-shot ``_fts_backfill``); on later ticks it runs only
+    when ``fts_hybrid.fts_backfill_required()`` reports the sentinel is set. The
+    backfill itself is dispatched on the dedicated heal executor so it never
+    blocks the event loop. A ``FtsBackfillTransientError`` is recorded on
+    ``state`` (with a log-once WARN) instead of crashing the loop.
+
+    Args:
+        state: The worker-owned ``FtsHealState`` carrying backoff + log-once state.
+        first_tick: ``True`` only on the very first tick of the heal loop.
+    """
+    if not first_tick and not fts_hybrid.fts_backfill_required():
+        return
+
+    _ensure_fts_heal_primitives()
+    executor = _fts_heal_executor
+    db_path = MILVUS_URI
+    loop = asyncio.get_event_loop()
+    try:
+        backfilled = await loop.run_in_executor(
+            executor, lambda: rag_engine.backfill_fts(db_path=db_path)
+        )
+    except rag_engine.FtsBackfillTransientError as exc:
+        if state.should_warn(exc):
+            logger.warning("FTS heal backfill failed (transient): %s", exc)
+        state.record_failure(exc)
+        return
+
+    state.record_success()
+    if backfilled:
+        logger.info("FTS heal backfill: %s records", backfilled)
+
+
+async def _fts_heal_worker() -> None:
+    """Run the recurring FTS heal loop for the life of the HTTP server.
+
+    Calls ``_fts_heal_run_once`` once per cadence tick — ``first_tick=True`` on
+    the very first iteration only — then waits on the heal Event with a bounded
+    timeout of ``state.next_delay()`` (the bounded-backoff schedule). The loop
+    only ever exits on cancellation; transient failures are absorbed by
+    ``_fts_heal_run_once`` and surfaced through the backoff schedule.
+    """
+    _ensure_fts_heal_primitives()
+    event = _fts_heal_event
+    state = _fts_heal_state
+    if event is None or state is None:
+        return
+    first_tick = True
+    while True:
+        event.clear()
+        try:
+            await _fts_heal_run_once(state, first_tick=first_tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("FTS heal worker tick failed")
+        first_tick = False
+
+        try:
+            await asyncio.wait_for(event.wait(), timeout=state.next_delay())
         except asyncio.TimeoutError:
             pass
 
@@ -775,6 +871,7 @@ async def lifespan(app: Starlette):
     print(f"[HTTP] PID {os.getpid()} written to {PID_FILE}", file=sys.stderr)
 
     global _model_loaded, _server_mode_ready, _backfill_drain_event, _backfill_drain_lock
+    global _fts_heal_event, _fts_heal_state, _fts_heal_executor
 
     # Pre-load embedding model
     try:
@@ -800,25 +897,12 @@ async def lifespan(app: Starlette):
     _ensure_backfill_drain_primitives()
     backfill_drain_task = asyncio.create_task(_backfill_drain_worker())
 
-    # Backfill FTS from Milvus for any records indexed before FTS was added.
-    # Runs as a background task so it doesn't block HTTP server binding.
-    async def _fts_backfill():
-        """
-        Trigger a full-text-search backfill on the configured Milvus database shortly after startup.
-        
-        This coroutine waits briefly to allow the HTTP server to bind, runs rag_engine.backfill_fts(db_path=db_path) in a threadpool, writes a short summary to stderr if records were backfilled, and writes a warning to stderr on failure.
-        """
-        await asyncio.sleep(1)  # Let HTTP server bind first
-        try:
-            loop = asyncio.get_event_loop()
-            backfilled = await loop.run_in_executor(
-                None, lambda: rag_engine.backfill_fts(db_path=db_path))
-            if backfilled:
-                print(f"[HTTP] FTS backfill: {backfilled} records", file=sys.stderr)
-        except Exception as e:
-            print(f"[HTTP] Warning: FTS backfill failed: {e}", file=sys.stderr)
-
-    asyncio.create_task(_fts_backfill())
+    # Recurring FTS heal worker (SESF-38) — replaces the old one-shot
+    # _fts_backfill. The first tick runs the startup catch-up backfill
+    # unconditionally; later ticks heal only when the sentinel reports drift.
+    # Runs on a dedicated executor so it never blocks HTTP server binding.
+    _ensure_fts_heal_primitives()
+    fts_heal_task = asyncio.create_task(_fts_heal_worker())
 
     # Start global file watcher on ~/.claude/projects/
     try:
@@ -855,6 +939,17 @@ async def lifespan(app: Starlette):
         await backfill_drain_task
     _backfill_drain_event = None
     _backfill_drain_lock = None
+
+    # Tear down the FTS heal worker: cancel the loop, await any in-flight heal
+    # with a bounded timeout, then shut down the dedicated executor.
+    fts_heal_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+        await asyncio.wait_for(fts_heal_task, timeout=BACKFILL_DRAIN_INTERVAL)
+    if _fts_heal_executor is not None:
+        _fts_heal_executor.shutdown(wait=False)
+    _fts_heal_event = None
+    _fts_heal_state = None
+    _fts_heal_executor = None
     if HEARTBEAT_FILE.exists():
         try:
             data = json.loads(HEARTBEAT_FILE.read_text())
