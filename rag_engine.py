@@ -28,15 +28,17 @@ os.environ['HF_HUB_OFFLINE'] = '1'
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 
 from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
+from pymilvus.exceptions import MilvusException
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from typing import Iterator, List, Dict, Optional
 import asyncio
 import logging
 import sys
+import threading
 import time
 
-from fts_hybrid import FTSIndex, rrf_merge
+from fts_hybrid import FTSIndex, fts_backfill_required, rrf_merge
 from embedding_control import (
     EmbeddingIdentity,
     get_embedding_budget,
@@ -92,6 +94,19 @@ _SEARCH_OUTPUT_FIELDS = [
     "source_kind", "source_class", "source_id", "source_path",
     "issue_ids",
 ]
+
+
+class FtsBackfillTransientError(Exception):
+    """Raised by backfill_fts on a transient Milvus / schema-drift failure (SESF-38).
+
+    Signals the FTS heal worker to retry on a later cadence tick rather than treat the
+    failure as terminal. The originating exception is preserved as __cause__.
+    """
+
+
+# Serializes FTS heal runs: a non-blocking acquire in backfill_fts ensures a second
+# heal attempt (e.g. an overlapping cadence tick) returns early instead of double-work.
+_fts_backfill_lock = threading.Lock()
 
 
 def _extract_issue_ids(text: str) -> str:
@@ -535,6 +550,14 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     if not drift:
         return
 
+    # SESF-38 AC-3: re-describe once (cache-free) before gating either branch.
+    # detect_schema_drift issues a fresh describe_collection, so a stale/cached
+    # first read that clears on the second describe must NOT raise or migrate.
+    # This re-verify gates BOTH the auto-migrate and the raise branches.
+    drift = detect_schema_drift(client)
+    if not drift:
+        return
+
     auto = os.getenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", "").lower() in {"1", "true", "yes", "on"}
     if auto:
         print(
@@ -547,9 +570,13 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
 
     raise RuntimeError(
         f"Milvus collection {COLLECTION_NAME!r} schema is out of date "
-        f"(drift={drift}). Run `python cleanup.py migrate-schema` to drop "
-        f"and recreate it (destructive), or set "
-        f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 to migrate on startup."
+        f"(drift={drift}). First try the non-destructive option: restart the "
+        f"server — a transient describe can clear on a fresh read. If drift "
+        f"persists, recover with one of these DESTRUCTIVE options (both lose "
+        f"all turns): run `python cleanup.py migrate-schema` to drop and "
+        f"recreate it (destructive — all turns lost), or set "
+        f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 to migrate on startup "
+        f"(destructive — all turns lost)."
     )
 
 
@@ -1503,12 +1530,105 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
         provider_name = r.get("provider", defaults["provider"])
         providers[provider_name] = providers.get(provider_name, 0) + 1
 
-    return {
+    stats = {
         "total_turns": total,
         "sessions": len(sessions),
         "branches": sorted(branches),
         "by_type": by_type,
         "providers": providers,
+    }
+
+    # Additive, project-scoped FTS lag keys (SESF-38 AC-6). Pass the Milvus total
+    # we just computed so fts_lag_status does not re-enter get_stats.
+    lag = fts_lag_status(
+        db_path=db_path, project_root=project_root, milvus_turn_count=total
+    )
+    stats["fts_row_count"] = lag["fts_row_count"]
+    stats["fts_lag"] = lag["fts_lag"]
+    stats["fts_backfill_required"] = lag["fts_backfill_required"]
+    return stats
+
+
+def _count_milvus_turns(db_path=None, project_root=None) -> int:
+    """Count Milvus turn rows through the DRIFT-TOLERANT migration client (SESF-38 D-6).
+
+    ``fts_lag_status`` cannot route this count through ``get_stats`` (which opens
+    the drift-GUARDED ``milvus_client`` and RAISES under persistent schema drift):
+    the lag readout must survive the very incident it exists to report. This helper
+    issues a server-side ``count(*)`` query via the migration client, applying the
+    same ``project_root`` filter ``get_stats`` builds so the lag stays
+    apples-to-apples — without streaming every ``doc_id`` row back to the client.
+
+    Args:
+        db_path: Milvus DB path.
+        project_root: when provided, scope the count to that project.
+
+    Returns:
+        int: the number of turn rows (project-scoped when ``project_root`` is set).
+    """
+    filter_expr = (
+        f'project_root == "{_escape_filter_scalar(project_root)}"'
+        if project_root
+        else None
+    )
+    with milvus_client_for_migration(db_path) as client:
+        if not client.has_collection(COLLECTION_NAME):
+            return 0
+        res = client.query(
+            collection_name=COLLECTION_NAME,
+            filter=filter_expr or "",
+            output_fields=["count(*)"],
+            limit=1,
+        )
+        return int(res[0]["count(*)"]) if res else 0
+
+
+def fts_lag_status(
+    db_path: Optional[str] = None,
+    project_root: Optional[str] = None,
+    milvus_turn_count: Optional[int] = None,
+) -> Dict[str, object]:
+    """Return static FTS-vs-Milvus lag data for observability (SESF-38 AC-6).
+
+    Computes the difference between the Milvus turn count and the FTS row count,
+    both scoped to ``project_root`` when provided. The lag is static — no worker
+    state (``consecutive_failures``/``last_error``) is included here.
+
+    Args:
+        db_path: Milvus DB path; also derives the FTS sidecar path.
+        project_root: when provided, scope both counts to that project.
+        milvus_turn_count: pre-computed Milvus total; when None it is counted via
+            the drift-tolerant ``_count_milvus_turns`` (get_stats passes its own
+            already-computed total to avoid a double scan and recursion).
+
+    Returns:
+        dict: keys ``milvus_turn_count``, ``fts_row_count``, ``fts_lag``
+        (milvus_turn_count - fts_row_count), and ``fts_backfill_required``.
+    """
+    if milvus_turn_count is None:
+        # Standalone path (e.g. /health): count through the drift-tolerant
+        # migration client, NOT get_stats, so observability survives drift (D-6).
+        milvus_turn_count = _count_milvus_turns(
+            db_path=db_path, project_root=project_root
+        )
+
+    # FTS count on the calling thread (SESF-13 thread affinity): open an
+    # ephemeral connection, count, and close it.
+    conn = _fts.connection(db_path)
+    try:
+        fts_row_count = _fts.count_rows(conn, project_root=project_root)
+    finally:
+        _fts.close_ephemeral(conn)
+
+    fts_lag = milvus_turn_count - fts_row_count
+    return {
+        "milvus_turn_count": milvus_turn_count,
+        "fts_row_count": fts_row_count,
+        "fts_lag": fts_lag,
+        # Pure sentinel state (D-7/AC-6): normal indexing lag must NOT report a
+        # required rebuild — only the explicit backfill sentinel does. Referenced
+        # via the module-level binding so it stays one patchable seam.
+        "fts_backfill_required": fts_backfill_required(),
     }
 
 
@@ -1664,81 +1784,128 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
     if not db_path:
         return 0
 
-    fts_conn = _fts.connection(db_path)
+    # Serialize heal runs: if another backfill is already in flight (e.g. an
+    # overlapping cadence tick) skip rather than double-hydrate (SESF-38 D-3).
+    if not _fts_backfill_lock.acquire(blocking=False):
+        logger.debug("FTS backfill already running; skipping overlapping heal")
+        return 0
+
     try:
-        # Pass 2: hydrate missing rows in small batches and stream into FTS
-        # one batch at a time so peak memory stays at O(BATCH_FETCH) regardless
-        # of how many rows are missing — see SESF-5.
-        output_fields = ["doc_id", "document", "session_id", "git_branch",
-                         "turn_index", "timestamp", "chunk_type", "project_root",
-                         "logical_session_id", "provider", "source_kind",
-                         "source_class", "source_id", "source_path", "issue_ids"]
-        backfill_defaults = default_provider_metadata()
-        BATCH_FETCH = 100
-        inserted = 0
-
-        with milvus_client(db_path) as client:
-            def hydrate_and_insert(doc_ids: list) -> None:
-                nonlocal inserted
-                for i in range(0, len(doc_ids), BATCH_FETCH):
-                    fetch_chunk = doc_ids[i:i + BATCH_FETCH]
-                    ids_quoted = ", ".join(json.dumps(d) for d in fetch_chunk)
-                    batch = client.query(
-                        collection_name=COLLECTION_NAME,
-                        filter=f"doc_id in [{ids_quoted}]",
-                        limit=len(fetch_chunk),
-                        output_fields=output_fields,
-                    )
-                    records = [
-                        {
-                            "doc_id": r["doc_id"],
-                            "content": r.get("document", ""),
-                            "session_id": r.get("session_id", ""),
-                            "logical_session_id": r.get("logical_session_id", r.get("session_id", "")),
-                            "provider": r.get("provider", backfill_defaults["provider"]),
-                            "source_kind": r.get("source_kind", backfill_defaults["source_kind"]),
-                            "source_class": r.get("source_class", backfill_defaults["source_class"]),
-                            "source_id": r.get("source_id", ""),
-                            "source_path": r.get("source_path", r.get("transcript_file", "")),
-                            "git_branch": r.get("git_branch", ""),
-                            "turn_index": r.get("turn_index", 0),
-                            "timestamp": r.get("timestamp", ""),
-                            "chunk_type": r.get("chunk_type", "turn"),
-                            "project_root": r.get("project_root", ""),
-                            "issue_ids": r.get("issue_ids", ""),
-                        }
-                        for r in batch
-                    ]
-                    if records:
-                        _fts.insert(fts_conn, records)
-                        inserted += len(records)
-
-            # Diff against FTS in bounded chunks, then hydrate each chunk before
-            # moving on so missing doc IDs never grow with collection size.
-            for batch in _query_batches(["doc_id"], batch_size=500, db_path=db_path):
-                chunk = [r.get("doc_id", "") for r in batch if r.get("doc_id", "")]
-                if not chunk:
-                    continue
-                placeholders = ",".join("?" for _ in chunk)
-                rows = fts_conn.execute(
-                    f"SELECT doc_id FROM {_fts.table_name} WHERE doc_id IN ({placeholders})",
-                    chunk,
-                ).fetchall()
-                existing = {row[0] for row in rows}
-                missing_doc_ids = [d for d in chunk if d not in existing]
-                if missing_doc_ids:
-                    hydrate_and_insert(missing_doc_ids)
-
-        logger.info("FTS backfill: inserted %d records", inserted)
-        # Sentinel-driven warning is no longer relevant once we've repopulated.
+        fts_conn = _fts.connection(db_path)
         try:
-            from fts_hybrid import clear_fts_backfill_sentinel
-            clear_fts_backfill_sentinel()
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Failed to clear FTS sentinel: %s", exc)
-        return inserted
+            # Pass 2: hydrate missing rows in small batches and stream into FTS
+            # one batch at a time so peak memory stays at O(BATCH_FETCH) regardless
+            # of how many rows are missing — see SESF-5.
+            # Reuse the shared search field list so backfill and vector search
+            # stay in sync — a drifted copy is how transcript_file went missing.
+            output_fields = _SEARCH_OUTPUT_FIELDS
+            backfill_defaults = default_provider_metadata()
+            BATCH_FETCH = 100
+            inserted = 0
+            # Truth row count streamed from Milvus during the diff pass; the
+            # sentinel clear is gated on the FTS count reaching this (SESF-38 D-5).
+            milvus_count = 0
+
+            # Convert transient Milvus / schema-drift faults (a RuntimeError at
+            # context-manager open from the drift guard, or a MilvusException from
+            # a query) into the typed transient error so the heal worker retries
+            # on a later tick instead of treating them as terminal (SESF-38 D-4).
+            try:
+                with milvus_client(db_path) as client:
+                    def hydrate_and_insert(doc_ids: list) -> None:
+                        nonlocal inserted
+                        for i in range(0, len(doc_ids), BATCH_FETCH):
+                            fetch_chunk = doc_ids[i:i + BATCH_FETCH]
+                            ids_quoted = ", ".join(json.dumps(d) for d in fetch_chunk)
+                            batch = client.query(
+                                collection_name=COLLECTION_NAME,
+                                filter=f"doc_id in [{ids_quoted}]",
+                                limit=len(fetch_chunk),
+                                output_fields=output_fields,
+                            )
+                            records = [
+                                {
+                                    "doc_id": r["doc_id"],
+                                    "content": r.get("document", ""),
+                                    "session_id": r.get("session_id", ""),
+                                    "logical_session_id": r.get("logical_session_id", r.get("session_id", "")),
+                                    "provider": r.get("provider", backfill_defaults["provider"]),
+                                    "source_kind": r.get("source_kind", backfill_defaults["source_kind"]),
+                                    "source_class": r.get("source_class", backfill_defaults["source_class"]),
+                                    "source_id": r.get("source_id", ""),
+                                    "source_path": r.get("source_path", r.get("transcript_file", "")),
+                                    "git_branch": r.get("git_branch", ""),
+                                    "turn_index": r.get("turn_index", 0),
+                                    "timestamp": r.get("timestamp", ""),
+                                    "chunk_type": r.get("chunk_type", "turn"),
+                                    "project_root": r.get("project_root", ""),
+                                    "issue_ids": r.get("issue_ids", ""),
+                                }
+                                for r in batch
+                            ]
+                            if records:
+                                _fts.insert(fts_conn, records)
+                                inserted += len(records)
+
+                    # Diff against FTS in bounded chunks, then hydrate each chunk
+                    # before moving on so missing doc IDs never grow with
+                    # collection size.
+                    for batch in _query_batches(["doc_id"], batch_size=500, db_path=db_path):
+                        chunk = [r.get("doc_id", "") for r in batch if r.get("doc_id", "")]
+                        if not chunk:
+                            continue
+                        milvus_count += len(chunk)
+                        placeholders = ",".join("?" for _ in chunk)
+                        rows = fts_conn.execute(
+                            f"SELECT doc_id FROM {_fts.table_name} WHERE doc_id IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                        existing = {row[0] for row in rows}
+                        missing_doc_ids = [d for d in chunk if d not in existing]
+                        if missing_doc_ids:
+                            hydrate_and_insert(missing_doc_ids)
+            except RuntimeError as exc:
+                # Only the schema-drift guard (_ensure_collection) is transient and
+                # worth retrying; other RuntimeErrors — model mismatch, model not
+                # cached, or genuine logic bugs — must surface, not retry forever.
+                if "schema is out of date" not in str(exc):
+                    raise
+                raise FtsBackfillTransientError(
+                    "FTS backfill aborted on transient Milvus / schema-drift fault"
+                ) from exc
+            except MilvusException as exc:
+                raise FtsBackfillTransientError(
+                    "FTS backfill aborted on transient Milvus query fault"
+                ) from exc
+
+            logger.info("FTS backfill: inserted %d records", inserted)
+            # Only clear the sentinel once FTS has caught up to the Milvus truth
+            # count; a still-degraded keyword index keeps the warning live so a
+            # later heal tick retries (SESF-38 D-5). If the count can't be read
+            # we err toward the legacy clear-on-completion behavior rather than
+            # leaving a healthy index flagged forever.
+            should_clear = True
+            try:
+                fts_count = _fts.count_rows(fts_conn)
+                should_clear = fts_count >= milvus_count
+                if not should_clear:
+                    logger.info(
+                        "FTS backfill incomplete (%d/%d rows); leaving sentinel set",
+                        fts_count, milvus_count,
+                    )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Failed to read FTS row count: %s", exc)
+            if should_clear:
+                try:
+                    from fts_hybrid import clear_fts_backfill_sentinel
+                    clear_fts_backfill_sentinel()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("Failed to clear FTS sentinel: %s", exc)
+            return inserted
+        finally:
+            _fts.close_ephemeral(fts_conn)
     finally:
-        _fts.close_ephemeral(fts_conn)
+        _fts_backfill_lock.release()
 
 
 def clear_collection(db_path: Optional[str] = None):

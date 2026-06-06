@@ -241,6 +241,28 @@ class FTSIndex:
             )
         conn.commit()
 
+    def count_rows(self, conn: sqlite3.Connection, project_root: Optional[str] = None) -> int:
+        """Return the number of rows in the FTS table (SESF-38 AC-6).
+
+        Runs `SELECT count(*) FROM {self.table_name}`, adding a
+        `WHERE project_root = ?` filter when `project_root` is supplied (the
+        turns_fts table stores project_root), so callers can read either the
+        global row count or a single project's count.
+
+        Args:
+            conn: the per-thread sqlite connection for this FTS index (SESF-13 thread affinity).
+            project_root: when provided, count only rows whose project_root matches.
+
+        Returns:
+            int: row count, optionally filtered by project_root.
+        """
+        sql = f"SELECT count(*) FROM {self.table_name}"
+        params: tuple = ()
+        if project_root is not None:
+            sql += " WHERE project_root = ?"
+            params = (project_root,)
+        return int(conn.execute(sql, params).fetchone()[0])
+
     def delete(self, conn: sqlite3.Connection, column: str, value):
         """Delete rows where column == value."""
         conn.execute(f"DELETE FROM {self.table_name} WHERE {column} = ?", (value,))
