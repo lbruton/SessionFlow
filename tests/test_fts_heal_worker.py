@@ -1,12 +1,10 @@
-"""RED tests for SESF-38 AC-1 (self-heal cadence) and D-4 (typed transient raise).
+"""Tests for SESF-38 AC-1 (self-heal cadence) and D-4 (typed transient raise).
 
-Cohort B (TDD RED). These tests MUST fail today: the FTS heal worker seam
-``http_server._fts_heal_run_once`` does not exist yet (Cohort C task C.6 adds
-it), and ``rag_engine.backfill_fts`` does not yet convert transient Milvus /
-schema-drift failures into ``rag_engine.FtsBackfillTransientError`` (C.2 adds
-that catch). Once both land with the contract documented below, these pass.
+These tests verify the FTS heal worker seam ``http_server._fts_heal_run_once``
+and ``rag_engine.backfill_fts``'s conversion of transient Milvus / schema-drift
+failures into ``rag_engine.FtsBackfillTransientError``, per the contract below.
 
-Worker seam contract assumed here (C.6 MUST honor it):
+Worker seam contract verified here:
 
     async def _fts_heal_run_once(state, *, first_tick: bool) -> None
 

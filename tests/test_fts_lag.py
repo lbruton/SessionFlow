@@ -1,15 +1,14 @@
-"""SESF-38 AC-6 RED tests — FTS-vs-Milvus lag observability + project scoping.
+"""SESF-38 AC-6 tests — FTS-vs-Milvus lag observability + project scoping.
 
-These tests encode the target behavior Cohort C will implement. They MUST fail
-against the current skeletons:
+These tests verify the implemented lag-observability behavior:
 
-  * ``rag_engine.fts_lag_status`` returns an all-zero/False stub (rag_engine.py).
-  * ``FTSIndex.count_rows`` returns a stub ``0`` (fts_hybrid.py).
-  * ``rag_engine.get_stats`` does not yet carry the additive FTS keys.
-  * ``/health`` JSON does not yet carry a top-level ``fts`` key (http_server.py).
+  * ``rag_engine.fts_lag_status`` assembles the four lag keys from real counts.
+  * ``FTSIndex.count_rows`` counts rows, optionally scoped by ``project_root``.
+  * ``rag_engine.get_stats`` carries the additive, project-scoped FTS keys.
+  * ``/health`` JSON carries a top-level ``fts`` key (http_server.py).
 
 The REAL ``rag_engine`` module is used throughout (never the conftest
-``stub_rag_engine`` namespace), so the stub can't mask the missing behavior.
+``stub_rag_engine`` namespace), so the stub can't mask the behavior under test.
 """
 
 import importlib

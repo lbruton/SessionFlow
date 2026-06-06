@@ -163,11 +163,30 @@ def _stale_then_clean_client():
     return client
 
 
-def test_ensure_collection_redescribes_clean_does_not_raise(monkeypatch):
-    """AC-3 default path: stale-then-clean re-describe → no raise, no migrate."""
+@pytest.mark.parametrize(
+    ("auto_migrate", "summary"),
+    [
+        (None, "default path: no raise"),
+        ("1", "auto-migrate path: no destructive drop+recreate"),
+    ],
+    ids=["default", "auto_migrate"],
+)
+def test_ensure_collection_redescribes_clean_skips_destructive_path(
+    monkeypatch, auto_migrate, summary
+):
+    """AC-3 {summary}: stale-then-clean re-describe → no raise, no migrate.
+
+    Both env states (SESSIONFLOW_AUTO_MIGRATE_SCHEMA unset vs "1") must treat a
+    transient/cached first describe followed by a clean second describe as clean:
+    _ensure_collection must not raise and must not call migrate_schema, and the
+    cache-free re-describe must actually have happened (>= 2 describes).
+    """
     import rag_engine
 
-    monkeypatch.delenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", raising=False)
+    if auto_migrate is None:
+        monkeypatch.delenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", raising=False)
+    else:
+        monkeypatch.setenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", auto_migrate)
 
     client = _stale_then_clean_client()
 
@@ -181,30 +200,9 @@ def test_ensure_collection_redescribes_clean_does_not_raise(monkeypatch):
     # Must not raise: the second (cache-free) describe is clean.
     rag_engine._ensure_collection(client, db_path="/tmp/whatever.db")
 
-    assert migrate_called.get("migrated") is not True
-    # The re-describe must actually have happened (2 cache-free describes).
-    assert client.describe_collection.call_count >= 2
-
-
-def test_ensure_collection_redescribes_clean_does_not_migrate(monkeypatch):
-    """AC-3 auto-migrate path: stale-then-clean → no destructive drop+recreate."""
-    import rag_engine
-
-    monkeypatch.setenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", "1")
-
-    client = _stale_then_clean_client()
-
-    migrate_called: dict[str, bool] = {}
-
-    def fake_migrate(c, db_path=""):
-        migrate_called["migrated"] = True
-
-    monkeypatch.setattr(rag_engine, "migrate_schema", fake_migrate)
-
-    rag_engine._ensure_collection(client, db_path="/tmp/whatever.db")
-
     # Even under AUTO_MIGRATE, a clean re-check must skip the destructive path.
     assert migrate_called.get("migrated") is not True
+    # The re-describe must actually have happened (2 cache-free describes).
     assert client.describe_collection.call_count >= 2
 
 

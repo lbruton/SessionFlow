@@ -1,9 +1,9 @@
-"""RED tests for SESF-38 FtsHealState backoff + log-once dedup (AC-2, AC-5).
+"""Tests for SESF-38 FtsHealState backoff + log-once dedup (AC-2, AC-5).
 
-These tests target ``http_server.FtsHealState``, which is currently a skeleton:
-``record_failure``/``record_success`` are no-ops, ``next_delay`` returns ``0.0``,
-and ``should_warn`` always returns ``True``. They specify the behavior that
-Cohort C task C.5 will implement and MUST fail until then.
+These tests verify ``http_server.FtsHealState``: ``record_failure`` /
+``record_success`` track the failure streak, ``next_delay`` escalates and caps,
+and ``should_warn`` deduplicates repeated error signatures. They specify the
+implemented behavior described below.
 
 AC-2 (bounded backoff, never abandon): consecutive transient failures escalate
 the delay as ``base * 2**(n-1)`` capped at a maximum and held at the cap; the

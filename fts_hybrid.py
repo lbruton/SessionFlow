@@ -244,8 +244,10 @@ class FTSIndex:
     def count_rows(self, conn, project_root=None):
         """Return the number of rows in the FTS table (SESF-38 AC-6).
 
-        Skeleton — C.3 implements `SELECT count(*) FROM {self.table_name}` with an
-        optional `WHERE project_root = ?` filter (the turns_fts table stores project_root).
+        Runs `SELECT count(*) FROM {self.table_name}`, adding a
+        `WHERE project_root = ?` filter when `project_root` is supplied (the
+        turns_fts table stores project_root), so callers can read either the
+        global row count or a single project's count.
 
         Args:
             conn: the per-thread sqlite connection for this FTS index (SESF-13 thread affinity).
