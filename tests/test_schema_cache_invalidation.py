@@ -10,7 +10,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pymilvus.client.cache import GlobalCache
+# These tests reach into pymilvus internals, but rag_engine._invalidate_schema_cache
+# is designed to degrade gracefully when those internals move. requirements.txt
+# pins no pymilvus upper bound, so guard the import + the test-only reset hook and
+# skip the whole module (rather than erroring at collection) if either is gone.
+try:
+    from pymilvus.client.cache import GlobalCache
+
+    if not hasattr(GlobalCache, "_reset_for_testing"):
+        raise ImportError("GlobalCache._reset_for_testing unavailable")
+except Exception as exc:  # pragma: no cover - pymilvus internals moved
+    pytest.skip(
+        f"pymilvus schema-cache internals unavailable ({exc})",
+        allow_module_level=True,
+    )
 
 _ENDPOINT = "test-endpoint:19530"
 
