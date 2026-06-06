@@ -753,16 +753,24 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
 def _escape_filter_scalar(value: str) -> str:
     """Escape a string value for use in a Milvus boolean-expression filter literal.
 
-    Milvus filter literals use double-quoted strings (e.g. field == "value").
+    Milvus filter literals are C-style double-quoted strings (e.g. field ==
+    "value"). Per the Milvus expression grammar (Plan.g4), an embedded
+    double-quote is written as backslash-quote and a literal backslash as a
+    doubled backslash; Milvus does NOT honor ""-doubling.
+
     Rules:
       - NUL bytes are never valid in identifiers or scalar values; reject them
         outright so a malformed input cannot truncate the filter expression.
-      - Any embedded double-quote character must be doubled ("" is the escape
-        sequence inside a Milvus double-quoted string literal).
+      - Each backslash is doubled, then each double-quote becomes backslash-quote.
+        Order matters: backslashes are escaped first, otherwise the backslash
+        introduced when escaping a quote would itself be doubled. This also stops
+        a trailing backslash from escaping the literal's closing quote and
+        consuming the rest of the filter expression (SESF-33).
     """
     if "\x00" in value:
         raise ValueError("Filter scalar value must not contain NUL bytes")
-    return value.replace('"', '""')
+    value = value.replace("\\", "\\\\")
+    return value.replace('"', '\\"')
 
 
 def _issue_id_containment_token(issue_id: str) -> str:
