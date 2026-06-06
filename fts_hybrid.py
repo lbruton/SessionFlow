@@ -241,7 +241,7 @@ class FTSIndex:
             )
         conn.commit()
 
-    def count_rows(self, conn, project_root=None):
+    def count_rows(self, conn: sqlite3.Connection, project_root: Optional[str] = None) -> int:
         """Return the number of rows in the FTS table (SESF-38 AC-6).
 
         Runs `SELECT count(*) FROM {self.table_name}`, adding a

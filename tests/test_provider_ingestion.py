@@ -251,7 +251,8 @@ def _run_backfill_with_counts(monkeypatch, *, milvus_count, fts_count_after):
     return cleared["count"]
 
 
-def test_backfill_fts_keeps_sentinel_when_hydration_incomplete(monkeypatch):
+def test_backfill_fts_keeps_sentinel_when_hydration_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the sentinel set when post-hydration FTS count is below Milvus count."""
     # D-5 — if the post-hydrate FTS count is still BELOW the Milvus count, the
     # sentinel MUST remain set (keyword search is still degraded). Today
     # backfill_fts clears it unconditionally, so this asserts 0 clears and fails RED.
@@ -259,7 +260,8 @@ def test_backfill_fts_keeps_sentinel_when_hydration_incomplete(monkeypatch):
     assert clears == 0
 
 
-def test_backfill_fts_clears_sentinel_when_hydration_complete(monkeypatch):
+def test_backfill_fts_clears_sentinel_when_hydration_complete(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the sentinel when post-hydration FTS count reaches Milvus count."""
     # D-5 — once the FTS count reaches (or exceeds) the Milvus count, the sentinel
     # IS cleared. This direction passes today (unconditional clear) and must keep
     # passing after C gates the clear, pinning the positive branch.

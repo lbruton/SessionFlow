@@ -1582,7 +1582,11 @@ def _count_milvus_turns(db_path=None, project_root=None) -> int:
         return int(res[0]["count(*)"]) if res else 0
 
 
-def fts_lag_status(db_path=None, project_root=None, milvus_turn_count=None):
+def fts_lag_status(
+    db_path: Optional[str] = None,
+    project_root: Optional[str] = None,
+    milvus_turn_count: Optional[int] = None,
+) -> Dict[str, object]:
     """Return static FTS-vs-Milvus lag data for observability (SESF-38 AC-6).
 
     Computes the difference between the Milvus turn count and the FTS row count,

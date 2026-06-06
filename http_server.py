@@ -221,7 +221,7 @@ class FtsHealState:
         stable_prefix = re.sub(r"\s*\([^()]*\)\s*$", "", message).strip()
         return f"{type(exc).__name__}:{stable_prefix}"
 
-    def record_failure(self, exc):
+    def record_failure(self, exc: Exception) -> None:
         """Record a transient heal failure and escalate the bounded backoff.
 
         Increments the consecutive-failure streak and sets the current backoff to
@@ -236,7 +236,7 @@ class FtsHealState:
         raw = BACKFILL_DRAIN_INTERVAL * (2 ** (self.consecutive_failures - 1))
         self.current_backoff_seconds = min(raw, FTS_HEAL_BACKOFF_CAP)
 
-    def record_success(self):
+    def record_success(self) -> None:
         """Reset backoff and log-once state after a successful heal.
 
         Zeroes the failure streak, restores the backoff to the base drain
@@ -246,7 +246,7 @@ class FtsHealState:
         self.current_backoff_seconds = BACKFILL_DRAIN_INTERVAL
         self.last_error_signature = None
 
-    def next_delay(self):
+    def next_delay(self) -> float:
         """Return the next backoff delay in seconds.
 
         Yields the base drain interval when there have been no failures since the
@@ -259,7 +259,7 @@ class FtsHealState:
             return BACKFILL_DRAIN_INTERVAL
         return self.current_backoff_seconds
 
-    def should_warn(self, exc):
+    def should_warn(self, exc: Exception) -> bool:
         """Decide whether to emit a warning for ``exc`` under log-once dedup.
 
         Returns ``True`` on the first sighting of a signature and whenever the
@@ -579,7 +579,10 @@ def _fts_lag_payload() -> dict:
             state.last_error_signature if state is not None else None
         )
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        payload = {"status": "error", "message": str(exc)}
+        _fts_lag_cache = payload
+        _fts_lag_cache_ts = now
+        return payload
     _fts_lag_cache = payload
     _fts_lag_cache_ts = now
     return payload

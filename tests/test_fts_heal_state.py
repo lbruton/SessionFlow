@@ -23,7 +23,7 @@ import http_server
 
 try:  # Prefer exercising the real Milvus exception signature logic.
     from pymilvus.exceptions import MilvusException
-except Exception:  # pragma: no cover - pymilvus is a hard dep, but stay defensive.
+except ImportError:  # pragma: no cover - pymilvus is a hard dep, but stay defensive.
     MilvusException = None
 
 
