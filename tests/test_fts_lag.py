@@ -27,18 +27,21 @@ rag_engine = importlib.import_module("rag_engine")
 def test_fts_lag_status_computes_lag_from_milvus_and_fts_counts(monkeypatch):
     """fts_lag_status must subtract the FTS row count from the Milvus turn count.
 
-    Today the function is a skeleton returning all zeros/False, so the computed
-    ``fts_lag`` (12) and ``fts_backfill_required`` (True) assertions fail RED.
+    The Milvus count flows through the DRIFT-TOLERANT ``_count_milvus_turns``
+    (D-6), NOT ``get_stats`` (whose guarded client raises under the very drift
+    this readout must report). ``fts_backfill_required`` is the pure sentinel
+    state (D-7/AC-6): normal indexing lag must NOT falsely report a required
+    rebuild — only the explicit sentinel does.
     """
     milvus_count = 20
     fts_count = 8
 
-    # Stub the Milvus turn-count path. C.4 wires fts_lag_status to count Milvus
-    # rows; we patch get_stats (its natural count source) to return a known total.
+    # Stub the drift-tolerant Milvus turn-count path (D-6). fts_lag_status counts
+    # via _count_milvus_turns on the standalone path, not via get_stats.
     monkeypatch.setattr(
         rag_engine,
-        "get_stats",
-        lambda project_root=None, db_path=None: {"total_turns": milvus_count},
+        "_count_milvus_turns",
+        lambda db_path=None, project_root=None: milvus_count,
     )
 
     # Stub the FTS count path: connection + count_rows feed the FTS side.
@@ -47,6 +50,9 @@ def test_fts_lag_status_computes_lag_from_milvus_and_fts_counts(monkeypatch):
     monkeypatch.setattr(
         rag_engine._fts, "count_rows", lambda conn, project_root=None: fts_count
     )
+
+    # Sentinel SET → fts_backfill_required reflects IT, regardless of the lag math.
+    monkeypatch.setattr(rag_engine, "fts_backfill_required", lambda: True)
 
     status = rag_engine.fts_lag_status(db_path="/tmp/sessionflow-lag-test.db")
 
@@ -59,7 +65,16 @@ def test_fts_lag_status_computes_lag_from_milvus_and_fts_counts(monkeypatch):
     assert status["milvus_turn_count"] == milvus_count
     assert status["fts_row_count"] == fts_count
     assert status["fts_lag"] == milvus_count - fts_count
+    # True BECAUSE the sentinel is set — not because lag (12) is positive.
     assert status["fts_backfill_required"] is True
+
+    # Sentinel CLEAR + still-positive lag → required is False. Proves the field is
+    # sentinel-driven (D-7), not lag-derived: normal indexing lag never reports a
+    # required rebuild.
+    monkeypatch.setattr(rag_engine, "fts_backfill_required", lambda: False)
+    status_clear = rag_engine.fts_lag_status(db_path="/tmp/sessionflow-lag-test.db")
+    assert status_clear["fts_lag"] == milvus_count - fts_count  # lag still 12
+    assert status_clear["fts_backfill_required"] is False
 
 
 # ---------------------------------------------------------------------------

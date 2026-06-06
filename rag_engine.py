@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 
-from fts_hybrid import FTSIndex, rrf_merge
+from fts_hybrid import FTSIndex, fts_backfill_required, rrf_merge
 from embedding_control import (
     EmbeddingIdentity,
     get_embedding_budget,
@@ -1549,6 +1549,50 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
     return stats
 
 
+def _count_milvus_turns(db_path=None, project_root=None) -> int:
+    """Count Milvus turn rows through the DRIFT-TOLERANT migration client (SESF-38 D-6).
+
+    ``fts_lag_status`` cannot route this count through ``get_stats`` (which opens
+    the drift-GUARDED ``milvus_client`` and RAISES under persistent schema drift):
+    the lag readout must survive the very incident it exists to report. This helper
+    streams ``doc_id`` rows via the migration client's ``query_iterator`` — the same
+    batching shape ``_query_batches`` uses — counting them without materializing the
+    full set, and applies the same ``project_root`` filter ``get_stats`` builds so
+    the lag stays apples-to-apples.
+
+    Args:
+        db_path: Milvus DB path.
+        project_root: when provided, scope the count to that project.
+
+    Returns:
+        int: the number of turn rows (project-scoped when ``project_root`` is set).
+    """
+    filter_expr = (
+        f'project_root == "{_escape_filter_scalar(project_root)}"'
+        if project_root
+        else None
+    )
+    count = 0
+    with milvus_client_for_migration(db_path) as client:
+        if not client.has_collection(COLLECTION_NAME):
+            return 0
+        iterator = client.query_iterator(
+            collection_name=COLLECTION_NAME,
+            batch_size=1000,
+            filter=filter_expr or "",
+            output_fields=["doc_id"],
+        )
+        try:
+            while True:
+                batch = iterator.next()
+                if not batch:
+                    break
+                count += len(batch)
+        finally:
+            iterator.close()
+    return count
+
+
 def fts_lag_status(db_path=None, project_root=None, milvus_turn_count=None):
     """Return static FTS-vs-Milvus lag data for observability (SESF-38 AC-6).
 
@@ -1559,17 +1603,20 @@ def fts_lag_status(db_path=None, project_root=None, milvus_turn_count=None):
     Args:
         db_path: Milvus DB path; also derives the FTS sidecar path.
         project_root: when provided, scope both counts to that project.
-        milvus_turn_count: pre-computed Milvus total; when None it is read from
-            ``get_stats`` (get_stats passes its own total to avoid recursion).
+        milvus_turn_count: pre-computed Milvus total; when None it is counted via
+            the drift-tolerant ``_count_milvus_turns`` (get_stats passes its own
+            already-computed total to avoid a double scan and recursion).
 
     Returns:
         dict: keys ``milvus_turn_count``, ``fts_row_count``, ``fts_lag``
         (milvus_turn_count - fts_row_count), and ``fts_backfill_required``.
     """
     if milvus_turn_count is None:
-        milvus_turn_count = get_stats(
-            project_root=project_root, db_path=db_path
-        )["total_turns"]
+        # Standalone path (e.g. /health): count through the drift-tolerant
+        # migration client, NOT get_stats, so observability survives drift (D-6).
+        milvus_turn_count = _count_milvus_turns(
+            db_path=db_path, project_root=project_root
+        )
 
     # FTS count on the calling thread (SESF-13 thread affinity): open an
     # ephemeral connection, count, and close it.
@@ -1579,14 +1626,15 @@ def fts_lag_status(db_path=None, project_root=None, milvus_turn_count=None):
     finally:
         _fts.close_ephemeral(conn)
 
-    from fts_hybrid import fts_backfill_required
-
     fts_lag = milvus_turn_count - fts_row_count
     return {
         "milvus_turn_count": milvus_turn_count,
         "fts_row_count": fts_row_count,
         "fts_lag": fts_lag,
-        "fts_backfill_required": fts_lag > 0 or fts_backfill_required(),
+        # Pure sentinel state (D-7/AC-6): normal indexing lag must NOT report a
+        # required rebuild — only the explicit backfill sentinel does. Referenced
+        # via the module-level binding so it stays one patchable seam.
+        "fts_backfill_required": fts_backfill_required(),
     }
 
 
