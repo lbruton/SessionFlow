@@ -343,7 +343,7 @@ def _embedding_status_payload() -> dict:
 
 
 async def health(request: Request) -> JSONResponse:
-    """Return server health JSON; ``?deep=1`` adds extended watcher checks."""
+    """Return server health JSON; ``?deep=1`` bypasses the provider-status cache."""
     deep = request is not None and request.query_params.get("deep") == "1"
     watchers = file_watcher.get_watcher_status()
     return JSONResponse({
