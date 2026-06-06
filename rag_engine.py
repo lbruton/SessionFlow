@@ -94,6 +94,14 @@ _SEARCH_OUTPUT_FIELDS = [
 ]
 
 
+class FtsBackfillTransientError(Exception):
+    """Raised by backfill_fts on a transient Milvus / schema-drift failure (SESF-38).
+
+    Signals the FTS heal worker to retry on a later cadence tick rather than treat the
+    failure as terminal. The originating exception is preserved as __cause__.
+    """
+
+
 def _extract_issue_ids(text: str) -> str:
     """Extract issue references (e.g. ``SESF-25``) from a turn's text.
 
@@ -1509,6 +1517,24 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
         "branches": sorted(branches),
         "by_type": by_type,
         "providers": providers,
+    }
+
+
+def fts_lag_status(db_path=None, project_root=None):
+    """Return static FTS-vs-Milvus lag data for observability (SESF-38 AC-6).
+
+    Skeleton — C.4 implements the real counts (Milvus count via milvus_client_for_migration,
+    FTS count via FTSIndex.count_rows), both filtered by project_root when provided. Returns
+    static lag only; worker state (consecutive_failures/last_error) is NOT included here.
+
+    Returns:
+        dict: keys milvus_turn_count, fts_row_count, fts_lag, fts_backfill_required.
+    """
+    return {
+        "milvus_turn_count": 0,
+        "fts_row_count": 0,
+        "fts_lag": 0,
+        "fts_backfill_required": False,
     }
 
 
