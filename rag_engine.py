@@ -1578,6 +1578,7 @@ def _count_milvus_turns(db_path=None, project_root=None) -> int:
             collection_name=COLLECTION_NAME,
             filter=filter_expr or "",
             output_fields=["count(*)"],
+            limit=1,
         )
         return int(res[0]["count(*)"]) if res else 0
 
@@ -1864,6 +1865,11 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
                         if missing_doc_ids:
                             hydrate_and_insert(missing_doc_ids)
             except RuntimeError as exc:
+                # Only the schema-drift guard (_ensure_collection) is transient and
+                # worth retrying; other RuntimeErrors — model mismatch, model not
+                # cached, or genuine logic bugs — must surface, not retry forever.
+                if "schema is out of date" not in str(exc):
+                    raise
                 raise FtsBackfillTransientError(
                     "FTS backfill aborted on transient Milvus / schema-drift fault"
                 ) from exc

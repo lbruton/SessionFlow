@@ -179,7 +179,7 @@ def test_signature_distinguishes_exception_type():
 
     # First sighting of each type warns; same type + message repeating is suppressed.
     assert state.should_warn(_milvus_exc("connection failed")) is True
-    # Same type + same message -> suppressed (fails against the always-True stub).
+    # Same type + same message -> suppressed by the signature dedup.
     assert state.should_warn(_milvus_exc("connection failed")) is False
     # Different exception type, identical message -> distinct signature -> warns.
     assert state.should_warn(OtherHealError("connection failed")) is True

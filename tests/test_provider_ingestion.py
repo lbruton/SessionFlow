@@ -254,8 +254,9 @@ def _run_backfill_with_counts(monkeypatch, *, milvus_count, fts_count_after):
 def test_backfill_fts_keeps_sentinel_when_hydration_incomplete(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the sentinel set when post-hydration FTS count is below Milvus count."""
     # D-5 — if the post-hydrate FTS count is still BELOW the Milvus count, the
-    # sentinel MUST remain set (keyword search is still degraded). Today
-    # backfill_fts clears it unconditionally, so this asserts 0 clears and fails RED.
+    # sentinel MUST remain set (keyword search is still degraded): backfill_fts
+    # only clears once FTS catches up, so the sentinel stays set while FTS lags
+    # Milvus and this asserts 0 clears.
     clears = _run_backfill_with_counts(monkeypatch, milvus_count=10, fts_count_after=4)
     assert clears == 0
 

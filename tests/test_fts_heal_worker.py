@@ -123,7 +123,10 @@ def test_backfill_fts_raises_typed_error_on_client_open_runtimeerror(monkeypatch
 
     @contextmanager
     def _raising_client(db_path=None):
-        raise RuntimeError("schema drift guard tripped")
+        raise RuntimeError(
+            "Milvus collection 'sessions' schema is out of date "
+            "(drift=['missing:issue_ids'])"
+        )
         yield  # pragma: no cover - unreachable
 
     monkeypatch.setattr(rag_engine, "milvus_client", _raising_client)
@@ -140,6 +143,35 @@ def test_backfill_fts_raises_typed_error_on_client_open_runtimeerror(monkeypatch
     db_path = os.path.join(tempfile.gettempdir(), "sessionflow-heal-d4-open.db")
     with pytest.raises(rag_engine.FtsBackfillTransientError):
         rag_engine.backfill_fts(db_path=db_path)
+
+
+def test_backfill_fts_propagates_non_drift_runtimeerror(monkeypatch):
+    """A non-drift RuntimeError from milvus_client.__enter__ must NOT be reclassified.
+
+    Only the schema-drift guard is transient. Model-mismatch / model-not-cached /
+    genuine logic-bug RuntimeErrors must surface as RuntimeError so the operator
+    sees a config error instead of an infinite retry loop (SESF-38 Copilot review).
+    """
+
+    @contextmanager
+    def _raising_client(db_path=None):
+        raise RuntimeError(
+            "Model mismatch: index was built with 'X' but SESSIONFLOW_MODEL is 'Y'."
+        )
+        yield  # pragma: no cover - unreachable
+
+    monkeypatch.setattr(rag_engine, "milvus_client", _raising_client)
+    monkeypatch.setattr(
+        rag_engine, "_query_batches",
+        lambda *a, **k: iter([[{"doc_id": "doc-1"}]]),
+    )
+    monkeypatch.setattr(rag_engine._fts, "connection", lambda db_path: object())
+    monkeypatch.setattr(rag_engine._fts, "close_ephemeral", lambda conn: None)
+
+    db_path = os.path.join(tempfile.gettempdir(), "sessionflow-heal-d4-nondrift.db")
+    with pytest.raises(RuntimeError) as excinfo:
+        rag_engine.backfill_fts(db_path=db_path)
+    assert not isinstance(excinfo.value, rag_engine.FtsBackfillTransientError)
 
 
 def test_backfill_fts_raises_typed_error_on_query_milvusexception(monkeypatch):

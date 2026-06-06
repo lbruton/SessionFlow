@@ -100,8 +100,8 @@ def test_count_rows_project_scoped_differs_from_global(tmp_path):
     """count_rows(project_root=X) must count only that project's rows.
 
     Two rows live under project A and one under project B. The global count is 3
-    and the project-A count is 2. Today the stub returns 0 for both, so the
-    inequality (project-scoped != global) and the exact-count assertions fail RED.
+    and the project-A count is 2. count_rows applies the project_root filter, so
+    the project-scoped count (2) differs from the global count (3).
     """
     fts, db_path = _build_fts(tmp_path)
     conn = fts.connection(db_path)
@@ -130,8 +130,8 @@ def test_get_stats_carries_fts_lag_keys(monkeypatch, tmp_path):
     """get_stats(project_root=X) must add fts_row_count / fts_lag / fts_backfill_required.
 
     The keys are additive and project-scoped (consistent with get_stats' existing
-    Milvus project_root filter). Today get_stats returns only total/sessions/
-    by_type/providers, so the membership assertions fail RED.
+    Milvus project_root filter). get_stats now emits the fts_row_count / fts_lag /
+    fts_backfill_required keys alongside total/sessions/by_type/providers.
     """
     # Make the Milvus side of get_stats deterministic and cheap: no live cluster.
     @contextmanager
