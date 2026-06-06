@@ -528,6 +528,40 @@ def migrate_schema(client: MilvusClient, db_path: str = "") -> None:
         )
         client.drop_collection(COLLECTION_NAME)
     _create_collection(client, db_path)
+    # SESF-40: drop_collection already clears the data-path schema cache, so
+    # this is a no-op today. It funnels the one place schema mutates through the
+    # canonical invalidation hook so a future in-place add_collection_field path
+    # can't leave a warm persistent client raising code=65535 "field not exist".
+    _invalidate_schema_cache(client)
+
+
+def _invalidate_schema_cache(client: MilvusClient) -> None:
+    """Invalidate pymilvus's process-global data-path schema cache for the collection.
+
+    SESF-40: pymilvus 2.6 caches collection schemas in a class-level LRU
+    (``GlobalCache.schema``, keyed by endpoint/db/collection and consumed by
+    insert/upsert/search/hybrid_search via ``_get_schema``). It is invalidated on
+    ``drop_collection`` but NOT on ``add_collection_field``, so an in-place field
+    add can leave a long-lived persistent client raising ``code=65535 "field not
+    exist"`` until LRU eviction or process restart — a fresh ``MilvusClient`` does
+    not clear it (the cache is a singleton). Any schema-mutating op must funnel
+    through here.
+
+    No public schema-cache refresh API exists, so this reaches into pymilvus
+    internals; every step is guarded and degrades to a logged no-op on a pymilvus
+    upgrade rather than breaking a real migration.
+    """
+    try:
+        from pymilvus.client.cache import GlobalCache
+    except Exception as exc:  # pragma: no cover - pymilvus internals moved
+        logger.debug("Schema cache invalidation skipped (no GlobalCache): %s", exc)
+        return
+    try:
+        endpoint = client._get_connection().server_address
+        # SessionFlow uses the default database; SchemaCache normalizes "" -> "default".
+        GlobalCache.schema.invalidate(endpoint, "", COLLECTION_NAME)
+    except Exception as exc:  # pragma: no cover - defense in depth
+        logger.warning("Schema cache invalidation failed for %s: %s", COLLECTION_NAME, exc)
 
 
 def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
