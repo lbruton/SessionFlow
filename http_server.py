@@ -325,6 +325,12 @@ _PROVIDER_HEALTH_TTL = 30  # seconds
 _provider_health_cache: dict | None = None
 _provider_health_cache_ts: float = 0.0
 
+# TTL cache for the FTS-lag block — a full Milvus count on every /health probe
+# would be wasteful, so cache it for a few seconds (mirrors provider health).
+_FTS_LAG_TTL = 5  # seconds
+_fts_lag_cache: dict | None = None
+_fts_lag_cache_ts: float = 0.0
+
 
 def _ensure_backfill_drain_primitives() -> None:
     """Create loop-bound primitives lazily inside the running event loop."""
@@ -539,6 +545,42 @@ def _embedding_status_payload() -> dict:
     }
 
 
+def _fts_lag_payload() -> dict:
+    """Return the FTS-vs-Milvus lag block for ``/health`` (SESF-38 AC-6).
+
+    Combines the static, server-wide lag from ``rag_engine.fts_lag_status`` with
+    the heal worker's standing-failure state (``consecutive_failures`` and the
+    last error signature) from the module-global ``_fts_heal_state``. The whole
+    computation is wrapped in try/except so a Milvus/FTS count failure under
+    persistent drift returns an ``{"status": "error", ...}`` marker instead of
+    raising — ``/health`` must never 500. The result is cached for a few seconds
+    to avoid a full Milvus scan on every probe.
+
+    Returns:
+        dict: static lag keys (``milvus_turn_count``, ``fts_row_count``,
+        ``fts_lag``, ``fts_backfill_required``) plus ``consecutive_failures`` and
+        ``last_error``; or ``{"status": "error", "message": ...}`` on failure.
+    """
+    global _fts_lag_cache, _fts_lag_cache_ts
+    now = time.monotonic()
+    if _fts_lag_cache is not None and (now - _fts_lag_cache_ts) < _FTS_LAG_TTL:
+        return _fts_lag_cache
+    try:
+        payload = dict(rag_engine.fts_lag_status(project_root=None))
+        state = _fts_heal_state
+        payload["consecutive_failures"] = (
+            state.consecutive_failures if state is not None else 0
+        )
+        payload["last_error"] = (
+            state.last_error_signature if state is not None else None
+        )
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+    _fts_lag_cache = payload
+    _fts_lag_cache_ts = now
+    return payload
+
+
 async def health(request: Request) -> JSONResponse:
     """Return server health JSON; ``?deep=1`` bypasses the provider-status cache."""
     deep = request is not None and request.query_params.get("deep") == "1"
@@ -555,6 +597,7 @@ async def health(request: Request) -> JSONResponse:
         "providers": _provider_health(deep=deep),
         "backfill": _backfill_status_payload(),
         "embedding": _embedding_status_payload(),
+        "fts": _fts_lag_payload(),
     })
 
 
