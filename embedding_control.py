@@ -73,6 +73,8 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 @dataclass
 class EmbeddingDecision:
+    """Outcome of a pre-batch budget check: whether embedding may proceed."""
+
     allowed: bool
     reason: str = ""
     retry_after_seconds: float = 0.0
@@ -80,6 +82,8 @@ class EmbeddingDecision:
 
 @dataclass
 class EmbeddingIdentity:
+    """Identity of the embedding model/collection a vector set belongs to."""
+
     embedding_provider: str
     model_name: str
     dimension: int
@@ -88,6 +92,7 @@ class EmbeddingIdentity:
 
     @classmethod
     def current_local(cls) -> "EmbeddingIdentity":
+        """Build the identity for the locally-configured MLX model."""
         model_name = os.getenv("SESSIONFLOW_MODEL", "embeddinggemma").lower()
         dimension = LOCAL_MODEL_DIMS.get(model_name)
         if dimension is None:
@@ -104,6 +109,8 @@ class EmbeddingIdentity:
 
 @dataclass
 class EmbeddingBudget:
+    """Shared throttle and accounting for backfill embedding across providers."""
+
     batch_size: int = 16
     cooldown_ms: int = 200
     max_turns_per_run: int = DEFAULT_MAX_TURNS_PER_RUN
@@ -120,6 +127,7 @@ class EmbeddingBudget:
 
     @classmethod
     def from_env(cls) -> "EmbeddingBudget":
+        """Build a budget from ``SESSIONFLOW_*`` environment overrides."""
         mode = os.getenv("SESSIONFLOW_BACKFILL_MODE", "recent").lower()
         if mode not in {"recent", "incremental", "full"}:
             mode = "recent"
@@ -138,6 +146,7 @@ class EmbeddingBudget:
         )
 
     def before_batch(self, batch_size: int, estimated_chars: int = 0) -> EmbeddingDecision:
+        """Decide whether a batch may embed now, honoring pause, cap, and cooldown."""
         if self.paused:
             return EmbeddingDecision(False, "Backfill embedding is paused")
         if self.turns_processed + batch_size > self.max_turns_per_run:
@@ -169,6 +178,7 @@ class EmbeddingBudget:
         return EmbeddingDecision(True)
 
     def after_batch(self, duration: float, turns: int, error: Optional[BaseException] = None) -> None:
+        """Record a finished batch's duration, turn count, and any error."""
         self.last_batch_finished_at = time.monotonic()
         self.last_batch_duration = duration
         self.batches_processed += 1
@@ -177,9 +187,11 @@ class EmbeddingBudget:
             self.errors += 1
 
     def split_batches(self, turns: list) -> list[list]:
+        """Split ``turns`` into chunks of at most ``batch_size``."""
         return [turns[i:i + self.batch_size] for i in range(0, len(turns), self.batch_size)]
 
     def status(self) -> dict:
+        """Return a JSON-serializable snapshot of budget config and counters."""
         try:
             model_name = EmbeddingIdentity.current_local().model_name
         except ValueError:
@@ -204,6 +216,7 @@ _BUDGET: Optional[EmbeddingBudget] = None
 
 
 def get_embedding_budget() -> EmbeddingBudget:
+    """Return the process-wide embedding budget, creating it on first use."""
     global _BUDGET
     if _BUDGET is None:
         _BUDGET = EmbeddingBudget.from_env()
@@ -211,6 +224,7 @@ def get_embedding_budget() -> EmbeddingBudget:
 
 
 def reset_embedding_budget() -> EmbeddingBudget:
+    """Rebuild the process-wide embedding budget from the environment."""
     global _BUDGET
     _BUDGET = EmbeddingBudget.from_env()
     return _BUDGET

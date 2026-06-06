@@ -32,6 +32,8 @@ logger = logging.getLogger("sessionflow.opencode")
 
 
 class OpenCodeAdapter:
+    """Adapter for OpenCode storage (legacy file tree plus the SQLite store)."""
+
     provider = "opencode"
     source_kind = "opencode_storage"
 
@@ -41,6 +43,7 @@ class OpenCodeAdapter:
         db_path: str | Path | None = None,
         settled_seconds: int = 5,
     ):
+        """Set the storage root, SQLite path, and settle window for new writes."""
         # OpenCode keeps both the DB and the legacy filesystem tree under the
         # same root, so callers normally only need to pass storage_root.
         if storage_root is not None:
@@ -202,6 +205,7 @@ class OpenCodeAdapter:
     # ---- Public API --------------------------------------------------------
 
     def discover_sources(self) -> List[ProviderSource]:
+        """Enumerate OpenCode sessions from the SQLite store and legacy tree."""
         sources = self._refresh_db_indexes()
         seen = {src.logical_session_id for src in sources}
 
@@ -242,6 +246,7 @@ class OpenCodeAdapter:
         source: ProviderSource,
         cursor: Optional[Dict],
     ) -> ProviderParseResult:
+        """Parse an OpenCode session into normalized turns, resuming from ``cursor``."""
         if source.path == str(self.db_path):
             return self._parse_db_source(source, cursor)
         return self._parse_legacy_source(source, cursor)
@@ -408,6 +413,7 @@ class OpenCodeAdapter:
         return count
 
     def watch_roots(self) -> List[ProviderWatchRoot]:
+        """Return the storage tree and (if present) the SQLite parent as watch roots."""
         # Both the legacy tree and the SQLite WAL live under the same parent.
         roots = [ProviderWatchRoot(self.provider, self.source_kind, str(self.storage_root), recursive=True)]
         if self.db_path.exists():
@@ -422,6 +428,7 @@ class OpenCodeAdapter:
         return roots
 
     def health(self) -> ProviderHealth:
+        """Report adapter health, including any legacy orphan-part count."""
         sources = self.discover_sources()
         orphan_parts = self._legacy_orphan_part_count()
         if not self.db_path.exists() and not self.storage_root.exists():

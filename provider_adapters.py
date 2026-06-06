@@ -139,6 +139,8 @@ def default_provider_metadata() -> Dict[str, str]:
 
 @dataclass
 class ProviderSource:
+    """A discovered source artifact (transcript/session file) for one provider."""
+
     provider: str
     source_kind: str
     source_class: str
@@ -152,6 +154,7 @@ class ProviderSource:
     reason: str = ""
 
     def __post_init__(self) -> None:
+        """Validate enum-constrained fields and derive the canonical path."""
         _validate_choice("provider", self.provider, LEGAL_PROVIDERS)
         _validate_choice("source_kind", self.source_kind, LEGAL_SOURCE_KINDS)
         _validate_choice("source_class", self.source_class, LEGAL_SOURCE_CLASSES)
@@ -166,6 +169,8 @@ class ProviderSource:
 
 @dataclass
 class ProviderCursor:
+    """Per-session ingestion progress so re-runs resume instead of reprocessing."""
+
     cursor_type: str
     logical_session_id: str
     known_paths: List[str] = field(default_factory=list)
@@ -177,9 +182,11 @@ class ProviderCursor:
     updated_at: str = ""
 
     def __post_init__(self) -> None:
+        """Validate the cursor type against the legal set."""
         _validate_choice("cursor_type", self.cursor_type, LEGAL_CURSOR_TYPES)
 
     def as_state(self) -> Dict[str, Any]:
+        """Return the cursor as a plain JSON-serializable state dict."""
         return {
             "cursor_type": self.cursor_type,
             "logical_session_id": self.logical_session_id,
@@ -195,6 +202,8 @@ class ProviderCursor:
 
 @dataclass
 class ProviderParseResult:
+    """Outcome of parsing one source: normalized turns plus the updated cursor."""
+
     source: ProviderSource
     turns: List[Dict[str, Any]]
     cursor: Dict[str, Any]
@@ -203,6 +212,8 @@ class ProviderParseResult:
 
 @dataclass
 class ProviderHealth:
+    """Per-provider ingestion health and source-count rollup."""
+
     provider: str
     status: str
     source_count: int = 0
@@ -214,18 +225,22 @@ class ProviderHealth:
     roots: List[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        """Validate the provider and status against their legal sets."""
         _validate_choice("provider", self.provider, LEGAL_PROVIDERS)
         _validate_choice("status", self.status, LEGAL_HEALTH_STATUSES)
 
 
 @dataclass
 class ProviderWatchRoot:
+    """A filesystem root to watch for a provider's incoming sources."""
+
     provider: str
     source_kind: str
     path: str
     recursive: bool = True
 
     def __post_init__(self) -> None:
+        """Validate the provider and source kind against their legal sets."""
         _validate_choice("provider", self.provider, LEGAL_PROVIDERS)
         _validate_choice("source_kind", self.source_kind, LEGAL_SOURCE_KINDS)
 
@@ -236,6 +251,7 @@ class ProviderAdapter(Protocol):
     provider: str
 
     def discover_sources(self) -> List[ProviderSource]:
+        """Enumerate the provider's available sources."""
         ...
 
     def parse_source(
@@ -243,10 +259,13 @@ class ProviderAdapter(Protocol):
         source: ProviderSource,
         cursor: Optional[Dict[str, Any]],
     ) -> ProviderParseResult:
+        """Parse one source into normalized turns, resuming from ``cursor``."""
         ...
 
     def watch_roots(self) -> List[ProviderWatchRoot]:
+        """Return the filesystem roots to watch for new sources."""
         ...
 
     def health(self) -> ProviderHealth:
+        """Report the provider's ingestion health."""
         ...

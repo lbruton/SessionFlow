@@ -38,10 +38,13 @@ def _content_to_text(content) -> str:
 
 
 class CodexAdapter:
+    """Adapter for Codex rollout ``.jsonl`` sessions (active and archived)."""
+
     provider = "codex"
     source_kind = "codex_rollout_jsonl"
 
     def __init__(self, home: str | Path | None = None):
+        """Set the Codex home, defaulting to the user home directory."""
         self.home = Path(home).expanduser() if home is not None else Path.home()
         self.active_root = self.home / ".codex" / "sessions"
         self.archive_root = self.home / ".codex" / "archived_sessions"
@@ -99,6 +102,7 @@ class CodexAdapter:
         return logical_session_id, project_root or "unknown", timestamp
 
     def discover_sources(self) -> List[ProviderSource]:
+        """Enumerate Codex rollout sessions across the active and archive roots."""
         grouped: Dict[str, List[Path]] = {}
         context: Dict[str, tuple[str, str]] = {}
         for path in self._rollout_paths():
@@ -137,6 +141,7 @@ class CodexAdapter:
         source: ProviderSource,
         cursor: Optional[Dict],
     ) -> ProviderParseResult:
+        """Parse a Codex rollout into normalized turns, resuming from ``cursor``."""
         # _known_paths is populated by discover_sources() and may be stale
         # or empty when callers reuse a shared adapter instance across
         # threads. Fall back to the source's own path/canonical_path rather
@@ -212,12 +217,14 @@ class CodexAdapter:
         )
 
     def watch_roots(self) -> List[ProviderWatchRoot]:
+        """Return the active (recursive) and archive (flat) watch roots."""
         return [
             ProviderWatchRoot(self.provider, self.source_kind, str(self.active_root), recursive=True),
             ProviderWatchRoot(self.provider, self.source_kind, str(self.archive_root), recursive=False),
         ]
 
     def health(self) -> ProviderHealth:
+        """Report adapter health, flagging any missing roots."""
         sources = self.discover_sources()
         missing_roots = [
             str(path) for path in (self.active_root, self.archive_root) if not path.exists()

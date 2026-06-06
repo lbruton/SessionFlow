@@ -41,11 +41,13 @@ class ProviderIngestionService:
         db_path: str,
         adapters: Optional[Dict[str, object]] = None,
     ):
+        """Wire the backfill manager, target DB path, and provider adapters."""
         self.manager = manager
         self.db_path = db_path
         self.adapters = adapters if adapters is not None else default_provider_adapters()
 
     async def process_queued_jobs(self, max_jobs: Optional[int] = None) -> dict:
+        """Process up to ``max_jobs`` queued jobs and return aggregate totals."""
         status = self.manager.status()
         jobs = status.jobs[:max_jobs] if max_jobs is not None else status.jobs
         totals = {"jobs": 0, "processed_sources": 0, "indexed_turns": 0, "errors": 0}
@@ -62,6 +64,7 @@ class ProviderIngestionService:
         return totals
 
     async def process_job(self, job: BackfillJob) -> dict:
+        """Run one backfill job through its provider adapter into the RAG index."""
         adapter = self.adapters.get(job.provider)
         if adapter is None:
             self.manager.complete_job(job.job_id, errors=1)

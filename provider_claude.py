@@ -17,10 +17,13 @@ from provider_adapters import (
 
 
 class ClaudeCodeCliAdapter:
+    """Adapter for native Claude Code CLI ``.jsonl`` transcripts."""
+
     provider = "claude_code_cli"
     source_kind = "claude_code_jsonl"
 
     def __init__(self, projects_root: str | Path | None = None):
+        """Set the projects root, defaulting to ``~/.claude/projects``."""
         self.projects_root = (
             Path(projects_root).expanduser()
             if projects_root is not None
@@ -28,6 +31,7 @@ class ClaudeCodeCliAdapter:
         )
 
     def discover_sources(self) -> List[ProviderSource]:
+        """Enumerate ``.jsonl`` transcripts under the projects root."""
         if not self.projects_root.exists():
             return []
         sources = []
@@ -55,6 +59,7 @@ class ClaudeCodeCliAdapter:
         source: ProviderSource,
         cursor: Optional[Dict],
     ) -> ProviderParseResult:
+        """Parse a transcript into normalized turns, resuming from ``cursor``'s byte offset."""
         start_offset = int((cursor or {}).get("last_byte_offset", 0))
         try:
             turns, new_offset = transcript_parser.parse_transcript(
@@ -97,9 +102,11 @@ class ClaudeCodeCliAdapter:
         )
 
     def watch_roots(self) -> List[ProviderWatchRoot]:
+        """Return the projects root as the single recursive watch root."""
         return [ProviderWatchRoot(self.provider, self.source_kind, str(self.projects_root), recursive=True)]
 
     def health(self) -> ProviderHealth:
+        """Report adapter health and the discovered source count."""
         sources = self.discover_sources()
         return ProviderHealth(
             provider=self.provider,
@@ -111,10 +118,13 @@ class ClaudeCodeCliAdapter:
 
 
 class ClaudeDesktopCoworkProbe:
+    """Probe-only adapter for Claude Desktop / CoWork sessions (SESF-6)."""
+
     provider = "claude_desktop_cowork"
     source_kind = "claude_desktop_sessions"
 
     def __init__(self, root: str | Path | None = None):
+        """Set the sessions root, defaulting to the Claude Desktop support dir."""
         self.root = (
             Path(root).expanduser()
             if root is not None
@@ -122,6 +132,7 @@ class ClaudeDesktopCoworkProbe:
         )
 
     def discover_sources(self) -> List[ProviderSource]:
+        """Enumerate ``local_*.json`` session files (marked unsupported/probe-only)."""
         if not self.root.exists():
             return []
         sources = []
@@ -145,6 +156,7 @@ class ClaudeDesktopCoworkProbe:
         return sources
 
     def parse_source(self, source: ProviderSource, cursor: Optional[Dict]) -> ProviderParseResult:
+        """Return an empty result — Claude Desktop/CoWork content is not yet ingestible."""
         return ProviderParseResult(
             source=source,
             turns=[],
@@ -158,9 +170,11 @@ class ClaudeDesktopCoworkProbe:
         )
 
     def watch_roots(self) -> List[ProviderWatchRoot]:
+        """Return the sessions root as the single recursive watch root."""
         return [ProviderWatchRoot(self.provider, self.source_kind, str(self.root), recursive=True)]
 
     def health(self) -> ProviderHealth:
+        """Report probe-only health and the discovered source count."""
         sources = self.discover_sources()
         return ProviderHealth(
             provider=self.provider,

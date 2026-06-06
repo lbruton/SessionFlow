@@ -16,6 +16,8 @@ from provider_adapters import LEGAL_PROVIDERS
 
 @dataclass
 class BackfillJob:
+    """A single queued backfill unit of work."""
+
     job_id: str
     provider: str
     mode: str
@@ -29,6 +31,8 @@ class BackfillJob:
 
 @dataclass
 class ProviderBackfillStatus:
+    """Per-provider queue counters and pause state."""
+
     provider: str
     mode: str = ""
     queued_jobs: int = 0
@@ -40,6 +44,8 @@ class ProviderBackfillStatus:
 
 @dataclass
 class BackfillStatus:
+    """Snapshot of the whole queue: ordered jobs plus per-provider status."""
+
     jobs: List[BackfillJob]
     providers: Dict[str, ProviderBackfillStatus]
     paused: bool = False
@@ -49,6 +55,7 @@ class BackfillManager:
     """Small durable queue for provider-scoped backfill work."""
 
     def __init__(self, state_path: str | Path):
+        """Load persisted state from ``state_path`` into an empty queue."""
         self.state_path = Path(state_path)
         self.jobs: Dict[str, BackfillJob] = {}
         self.paused_providers: set[str] = set()
@@ -90,6 +97,7 @@ class BackfillManager:
         since: str = "",
         priority: int = 0,
     ) -> BackfillJob:
+        """Enqueue a provider-wide backfill job, deduped by its parameters."""
         if provider not in LEGAL_PROVIDERS:
             allowed = ", ".join(sorted(LEGAL_PROVIDERS))
             raise ValueError(f"Unknown provider: {provider!r}; expected one of: {allowed}")
@@ -114,6 +122,7 @@ class BackfillManager:
             return self.jobs[job_id]
 
     def enqueue_source(self, source_id: str, provider: str, reason: str = "source changed") -> BackfillJob:
+        """Enqueue a manual backfill for a single changed source."""
         with self._lock:
             job_id = self._job_key(provider, "manual-source", source_id=source_id)
             if job_id not in self.jobs:
@@ -131,6 +140,7 @@ class BackfillManager:
             return self.jobs[job_id]
 
     def enqueue_startup_defaults(self, enabled_providers: List[str], mode: str = "recent") -> List[BackfillJob]:
+        """Enqueue a low-priority startup backfill for each enabled provider."""
         startup_mode = mode if mode in {"recent", "incremental"} else "recent"
         with self._lock:
             return [
@@ -139,6 +149,7 @@ class BackfillManager:
             ]
 
     def pause(self, provider: Optional[str] = None) -> None:
+        """Pause one provider's queue, or globally pause and halt the embed budget."""
         with self._lock:
             if provider:
                 self.paused_providers.add(provider)
@@ -152,6 +163,7 @@ class BackfillManager:
             self.save_state()
 
     def resume(self, provider: Optional[str] = None) -> None:
+        """Resume one provider's queue, or globally resume embedding."""
         with self._lock:
             if provider:
                 self.paused_providers.discard(provider)
@@ -178,6 +190,7 @@ class BackfillManager:
             return
 
     def status(self) -> BackfillStatus:
+        """Return a refreshed snapshot of jobs and per-provider counters."""
         with self._lock:
             for provider in {job.provider for job in self.jobs.values()} | set(self.provider_stats):
                 provider_status = self._ensure_provider(provider)
@@ -214,6 +227,7 @@ class BackfillManager:
             self.save_state()
 
     def load_state(self) -> None:
+        """Load queue and provider state from the durable state file."""
         with self._lock:
             if not self.state_path.exists():
                 return
@@ -241,6 +255,7 @@ class BackfillManager:
                     continue
 
     def save_state(self) -> None:
+        """Atomically persist queue and provider state to disk."""
         with self._lock:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             data = {
