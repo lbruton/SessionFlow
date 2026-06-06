@@ -543,6 +543,14 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     if not drift:
         return
 
+    # SESF-38 AC-3: re-describe once (cache-free) before gating either branch.
+    # detect_schema_drift issues a fresh describe_collection, so a stale/cached
+    # first read that clears on the second describe must NOT raise or migrate.
+    # This re-verify gates BOTH the auto-migrate and the raise branches.
+    drift = detect_schema_drift(client)
+    if not drift:
+        return
+
     auto = os.getenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", "").lower() in {"1", "true", "yes", "on"}
     if auto:
         print(
@@ -555,9 +563,13 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
 
     raise RuntimeError(
         f"Milvus collection {COLLECTION_NAME!r} schema is out of date "
-        f"(drift={drift}). Run `python cleanup.py migrate-schema` to drop "
-        f"and recreate it (destructive), or set "
-        f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 to migrate on startup."
+        f"(drift={drift}). First try the non-destructive option: restart the "
+        f"server — a transient describe can clear on a fresh read. If drift "
+        f"persists, recover with one of these DESTRUCTIVE options (both lose "
+        f"all turns): run `python cleanup.py migrate-schema` to drop and "
+        f"recreate it (destructive — all turns lost), or set "
+        f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 to migrate on startup "
+        f"(destructive — all turns lost)."
     )
 
 
