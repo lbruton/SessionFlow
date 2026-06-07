@@ -14,6 +14,7 @@ import os
 import socket
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -172,4 +173,47 @@ class TestWatchdogRestartsOnStaleHeartbeatDeadPid:
         assert exit_code == 1, (
             f"Status should return 1 with stale heartbeat + dead PID "
             f"(watchdog would trigger restart). stderr: {stderr}"
+        )
+
+
+class TestStartRequiresVenv:
+    """do_start refuses to launch without the project venv, with a clear error (SESF-39).
+
+    The probe interpreter falls back to system python3 in a venv-less worktree,
+    but the server itself needs the venv (mlx, pymilvus, ...). Starting it under
+    a deps-less python3 would fail obscurely deep in startup, so do_start guards
+    on the venv and exits with an actionable message instead.
+    """
+
+    def test_start_without_venv_errors_clearly(self, tmp_path, script_path):
+        # Copy the script into a venv-less directory so SCRIPT_DIR has no venv/,
+        # exactly as a git worktree does. The guard must fire before any server
+        # launch is attempted.
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        copied = worktree / "sessionflow-server.sh"
+        copied.write_text(Path(script_path).read_text())
+        copied.chmod(0o755)
+
+        home = tmp_path / "home"
+        home.mkdir()
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["SESSIONFLOW_PORT"] = str(_find_free_port())
+        env.pop("VIRTUAL_ENV", None)  # ensure no activated venv masks the guard
+
+        result = subprocess.run(
+            ["bash", str(copied), "start"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=15,
+        )
+
+        assert result.returncode == 1, (
+            f"start without a venv should exit 1, not attempt a launch. "
+            f"rc={result.returncode} stderr: {result.stderr}"
+        )
+        assert "venv" in result.stderr.lower() and "worktree" in result.stderr.lower(), (
+            f"error should name the venv and point at the main checkout. stderr: {result.stderr}"
         )
