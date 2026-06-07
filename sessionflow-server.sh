@@ -16,15 +16,20 @@ SERVER_DIR="$HOME/.sessionflow"
 PID_FILE="$SERVER_DIR/server.pid"
 WATCHDOG_PID_FILE="$SERVER_DIR/watchdog.pid"
 LOG_FILE="$SERVER_DIR/server.log"
-# Resolve the Python interpreter. Prefer the script-local venv; fall back to an
-# activated venv ($VIRTUAL_ENV) or system python3 so the script works from a git
-# worktree, which has no local venv/ (it lives in the main checkout). See SESF-39.
-if [ -x "$SCRIPT_DIR/venv/bin/python" ]; then
-    PYTHON="$SCRIPT_DIR/venv/bin/python"
+# Venv interpreter — required to run the server (mlx, pymilvus, and other
+# third-party deps live only in the project venv). do_start/do_install_agent
+# guard on its presence and emit a clear error when it is missing.
+PYTHON="$SCRIPT_DIR/venv/bin/python"
+# Interpreter for stdlib-only probes (heartbeat freshness). Falls back to an
+# activated venv ($VIRTUAL_ENV) or system python3 so status/watchdog checks work
+# from a git worktree, which has no local venv/ (it lives in the main checkout).
+# The server itself still requires $PYTHON above — see SESF-39.
+if [ -x "$PYTHON" ]; then
+    PROBE_PYTHON="$PYTHON"
 elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
-    PYTHON="$VIRTUAL_ENV/bin/python"
+    PROBE_PYTHON="$VIRTUAL_ENV/bin/python"
 else
-    PYTHON="python3"
+    PROBE_PYTHON="python3"
 fi
 PORT="${SESSIONFLOW_PORT:-7102}"
 HEALTH_URL="http://127.0.0.1:$PORT/health"
@@ -59,7 +64,7 @@ is_heartbeat_fresh() {
     fi
     local expected_pid
     expected_pid=$(cat "$PID_FILE")
-    "$PYTHON" -c "
+    "$PROBE_PYTHON" -c "
 import json, time, sys
 try:
     h = json.load(open(sys.argv[1]))
@@ -186,6 +191,13 @@ do_start() {
     if is_running; then
         echo "[sessionflow] Already running (PID $(cat "$PID_FILE"))" >&2
         exit 0
+    fi
+
+    if [ ! -x "$PYTHON" ]; then
+        echo "[sessionflow] ERROR: no project venv interpreter at $PYTHON" >&2
+        echo "[sessionflow] Starting the server requires the project venv (mlx, pymilvus, ...)." >&2
+        echo "[sessionflow] Run from the main checkout, not a git worktree." >&2
+        exit 1
     fi
 
     rm -f "$PID_FILE"
@@ -431,6 +443,15 @@ launch_agent_target() {
 }
 
 do_install_agent() {
+    # The generated launcher hardcodes $REPO_DIR/venv/bin/python, so installing
+    # from a worktree (no local venv/) would write a LaunchAgent that fails at
+    # login. Refuse with a clear instruction instead. See SESF-39.
+    if [ ! -x "$SCRIPT_DIR/venv/bin/python" ]; then
+        echo "[sessionflow] ERROR: no project venv interpreter at $SCRIPT_DIR/venv/bin/python" >&2
+        echo "[sessionflow] install-agent requires the project venv. Run from the main" >&2
+        echo "[sessionflow] checkout, not a git worktree." >&2
+        exit 1
+    fi
     if [ ! -x "$SCRIPT_DIR/sessionflow-server.sh" ]; then
         chmod +x "$SCRIPT_DIR/sessionflow-server.sh"
     fi
