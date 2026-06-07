@@ -318,8 +318,8 @@ start_server() {
     fi
 
     if is_pid_alive; then
-        echo "[sessionflow-launcher] PID file exists but health failed; leaving process for watchdog/manual inspection: \$(cat "\$PID_FILE")" >&2
-        exit 1
+        echo "[sessionflow-launcher] PID file exists but health failed; waiting for process \$(cat "\$PID_FILE") to become healthy..." >&2
+        wait_for_health
     fi
 
     if [ -f "\$LAUNCH_AGENT_PLIST" ] && launchctl print "gui/\$(id -u)/\${LAUNCH_AGENT_LABEL}" >/dev/null 2>&1; then
