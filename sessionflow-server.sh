@@ -16,7 +16,16 @@ SERVER_DIR="$HOME/.sessionflow"
 PID_FILE="$SERVER_DIR/server.pid"
 WATCHDOG_PID_FILE="$SERVER_DIR/watchdog.pid"
 LOG_FILE="$SERVER_DIR/server.log"
-PYTHON="$SCRIPT_DIR/venv/bin/python"
+# Resolve the Python interpreter. Prefer the script-local venv; fall back to an
+# activated venv ($VIRTUAL_ENV) or system python3 so the script works from a git
+# worktree, which has no local venv/ (it lives in the main checkout). See SESF-39.
+if [ -x "$SCRIPT_DIR/venv/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/venv/bin/python"
+elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
+    PYTHON="$VIRTUAL_ENV/bin/python"
+else
+    PYTHON="python3"
+fi
 PORT="${SESSIONFLOW_PORT:-7102}"
 HEALTH_URL="http://127.0.0.1:$PORT/health"
 MAX_WAIT=60
