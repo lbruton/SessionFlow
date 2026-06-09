@@ -52,6 +52,7 @@ from provider_adapters import (
     default_provider_metadata,
     is_valid_issue_token,
 )
+import secret_redaction
 
 RECENCY_WEIGHT_DEFAULT = 0.3
 RECENCY_DECAY_DAYS_DEFAULT = 7
@@ -684,6 +685,99 @@ def milvus_client(db_path: Optional[str] = None):
             client.close()
 
 
+# --- Secret redaction guard (SESF-41) ---
+
+# Truthy values for the SESSIONFLOW_REDACT on/off flag (boolean idiom, rag_engine
+# precedent at the SESSIONFLOW_AUTO_MIGRATE_SCHEMA read).
+_REDACT_TRUE = {"1", "true", "yes", "on"}
+_REDACT_MODES = {"enforce", "report"}
+
+# Durable, process-lifetime per-rule detection counts surfaced via get_stats under
+# the "redaction" key (AC-10). Rule names only — never a secret value (AC-18).
+_redaction_counters: Dict[str, int] = {}
+
+
+def _redaction_settings() -> tuple[bool, str, Optional[str]]:
+    """Read the redaction config from the environment (AC-11/12/13).
+
+    Returns:
+        ``(enabled, mode, allowlist_path)``. ``SESSIONFLOW_REDACT`` unset defaults to
+        enabled in ``report`` mode; an explicit off value disables redaction.
+    """
+    raw = os.getenv("SESSIONFLOW_REDACT")
+    enabled = True if raw is None else raw.strip().lower() in _REDACT_TRUE
+    mode = os.getenv("SESSIONFLOW_REDACT_MODE", "report").strip().lower()
+    if mode not in _REDACT_MODES:
+        mode = "report"
+    return enabled, mode, os.getenv("SESSIONFLOW_REDACT_ALLOWLIST")
+
+
+def load_allowlist(path: Optional[str]) -> List[re.Pattern]:
+    """Load operator allowlist regex patterns from ``path`` (one per line).
+
+    Impure on purpose: keeps file I/O out of the pure ``secret_redaction`` module
+    (D-4, AC-16). Blank lines and ``#`` comments are ignored; invalid patterns are
+    skipped with a warning. Returns an empty list when ``path`` is falsy/unreadable.
+    """
+    if not path:
+        return []
+    patterns: List[re.Pattern] = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                try:
+                    patterns.append(re.compile(stripped))
+                except re.error as exc:
+                    logger.warning("Skipping invalid redaction allowlist pattern: %s", exc)
+    except OSError as exc:
+        logger.warning("Could not read redaction allowlist %s: %s", path, exc)
+    return patterns
+
+
+def _apply_redaction(turns: List[Dict]) -> None:
+    """Redact secrets in ``turns`` in place before embed/store (SESF-41 hook).
+
+    Runs once over the already-deduped turns so all three durable sinks and the
+    async wrapper are covered with no per-Provider change (AC-1/2/3), and before
+    ``_extract_issue_ids`` so issue IDs survive. In ``report`` mode it counts and
+    logs detections without mutating the text (AC-10); when disabled it is a no-op
+    (AC-12). Rule names only ever reach the log/counters (AC-18).
+    """
+    enabled, mode, allowlist_path = _redaction_settings()
+    if not enabled:
+        return
+    allowlist = load_allowlist(allowlist_path)
+    rule_counts: Dict[str, int] = {}
+    for turn in turns:
+        redacted, hits = secret_redaction.redact(
+            turn.get("text", ""), mode=mode, allowlist=allowlist
+        )
+        for hit in hits:
+            rule_counts[hit.rule_name] = rule_counts.get(hit.rule_name, 0) + 1
+        if mode == "enforce":
+            turn["text"] = redacted
+    if rule_counts:
+        for rule_name, count in rule_counts.items():
+            _redaction_counters[rule_name] = _redaction_counters.get(rule_name, 0) + count
+        histogram = ", ".join(f"{name}={count}" for name, count in sorted(rule_counts.items()))
+        logger.info("Redaction (%s mode) detected: %s", mode, histogram)
+
+
+def _redaction_status() -> Dict:
+    """Return the operator-facing redaction status surface (AC-10)."""
+    enabled, mode, _ = _redaction_settings()
+    return {"enabled": enabled, "mode": mode, "counts": dict(_redaction_counters)}
+
+
+def _scrub_exception(exc: BaseException) -> str:
+    """Return the exception text with any secret value redacted (AC-17)."""
+    redacted, _ = secret_redaction.redact(str(exc), mode="enforce")
+    return redacted
+
+
 # --- Core operations ---
 
 def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
@@ -717,6 +811,12 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
     if not new_turns:
         return 0
 
+    # SESF-41: ingestion-time secret redaction guard. One hook over the deduped
+    # turns rewrites turn["text"] in place, covering all three durable sinks
+    # (embedding, Milvus document, FTS content) and add_turns_async with no
+    # per-Provider change, and runs before _extract_issue_ids so issue IDs survive.
+    _apply_redaction(new_turns)
+
     # Embed texts in local, resource-controlled batches. Query embedding stays
     # untouched in search(); this path is ingestion/backfill only.
     budget = get_embedding_budget()
@@ -742,6 +842,9 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             embeddings = embed_texts(texts, is_query=False)
         except Exception as e:
             budget.after_batch(time.monotonic() - started, 0, error=e)
+            # SESF-41 AC-17: scrub the message before the bare re-raise so every
+            # upstream site that later stringifies this exception is already clean.
+            e.args = (_scrub_exception(e),)
             raise
         budget.after_batch(time.monotonic() - started, len(batch))
         all_embeddings.extend(embeddings)
@@ -806,7 +909,9 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             _fts.insert(fts_conn, fts_records)
             _fts.close_ephemeral(fts_conn)
     except Exception as e:
-        logger.warning("FTS insert failed (non-fatal): %s", e)
+        # SESF-41 AC-17: the FTS payload holds Turn content, so scrub the exception
+        # text before logging so no secret fragment can echo through the warning.
+        logger.warning("FTS insert failed (non-fatal): %s", _scrub_exception(e))
 
     return len(data)
 
@@ -1580,6 +1685,9 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
     stats["fts_row_count"] = lag["fts_row_count"]
     stats["fts_lag"] = lag["fts_lag"]
     stats["fts_backfill_required"] = lag["fts_backfill_required"]
+
+    # SESF-41: operator-facing redaction status + durable per-rule counts (AC-10).
+    stats["redaction"] = _redaction_status()
     return stats
 
 
