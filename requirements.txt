@@ -8,3 +8,4 @@ starlette
 uvicorn
 httpx
 watchdog>=4.0.0
+detect-secrets>=1.5.0  # SESF-41: Tier-1 structured-secret + entropy detection engine
