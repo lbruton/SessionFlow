@@ -694,7 +694,14 @@ _REDACT_MODES = {"enforce", "report"}
 
 # Durable, process-lifetime per-rule detection counts surfaced via get_stats under
 # the "redaction" key (AC-10). Rule names only — never a secret value (AC-18).
+# Guarded by _redaction_lock: the check-then-set update is a read-modify-write that
+# would race under concurrent ingestion despite the GIL.
 _redaction_counters: Dict[str, int] = {}
+_redaction_lock = threading.Lock()
+
+# mtime-keyed cache for the operator allowlist so a hot backfill path does not
+# re-read + re-compile the file on every add_turns batch. {path: (mtime, patterns)}.
+_allowlist_cache: Dict[str, tuple] = {}
 
 
 def _redaction_settings() -> tuple[bool, str, Optional[str]]:
@@ -721,6 +728,14 @@ def load_allowlist(path: Optional[str]) -> List[re.Pattern]:
     """
     if not path:
         return []
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError as exc:
+        logger.warning("Could not read redaction allowlist %s: %s", path, exc)
+        return []
+    cached = _allowlist_cache.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
     patterns: List[re.Pattern] = []
     try:
         with open(path, "r", encoding="utf-8") as handle:
@@ -734,6 +749,8 @@ def load_allowlist(path: Optional[str]) -> List[re.Pattern]:
                     logger.warning("Skipping invalid redaction allowlist pattern: %s", exc)
     except OSError as exc:
         logger.warning("Could not read redaction allowlist %s: %s", path, exc)
+        return []
+    _allowlist_cache[path] = (mtime, patterns)
     return patterns
 
 
@@ -760,8 +777,9 @@ def _apply_redaction(turns: List[Dict]) -> None:
         if mode == "enforce":
             turn["text"] = redacted
     if rule_counts:
-        for rule_name, count in rule_counts.items():
-            _redaction_counters[rule_name] = _redaction_counters.get(rule_name, 0) + count
+        with _redaction_lock:
+            for rule_name, count in rule_counts.items():
+                _redaction_counters[rule_name] = _redaction_counters.get(rule_name, 0) + count
         histogram = ", ".join(f"{name}={count}" for name, count in sorted(rule_counts.items()))
         logger.info("Redaction (%s mode) detected: %s", mode, histogram)
 
@@ -769,13 +787,29 @@ def _apply_redaction(turns: List[Dict]) -> None:
 def _redaction_status() -> Dict:
     """Return the operator-facing redaction status surface (AC-10)."""
     enabled, mode, _ = _redaction_settings()
-    return {"enabled": enabled, "mode": mode, "counts": dict(_redaction_counters)}
+    with _redaction_lock:
+        counts = dict(_redaction_counters)
+    return {"enabled": enabled, "mode": mode, "counts": counts}
 
 
 def _scrub_exception(exc: BaseException) -> str:
     """Return the exception text with any secret value redacted (AC-17)."""
     redacted, _ = secret_redaction.redact(str(exc), mode="enforce")
     return redacted
+
+
+def _scrub_exception_args(exc: BaseException) -> None:
+    """Redact every string arg on ``exc`` in place, preserving non-string args (AC-17).
+
+    Scrubbing each string arg (rather than collapsing to a single message) keeps
+    status codes and other structured metadata in ``exc.args[1:]`` intact while
+    ensuring no secret survives in any stringified form of the re-raised exception.
+    """
+    if exc.args:
+        exc.args = tuple(
+            secret_redaction.redact(arg, mode="enforce")[0] if isinstance(arg, str) else arg
+            for arg in exc.args
+        )
 
 
 # --- Core operations ---
@@ -842,9 +876,10 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             embeddings = embed_texts(texts, is_query=False)
         except Exception as e:
             budget.after_batch(time.monotonic() - started, 0, error=e)
-            # SESF-41 AC-17: scrub the message before the bare re-raise so every
-            # upstream site that later stringifies this exception is already clean.
-            e.args = (_scrub_exception(e),)
+            # SESF-41 AC-17: scrub the exception's string args before the bare
+            # re-raise so every upstream site that later stringifies it is already
+            # clean, while preserving any structured status-code args.
+            _scrub_exception_args(e)
             raise
         budget.after_batch(time.monotonic() - started, len(batch))
         all_embeddings.extend(embeddings)
@@ -1647,7 +1682,15 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
     """Get index statistics. Optionally filter to a specific project."""
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
-            return {"total_turns": 0, "sessions": 0, "by_type": {}, "providers": {}}
+            # SESF-41 AC-10: keep the redaction surface on every return path so
+            # get_stats()["redaction"] never KeyErrors before the collection exists.
+            return {
+                "total_turns": 0,
+                "sessions": 0,
+                "by_type": {},
+                "providers": {},
+                "redaction": _redaction_status(),
+            }
 
     # Query for breakdowns (capped by Milvus offset limit)
     all_results = _query_all(

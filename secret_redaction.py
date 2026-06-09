@@ -163,14 +163,23 @@ def _is_placeholder_value(value: str) -> bool:
     return False
 
 
-def _is_allowlisted(value: str, allowlist: list[Pattern[str]]) -> bool:
-    """Return True if ``value`` is structurally non-secret or operator-allowlisted (AC-9)."""
-    if is_potential_uuid(value):
-        return True
-    if _HEX_ALLOW_RE.match(value):
-        return True
-    if _ISSUE_ID_RE.match(value):
-        return True
+def _is_structurally_allowlisted(value: str) -> bool:
+    """Return True if ``value`` is a structurally non-secret shape (AC-9).
+
+    UUID / 40-hex git SHA / 64-hex SHA-256 / content-hash doc_id / issue ID. This is
+    applied ONLY to Tier-3 entropy candidates — a Tier-1/Tier-2 detector hit that
+    happens to be all-hex (e.g. a hex secret in `api_key=<64hex>`) must still be
+    redacted, so the hex shape is not a blanket exemption.
+    """
+    return bool(
+        is_potential_uuid(value)
+        or _HEX_ALLOW_RE.match(value)
+        or _ISSUE_ID_RE.match(value)
+    )
+
+
+def _is_operator_allowlisted(value: str, allowlist: list[Pattern[str]]) -> bool:
+    """Return True if ``value`` matches an operator-supplied allowlist pattern (AC-9)."""
     return any(pattern.search(value) for pattern in allowlist)
 
 
@@ -194,13 +203,22 @@ def _entropy_tokens(line: str) -> Iterator[str]:
 
 
 def _keyword_adjacent(line: str, value: str) -> bool:
-    """Return True if a secret keyword sits within 40 chars of ``value`` on ``line`` (AC-8)."""
-    value_pos = line.find(value)
-    if value_pos == -1:
+    """Return True if a keyword sits within 40 chars of ANY occurrence of ``value`` (AC-8).
+
+    Checks every occurrence of ``value`` on the line, not just the first — a token can
+    repeat and only a later occurrence be keyword-adjacent.
+    """
+    keyword_positions = [match.start() for match in _KEYWORD_RE.finditer(line)]
+    if not keyword_positions:
         return False
-    return any(
-        abs(match.start() - value_pos) <= 40 for match in _KEYWORD_RE.finditer(line)
-    )
+    cursor = 0
+    while True:
+        idx = line.find(value, cursor)
+        if idx == -1:
+            return False
+        if any(abs(pos - idx) <= 40 for pos in keyword_positions):
+            return True
+        cursor = idx + 1
 
 
 def _replace_outside_placeholders(text: str, value: str, replacement: str) -> str:
@@ -307,10 +325,14 @@ def redact(
     # De-duplicate by value so one secret yields one classification. When the same
     # value is matched by several tiers (e.g. a structured token the entropy scanner
     # also flags), the lowest tier wins and ``force`` is OR-ed across occurrences.
-    # Allowlisted values (AC-9) are dropped here.
+    # Allowlist (AC-9): operator patterns apply to ALL tiers; the structural shape
+    # exemption (UUID/hex/issue) applies to Tier-3 entropy ONLY, so a high-confidence
+    # Tier-1/Tier-2 hit on an all-hex secret is still redacted.
     agg: dict[str, dict] = {}
     for value, rule_name, tier, force in _collect_candidates(text):
-        if _is_allowlisted(value, allowlist):
+        if _is_operator_allowlisted(value, allowlist):
+            continue
+        if tier == 3 and _is_structurally_allowlisted(value):
             continue
         entry = agg.get(value)
         if entry is None:

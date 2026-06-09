@@ -426,7 +426,8 @@ def test_ac3_async_entry_point_also_redacted(add_turns_harness, monkeypatch):
     rag_engine, cap = add_turns_harness
     monkeypatch.setenv(ENV_ENABLE, "on")
     monkeypatch.setenv(ENV_MODE, "enforce")
-    monkeypatch.setattr(rag_engine, "_embed_executor", ThreadPoolExecutor(max_workers=1))
+    executor = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(rag_engine, "_embed_executor", executor)
 
     async def _run():
         # Build sync primitives inside the running loop so they bind to it.
@@ -436,7 +437,10 @@ def test_ac3_async_entry_point_also_redacted(add_turns_harness, monkeypatch):
             [{"doc_id": "z", "text": f"cred {AWS_KEY} end"}], db_path=DB
         )
 
-    asyncio.run(_run())
+    try:
+        asyncio.run(_run())
+    finally:
+        executor.shutdown(wait=True)  # don't leak the worker thread
     assert AWS_KEY not in cap["milvus_data"][0]["document"]
     assert "[REDACTED:AWS]" in cap["milvus_data"][0]["document"]
 
@@ -548,3 +552,53 @@ def test_ac17_embedding_error_is_scrubbed(add_turns_harness, monkeypatch):
     with pytest.raises(Exception) as ei:
         rag_engine.add_turns([{"doc_id": "d", "text": "benign text"}], db_path=DB)
     assert AWS_KEY not in str(ei.value)
+
+
+# --- Regression tests for PR #37 review findings ----------------------------
+
+
+def test_ac9_tier2_hex_secret_is_not_structurally_allowlisted():
+    """Regression: the 40/64-hex shape exemption is Tier-3 only.
+
+    A hex-shaped secret in a Tier-2 assignment (`api_key=<64hex>`) must still be
+    redacted — the structural allowlist must not blanket-exempt all-hex values.
+    """
+    hex64 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    out, _ = redact(f"api_key: {hex64}", mode="enforce")
+    assert hex64 not in out  # Tier-2 hit — not suppressed by the hex shape
+    assert "[REDACTED:" in out
+    # The same hex as a bare token (Tier-3 entropy) IS structurally allowlisted.
+    out2, _ = redact(f"commit {hex64} landed", mode="enforce")
+    assert hex64 in out2
+
+
+def test_ac8_keyword_adjacency_checks_all_occurrences():
+    """Regression: entropy adjacency must consider every occurrence of the token.
+
+    When a high-entropy token appears twice and only the later occurrence is
+    keyword-adjacent, it must still be force-masked.
+    """
+    token = ENTROPY_TOKEN
+    text = f"{token} appears, then api_key {token}"
+    out, _ = redact(text, mode="enforce")
+    assert token not in out  # the keyword-adjacent occurrence forces masking
+
+
+def test_ac10_redaction_surface_present_before_collection_exists(add_turns_harness, monkeypatch):
+    """Regression: get_stats keeps the redaction surface on the no-collection path."""
+    import contextlib
+
+    rag_engine, _ = add_turns_harness
+
+    class _NoCollectionClient:
+        def has_collection(self, name):
+            return False
+
+    @contextlib.contextmanager
+    def _no_collection_client(db_path=None):
+        yield _NoCollectionClient()
+
+    monkeypatch.setattr(rag_engine, "milvus_client", _no_collection_client)
+    stats = rag_engine.get_stats(db_path=DB)
+    assert "redaction" in stats  # never KeyErrors (AC-10 contract on every path)
+    assert stats["redaction"]["enabled"] is True
