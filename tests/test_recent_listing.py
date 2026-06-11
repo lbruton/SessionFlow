@@ -267,6 +267,17 @@ def test_newest_n_tolerates_null_timestamp():
     assert [r["doc_id"] for r in collector.result()] == ["b", "a"]
 
 
+def test_newest_n_orders_mixed_timezone_formats_chronologically():
+    """Z/+offset/naive ISO forms must order by instant, not by string
+    (Copilot, PR #38): "2026-01-01T12:00:00+05:00" is lexicographically the
+    largest here but chronologically the oldest."""
+    collector = rag_engine._NewestN(2)
+    collector.add(_nrow("offset", "2026-01-01T12:00:00+05:00"))  # 07:00 UTC
+    collector.add(_nrow("zulu", "2026-01-01T09:00:00Z"))
+    collector.add(_nrow("naive", "2026-01-01T08:00:00"))  # naive = UTC
+    assert [r["doc_id"] for r in collector.result()] == ["zulu", "naive"]
+
+
 def test_listing_nonpositive_n_skips_milvus_scan(monkeypatch):
     """n<=0 must return [] without draining the iterator (CodeRabbit, PR #38)."""
     client = _patch_listing(monkeypatch, [_qrow("a", 1)])

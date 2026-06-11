@@ -1372,10 +1372,13 @@ class _NewestN:
     the kept set always equals the true newest ``limit`` seen so far even
     though Milvus ``query_iterator`` yields rows in an undefined order.
 
-    Rows are keyed by ``(timestamp, doc_id)`` (ISO-8601 timestamps sort
-    correctly lexicographically) and deduplicated by ``doc_id``. Once a
-    ``doc_id`` is rejected or evicted the kept minimum only increases, so a
-    later re-arrival of the same key is rejected again.
+    Rows are keyed by ``(parsed-UTC timestamp, doc_id)`` — timestamps go
+    through ``_parse_timestamp_utc`` (the same ordering ``_rank_results``
+    uses) because the index mixes ``Z``/``+00:00``/naive ISO forms, which do
+    not sort reliably as strings. Unparseable/empty timestamps fall back to
+    ``datetime.min`` (oldest, evicted first). Rows are deduplicated by
+    ``doc_id``; once a ``doc_id`` is rejected or evicted the kept minimum
+    only increases, so a later re-arrival of the same key is rejected again.
     """
 
     def __init__(self, limit: int):
@@ -1396,7 +1399,8 @@ class _NewestN:
         doc_id = str(row.get("doc_id") or "")
         if doc_id in self._ids:
             return
-        key = (str(row.get("timestamp") or ""), doc_id)
+        parsed = _parse_timestamp_utc(str(row.get("timestamp") or ""))
+        key = (parsed or datetime.min.replace(tzinfo=timezone.utc), doc_id)
         item = (key, doc_id, row)
         if len(self._heap) < self._limit:
             heapq.heappush(self._heap, item)
