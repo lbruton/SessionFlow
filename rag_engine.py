@@ -1235,6 +1235,9 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     ``_NewestN`` bounded heap: memory stays O(n) and the kept set is the true
     global newest-``n`` regardless of collection size.
     """
+    if n <= 0:
+        return []
+
     filter_expr = _build_milvus_filter(
         session_id, git_branch, project_root, provider, source_kind,
         date_from, date_to, issue_id,

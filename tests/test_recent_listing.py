@@ -267,6 +267,13 @@ def test_newest_n_tolerates_null_timestamp():
     assert [r["doc_id"] for r in collector.result()] == ["b", "a"]
 
 
+def test_listing_nonpositive_n_skips_milvus_scan(monkeypatch):
+    """n<=0 must return [] without draining the iterator (CodeRabbit, PR #38)."""
+    client = _patch_listing(monkeypatch, [_qrow("a", 1)])
+    assert rag_engine.search("", n=0, db_path=DB) == []
+    assert client.query_calls == []
+
+
 def test_newest_n_zero_limit_is_noop():
     collector = rag_engine._NewestN(0)
     collector.add(_nrow("a", "2026-01-01"))
