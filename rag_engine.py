@@ -1313,7 +1313,12 @@ class _OldestN:
     so the kept set always equals the true oldest ``limit`` seen so far — even
     though Milvus ``query_iterator`` yields rows in an undefined order.
 
-    Entries are keyed by ``(timestamp, doc_id)`` and deduplicated by ``doc_id``
+    Entries are keyed by ``(parsed-UTC timestamp, doc_id)`` — timestamps go
+    through ``_parse_timestamp_utc`` (the same ordering ``_rank_results`` uses)
+    because the index mixes ``Z``/``+00:00``/naive ISO forms, which do not sort
+    reliably as strings (SESF-43; mirrors the ``_NewestN`` fix from SESF-36).
+    Unparseable/empty timestamps fall back to ``datetime.min`` (oldest, kept
+    first). Entries are deduplicated by ``doc_id``
     (first writer wins, so the structured source — streamed before the FTS
     fallback — takes precedence, matching the prior ``setdefault`` merge). Once a
     ``doc_id`` is rejected or evicted the kept maximum only decreases, so a later
@@ -1338,7 +1343,8 @@ class _OldestN:
         doc_id = str(entry.get("doc_id") or "")
         if doc_id in self._ids:
             return
-        key = (str(entry.get("timestamp") or ""), doc_id)
+        parsed = _parse_timestamp_utc(str(entry.get("timestamp") or ""))
+        key = (parsed or datetime.min.replace(tzinfo=timezone.utc), doc_id)
         item = (_ReverseKey(key), doc_id, entry)
         if len(self._heap) < self._limit:
             heapq.heappush(self._heap, item)
@@ -1354,10 +1360,10 @@ class _OldestN:
 
     def result(self) -> List[Dict]:
         """Return the retained entries sorted oldest-first by (timestamp, doc_id)."""
-        return sorted(
-            (entry for _, _, entry in self._heap),
-            key=lambda e: (str(e.get("timestamp") or ""), str(e.get("doc_id") or "")),
-        )
+        # Sort by the stored heap key (parsed-UTC timestamp, doc_id) so the
+        # final order matches the retention order; the key is unique within
+        # the set, so the comparison never reaches the entry dict.
+        return [entry for _, _, entry in sorted(self._heap, key=lambda item: item[0].key)]
 
 
 def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
