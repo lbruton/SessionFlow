@@ -1412,10 +1412,9 @@ class _NewestN:
 
     def result(self) -> List[Dict]:
         """Return the retained rows sorted newest-first by (timestamp, doc_id)."""
-        return [
-            row for _, _, row in
-            sorted(self._heap, key=lambda item: item[0], reverse=True)
-        ]
+        # No explicit key: heap items are (key, doc_id, row) and key is unique
+        # within the set, so tuple comparison never reaches the row dict.
+        return [row for _, _, row in sorted(self._heap, reverse=True)]
 
 
 def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
