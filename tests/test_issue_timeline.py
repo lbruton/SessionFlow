@@ -220,6 +220,18 @@ def test_oldest_n_collector_robust_to_zero_limit_and_null_fields():
     assert "b" in [r.get("doc_id") for r in collector.result()]  # sort survives null + non-str entries
 
 
+def test_oldest_n_orders_mixed_timezone_formats_chronologically():
+    """Z/+offset/naive ISO forms must order by instant, not by string
+    (SESF-43, mirrors the _NewestN fix from PR #38):
+    "2026-01-01T12:00:00+05:00" is lexicographically the largest here but
+    chronologically the oldest, so it must be kept and sorted first."""
+    collector = rag_engine._OldestN(2)
+    collector.add(_entry("zulu", "2026-01-01T09:00:00Z"))
+    collector.add(_entry("naive", "2026-01-01T08:00:00"))  # naive = UTC
+    collector.add(_entry("offset", "2026-01-01T12:00:00+05:00"))  # 07:00 UTC
+    assert [r["doc_id"] for r in collector.result()] == ["offset", "naive"]
+
+
 def test_timeline_retains_oldest_n_from_shuffled_large_input(monkeypatch):
     # SESF-34 (core) — a pathologically large structured set is streamed in
     # shuffled timestamp order across many batches; the bounded collector must
