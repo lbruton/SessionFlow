@@ -3,8 +3,9 @@
 When ``query`` is absent/empty, ``search_all_sessions`` / ``search_session``
 must fall back to listing recent turns sorted purely by timestamp — without
 embedding the (empty) query or running an FTS MATCH. The engine reaches Milvus
-via a filter-only ``client.query()`` (Option A: capped scan + client-side
-timestamp sort, mirroring ``get_turns``/``get_stats``).
+via a filter-only ``client.query_iterator()`` streamed through a ``_NewestN``
+bounded heap (SESF-36: a single capped ``query()`` overflowed Milvus's
+result-size buffer on broad provider filters).
 
 System under test = ``rag_engine.search`` and the two MCP tools in ``tools``.
 """
@@ -53,16 +54,46 @@ def _qrow(doc_id: str, days_ago: float | None = None, **extra) -> dict:
     return row
 
 
+class _FakeIterator:
+    """Mimics pymilvus query_iterator: yields fixed-size batches, then []."""
+
+    def __init__(self, rows, batch_size):
+        self._rows = rows
+        self._batch_size = batch_size
+        self._pos = 0
+        self.closed = False
+
+    def next(self):
+        batch = self._rows[self._pos:self._pos + self._batch_size]
+        self._pos += self._batch_size
+        return [dict(r) for r in batch]
+
+    def close(self):
+        self.closed = True
+
+
 class _ListingClient:
-    """Fake Milvus client: serves query(), forbids vector search()."""
+    """Fake Milvus client: serves query_iterator(), forbids vector search()
+    and the single-shot query() the pre-SESF-36 listing path used."""
 
     def __init__(self, rows):
         self._rows = rows
         self.query_calls: list[dict] = []
+        self.iterators: list[_FakeIterator] = []
+
+    def has_collection(self, name):
+        return True
+
+    def query_iterator(self, *args, **kwargs):
+        self.query_calls.append(kwargs)
+        iterator = _FakeIterator(self._rows, kwargs.get("batch_size", 1000))
+        self.iterators.append(iterator)
+        return iterator
 
     def query(self, *args, **kwargs):
-        self.query_calls.append(kwargs)
-        return [dict(r) for r in self._rows]
+        raise AssertionError(
+            "single-shot query() must not run on the listing path (SESF-36)"
+        )
 
     def search(self, *args, **kwargs):
         raise AssertionError("vector search() must not run on the query-less listing path")
@@ -157,10 +188,34 @@ def test_listing_applies_provider_and_date_filters(monkeypatch):
     assert 'timestamp >= "2026-05-01"' in filter_expr
 
 
-def test_listing_uses_scan_cap_limit(monkeypatch):
+def test_listing_streams_via_query_iterator(monkeypatch):
+    """SESF-36: the listing path must use the batched iterator, never a
+    single-shot capped query() (which overflows Milvus's result buffer)."""
     client = _patch_listing(monkeypatch, [_qrow("a", 1)])
     rag_engine.search("", n=5, db_path=DB)
-    assert client.query_calls[0]["limit"] == rag_engine.RECENT_LISTING_SCAN_CAP
+    assert len(client.query_calls) == 1
+    assert "limit" not in client.query_calls[0]
+    assert client.iterators[0].closed
+
+
+def test_listing_large_filtered_set_returns_n_newest(monkeypatch):
+    """SESF-36 regression: a broad provider filter matching far more rows than
+    a page must stream batch-by-batch and return exactly n, globally newest."""
+    # 2,500 rows in shuffled order across iterator batches (batch_size 1000).
+    rows = [_qrow(f"d{i:04d}", days_ago=i) for i in range(2500)]
+    rows = rows[1::2] + rows[0::2]  # interleave so newest aren't front-loaded
+    client = _patch_listing(monkeypatch, rows)
+    out = rag_engine.search("", n=3, provider="codex", db_path=DB)
+    assert [r["doc_id"] for r in out] == ["d0000", "d0001", "d0002"]
+    # Drained in 3 batches of <=1000, not one giant materialized result.
+    assert client.iterators[0]._batch_size <= 1000
+
+
+def test_listing_dedupes_doc_ids_across_batches(monkeypatch):
+    rows = [_qrow("dup", 1), _qrow("b", 2), _qrow("dup", 1)]
+    _patch_listing(monkeypatch, rows)
+    out = rag_engine.search("", n=5, db_path=DB)
+    assert [r["doc_id"] for r in out] == ["dup", "b"]
 
 
 def test_listing_validates_provider_before_query(monkeypatch):
@@ -171,6 +226,52 @@ def test_listing_validates_provider_before_query(monkeypatch):
     monkeypatch.setattr(rag_engine, "milvus_client", _explode)
     with pytest.raises(ValueError, match="provider"):
         rag_engine.search("", provider="bogus", db_path=DB)
+
+
+# ---------------------------------------------------------------------------
+# _NewestN bounded collector (SESF-36)
+# ---------------------------------------------------------------------------
+
+def _nrow(doc_id: str, ts: str | None) -> dict:
+    return {"doc_id": doc_id, "timestamp": ts}
+
+
+def test_newest_n_bounds_and_keeps_newest():
+    collector = rag_engine._NewestN(2)
+    for doc_id, ts in [("a", "2026-01-01"), ("b", "2026-03-01"), ("c", "2026-02-01")]:
+        collector.add(_nrow(doc_id, ts))
+    assert len(collector) == 2
+    assert [r["doc_id"] for r in collector.result()] == ["b", "c"]
+
+
+def test_newest_n_evicts_oldest_on_newer_arrival():
+    collector = rag_engine._NewestN(1)
+    collector.add(_nrow("old", "2026-01-01"))
+    collector.add(_nrow("new", "2026-06-01"))
+    collector.add(_nrow("older", "2025-01-01"))  # rejected: not newer than kept
+    assert [r["doc_id"] for r in collector.result()] == ["new"]
+
+
+def test_newest_n_dedupes_doc_id():
+    collector = rag_engine._NewestN(5)
+    collector.add(_nrow("a", "2026-01-01"))
+    collector.add(_nrow("a", "2026-06-01"))  # same doc_id, ignored
+    assert len(collector) == 1
+
+
+def test_newest_n_tolerates_null_timestamp():
+    collector = rag_engine._NewestN(2)
+    collector.add(_nrow("nots", None))
+    collector.add(_nrow("a", "2026-01-01"))
+    collector.add(_nrow("b", "2026-02-01"))  # evicts the empty-timestamp row
+    assert [r["doc_id"] for r in collector.result()] == ["b", "a"]
+
+
+def test_newest_n_zero_limit_is_noop():
+    collector = rag_engine._NewestN(0)
+    collector.add(_nrow("a", "2026-01-01"))
+    assert len(collector) == 0
+    assert collector.result() == []
 
 
 # ---------------------------------------------------------------------------

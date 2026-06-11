@@ -57,11 +57,6 @@ import secret_redaction
 RECENCY_WEIGHT_DEFAULT = 0.3
 RECENCY_DECAY_DAYS_DEFAULT = 7
 MISSING_TIMESTAMP_RECENCY = 0.5
-# Query-less recency listing (SESF-16): Milvus query() has no ORDER BY, so we
-# scan a filter-bounded candidate set and sort by timestamp client-side. Capped
-# to mirror get_turns/get_stats. Correct for a single project under the cap;
-# best-effort (newest within the first cap rows scanned) for cross-project.
-RECENT_LISTING_SCAN_CAP = 16384
 _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_score")
 
 logger = logging.getLogger("sessionflow.milvus")
@@ -1229,27 +1224,30 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
                     date_to: Optional[str] = None,
                     issue_id: Optional[str] = None,
                     db_path: Optional[str] = None) -> List[Dict]:
-    """Query-less chronological listing: filter-only Milvus scan re-ranked by
+    """Query-less chronological listing: filter-only streamed scan ranked by
     timestamp descending (SESF-16).
 
-    Milvus ``query()`` has no ORDER BY, so we scan up to
-    ``RECENT_LISTING_SCAN_CAP`` filter-matching rows and sort client-side. For a
-    single project under the cap this returns the true newest rows; for very
-    large or cross-project scans it returns the newest within the scanned set.
+    Milvus ``query()`` has no ORDER BY, and a single capped ``query()`` call
+    materializes every filter-matching row server-side — broad filters (e.g.
+    ``provider="codex"`` across all projects) overflow Milvus's per-query
+    result-size buffer and raise ``code=65535: query results exceed the limit
+    size`` (SESF-36). Rows therefore stream through ``_query_batches`` into a
+    ``_NewestN`` bounded heap: memory stays O(n) and the kept set is the true
+    global newest-``n`` regardless of collection size.
     """
     filter_expr = _build_milvus_filter(
         session_id, git_branch, project_root, provider, source_kind,
         date_from, date_to, issue_id,
     )
 
-    with milvus_client(db_path) as client:
-        rows = client.query(
-            collection_name=COLLECTION_NAME,
-            filter=filter_expr or "",
-            output_fields=_SEARCH_OUTPUT_FIELDS,
-            limit=RECENT_LISTING_SCAN_CAP,
-        )
+    collector = _NewestN(n)
+    for batch in _query_batches(
+        _SEARCH_OUTPUT_FIELDS, filter_expr=filter_expr, db_path=db_path,
+    ):
+        for row in batch:
+            collector.add(row)
 
+    rows = collector.result()
     if not rows:
         return []
 
@@ -1358,6 +1356,63 @@ class _OldestN:
             (entry for _, _, entry in self._heap),
             key=lambda e: (str(e.get("timestamp") or ""), str(e.get("doc_id") or "")),
         )
+
+
+class _NewestN:
+    """Bounded collector that retains the globally-newest ``limit`` rows.
+
+    The newest-first mirror of :class:`_OldestN`, used by the query-less
+    recency listing (SESF-36): rows stream in via :meth:`add` and at most
+    ``limit`` are ever held, so memory is O(limit) no matter how many rows
+    match the filter. A plain ``heapq`` min-heap suffices — ``heap[0]`` is the
+    oldest-kept row, evicted only when a strictly-newer candidate arrives, so
+    the kept set always equals the true newest ``limit`` seen so far even
+    though Milvus ``query_iterator`` yields rows in an undefined order.
+
+    Rows are keyed by ``(timestamp, doc_id)`` (ISO-8601 timestamps sort
+    correctly lexicographically) and deduplicated by ``doc_id``. Once a
+    ``doc_id`` is rejected or evicted the kept minimum only increases, so a
+    later re-arrival of the same key is rejected again.
+    """
+
+    def __init__(self, limit: int):
+        """Create a collector bounded to ``limit`` rows."""
+        self._limit = limit
+        self._heap: List = []   # (key, doc_id, row); heap[0] = oldest kept
+        self._ids: set = set()  # doc_ids currently retained
+
+    def add(self, row: Dict) -> None:
+        """Offer one Milvus row to the bounded set.
+
+        No-op when its ``doc_id`` is already retained (dedup) or when the set
+        is full and the row is not strictly newer than the oldest currently
+        kept.
+        """
+        # Coerce to str so a None or non-str field can't raise TypeError in
+        # the heap-key comparison (mirrors _OldestN).
+        doc_id = str(row.get("doc_id") or "")
+        if doc_id in self._ids:
+            return
+        key = (str(row.get("timestamp") or ""), doc_id)
+        item = (key, doc_id, row)
+        if len(self._heap) < self._limit:
+            heapq.heappush(self._heap, item)
+            self._ids.add(doc_id)
+        elif self._heap and key > self._heap[0][0]:  # newer than the oldest kept
+            self._ids.discard(self._heap[0][1])      # drop the evicted doc_id
+            heapq.heapreplace(self._heap, item)      # evict oldest, insert candidate
+            self._ids.add(doc_id)
+
+    def __len__(self) -> int:
+        """Number of rows currently retained (never exceeds ``limit``)."""
+        return len(self._heap)
+
+    def result(self) -> List[Dict]:
+        """Return the retained rows sorted newest-first by (timestamp, doc_id)."""
+        return [
+            row for _, _, row in
+            sorted(self._heap, key=lambda item: item[0], reverse=True)
+        ]
 
 
 def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
