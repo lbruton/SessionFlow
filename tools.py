@@ -10,6 +10,7 @@ from mcp.server import Server
 from mcp import types
 
 import rag_engine
+import sanitize
 from provider_adapters import (
     LEGAL_PROVIDERS,
     LEGAL_SORT_BY,
@@ -154,6 +155,50 @@ def format_stats(stats: dict, db_path: str) -> str:
             lines.append(f"- {provider}: {count}")
 
     lines.append(f"\n**Index Location:** {db_path}")
+    return "\n".join(lines)
+
+
+def format_sanitize_report(report: "sanitize.SanitizeReport") -> str:
+    """Format a sanitize :class:`SanitizeReport` as value-free markdown.
+
+    Renders the run mode, per-rule detection counts, affected/processed turn
+    counts, the FTS-incomplete count, run status, and the audit-file path. On an
+    apply run the rotate-the-key warning is appended. The report carries only rule
+    names, integer counts, and paths — never a secret value — so the rendered text
+    is safe to surface to the operator.
+
+    Args:
+        report: The outcome of :func:`sanitize.scan` or :func:`sanitize.apply`.
+
+    Returns:
+        A markdown string summarizing the run.
+    """
+    lines = [f"**Sanitize ({report.mode})** — status: {report.status}"]
+
+    if report.counts:
+        lines.append("\n### Detections by rule")
+        for rule, count in sorted(report.counts.items(), key=lambda x: (-x[1], x[0])):
+            lines.append(f"- {rule}: {count}")
+    else:
+        lines.append("\nNo secrets detected in scope.")
+
+    lines.append(f"\n**Affected turns:** {report.affected_count}")
+    if report.mode != "dry-run":
+        lines.append(f"**Processed turns:** {report.processed_count}")
+        if report.incomplete_fts:
+            lines.append(
+                f"**FTS-incomplete turns (retry needed):** {report.incomplete_fts}"
+            )
+
+    if report.audit_path:
+        lines.append(f"**Audit file:** {report.audit_path}")
+
+    if report.rotate_warning:
+        lines.append(
+            "\nWARNING: redaction is not key rotation. Rotate any exposed "
+            "credential now — removing it from the index does not invalidate it."
+        )
+
     return "\n".join(lines)
 
 
@@ -416,6 +461,57 @@ def register_tools(server: Server):
                     "required": [],
                 },
             ),
+            types.Tool(
+                name="sanitize_index",
+                description=(
+                    "Retroactively find and remove secrets already indexed in the "
+                    "session store (Milvus document field, FTS keyword content, and the "
+                    "derived embedding). Defaults to a dry-run that reports per-rule "
+                    "counts, the number of affected turns, and an audit-file path "
+                    "WITHOUT writing. Pass apply=true together with confirm=true to "
+                    "redact-and-re-embed the affected turns (or drop=true to delete "
+                    "them); apply without confirm refuses and makes no changes. Never "
+                    "returns secret values — counts and offsets only. Redaction is not "
+                    "key rotation: rotate any exposed credential after an apply."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "apply": {
+                            "type": "boolean",
+                            "description": "Perform the destructive pass. Default false (dry-run report only).",
+                            "default": False,
+                        },
+                        "drop": {
+                            "type": "boolean",
+                            "description": "When applying, delete affected turns instead of redacting them. Default false.",
+                            "default": False,
+                        },
+                        "confirm": {
+                            "type": "boolean",
+                            "description": "Required confirmation token for apply. Without it, apply refuses and makes no changes.",
+                            "default": False,
+                        },
+                        "project_root": {
+                            "type": "string",
+                            "description": "Restrict the scope to a single project path.",
+                        },
+                        "provider": {
+                            "type": "string",
+                            "description": "Restrict the scope to a single harness provider (e.g. claude_code_cli, codex).",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Restrict the scope to a single session id.",
+                        },
+                        "since": {
+                            "type": "string",
+                            "description": "ISO date/timestamp lower bound (e.g. '2026-04-02'); only turns at or after this are scanned.",
+                        },
+                    },
+                    "required": [],
+                },
+            ),
         ]
 
     @server.call_tool()
@@ -555,6 +651,45 @@ def register_tools(server: Server):
                 )
                 parts.append(f"\nRemaining: {stats['total_turns']} turns across {stats['sessions']} sessions")
                 return [types.TextContent(type="text", text="\n".join(parts))]
+
+            elif name == "sanitize_index":
+                do_apply = bool(arguments.get("apply", False))
+                do_drop = bool(arguments.get("drop", False))
+                do_confirm = bool(arguments.get("confirm", False))
+
+                scope = sanitize.Scope(
+                    project_root=arguments.get("project_root"),
+                    provider=arguments.get("provider"),
+                    session_id=arguments.get("session_id"),
+                    since=arguments.get("since"),
+                )
+
+                if not do_apply:
+                    # Offload to a thread: scan reads/iterates many turns and
+                    # would otherwise block the asyncio event loop.
+                    report = await asyncio.to_thread(sanitize.scan, scope)
+                    return [types.TextContent(
+                        type="text", text=format_sanitize_report(report))]
+
+                if not do_confirm:
+                    # Refuse before any read or write: apply requires explicit confirm.
+                    action = "delete" if do_drop else "redact"
+                    alt = "" if do_drop else " (drop=true to delete instead)"
+                    return [types.TextContent(
+                        type="text",
+                        text=(
+                            "Refusing to apply: confirmation required. Re-run with "
+                            f"confirm=true to {action}{alt} the affected turns. "
+                            "No changes were made."
+                        ),
+                    )]
+
+                # Offload to a thread: apply re-embeds many turns and would
+                # otherwise block the asyncio event loop for the whole run.
+                report = await asyncio.to_thread(
+                    sanitize.apply, scope, drop=do_drop, confirmed=True)
+                return [types.TextContent(
+                    type="text", text=format_sanitize_report(report))]
 
             else:
                 raise ValueError(f"Unknown tool: {name}")

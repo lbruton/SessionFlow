@@ -165,6 +165,45 @@ python cleanup.py backfill enqueue --provider antigravity_cli --mode recent
 Pause state and queued jobs persist on disk, so a restart (or LaunchAgent
 re-launch) resumes the same plan.
 
+## Retroactive secret sanitizer
+
+If a secret was indexed before the ingestion-time redaction guard caught it,
+`cleanup.py sanitize` finds and removes it from the Milvus `document` field, the
+FTS5 `content` column, and the embedding vector derived from them. Detection
+reuses the same engine as the ingestion guard, so what the sanitizer flags is
+exactly what live ingestion would now redact.
+
+**Dry-run is the default** — it reports per-rule counts, the affected-turn count,
+and an audit path, and writes nothing to the index:
+
+```bash
+python cleanup.py sanitize                              # dry-run over the whole index
+python cleanup.py sanitize --provider claude_code_cli   # scope by provider
+python cleanup.py sanitize --project /path/to/repo --since 2026-05-01
+```
+
+`--apply` rewrites the affected turns (redact the text, re-embed, overwrite the
+row). With `--drop` it deletes the affected turns instead. Both require an
+explicit `--yes` — there is **no interactive prompt**. `--apply` without `--yes`
+refuses before any read or write and exits non-zero:
+
+```bash
+python cleanup.py sanitize --apply --yes                # redact + re-embed in place
+python cleanup.py sanitize --apply --yes --drop         # delete affected turns
+```
+
+Scope flags (`--project`, `--provider`, `--session`, `--since`) apply to both
+dry-run and apply. `--drop` is only valid with `--apply`.
+
+Every run writes a **value-free** JSONL audit trail under `~/.sessionflow/audit/`
+(0600) — rule names, tiers, integer offsets, and pre-masked snippets only, never
+a raw secret value. Output to stdout is likewise counts-only.
+
+> **Redaction is not safety — rotate the key.** Removing a secret from the index
+> does not un-expose it. Once a credential has been written anywhere, treat it as
+> compromised and rotate it at the source; the sanitizer warns about this on every
+> apply but cannot perform the rotation for you.
+
 ## Hosted embeddings — deferred
 
 Hosted/OpenAI embeddings are **deferred and not implemented in SESF-6**.
