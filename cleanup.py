@@ -381,6 +381,90 @@ def cmd_backfill(args) -> int:
     return 0
 
 
+def cmd_sanitize(args) -> int:
+    """Retroactively scan or remove secrets already persisted in the index.
+
+    Thin CLI adapter over :mod:`sanitize` (SESF-42 Component 4). Default posture
+    is **dry-run**: report per-rule counts, the affected-turn count, and the audit
+    path, writing nothing. ``--apply`` rewrites (redact + re-embed) or, with
+    ``--drop``, deletes the affected turns — but only after an explicit ``--yes``.
+
+    The confirmation gate is **refuse-before-writes**: ``--apply`` without ``--yes``
+    prints that confirmation is required, makes no read or write (``sanitize.apply``
+    is never called), and returns a non-zero exit code. This intentionally avoids
+    the interactive ``[y/N]`` prompt that ``reset``/``migrate-schema`` use, matching
+    the MCP ``apply && !confirm`` behavior (Requirement 2.4).
+
+    Args:
+        args: Parsed argparse namespace with ``apply``, ``drop``, ``yes``, and the
+            scope flags (``project``, ``provider``, ``session``, ``since``).
+
+    Returns:
+        A process exit code: ``0`` on success, non-zero when the confirmation gate
+        refuses an ``--apply`` run.
+    """
+    import sanitize
+
+    if args.drop and not args.apply:
+        print("--drop is only valid with --apply.", file=sys.stderr)
+        return 2
+
+    if args.apply and not args.yes:
+        print(
+            "Refusing to apply: confirmation required. Re-run with --yes to "
+            "rewrite or drop the affected turns.",
+            file=sys.stderr,
+        )
+        return 1
+
+    scope = sanitize.Scope(
+        project_root=getattr(args, "project", None),
+        provider=getattr(args, "provider", None),
+        session_id=getattr(args, "session", None),
+        since=getattr(args, "since", None),
+    )
+
+    if not args.apply:
+        report = sanitize.scan(scope)
+        _print_sanitize_report(report)
+        return 0
+
+    report = sanitize.apply(scope, drop=args.drop, confirmed=True)
+    _print_sanitize_report(report)
+    print(
+        "\nWARNING: redaction is not rotation. The detected secret was already "
+        "exposed — rotate the affected key/credential at its source.",
+    )
+    return 0
+
+
+def _print_sanitize_report(report) -> None:
+    """Print a value-free summary of a sanitize ``report`` (counts only, no values).
+
+    Emits the mode, per-rule detection counts, affected/processed/incomplete-FTS
+    tallies, and the audit-file path. It deliberately reads only the report's
+    aggregate fields, never any document text or raw secret value.
+    """
+    print(f"Mode:           {report.mode}")
+    print(f"Affected turns: {report.affected_count}")
+    if report.mode != "dry-run":
+        print(f"Processed:      {report.processed_count}")
+        if report.incomplete_fts:
+            print(f"Incomplete FTS: {report.incomplete_fts} (re-run to converge)")
+    print(f"Status:         {report.status}")
+
+    counts = report.counts or {}
+    if counts:
+        print("\nDetected secrets by rule:")
+        for rule, count in sorted(counts.items(), key=lambda kv: kv[1], reverse=True):
+            print(f"  {rule}: {count}")
+    else:
+        print("\nNo secrets found in scope.")
+
+    if report.audit_path:
+        print(f"\nAudit log: {report.audit_path}")
+
+
 def build_parser():
     """Build the argparse parser for the cleanup CLI subcommands."""
     parser = argparse.ArgumentParser(
@@ -417,6 +501,38 @@ def build_parser():
         help="Drop+recreate Milvus collection to match current schema (destructive)",
     )
     p_migrate.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
+
+    # sanitize
+    p_sanitize = subparsers.add_parser(
+        "sanitize",
+        help="Retroactively scan/remove secrets already indexed (dry-run by default)",
+    )
+    sanitize_mode = p_sanitize.add_mutually_exclusive_group()
+    sanitize_mode.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report findings without writing (default)",
+    )
+    sanitize_mode.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rewrite (redact + re-embed) or drop affected turns; requires --yes",
+    )
+    p_sanitize.add_argument(
+        "--drop",
+        action="store_true",
+        help="With --apply, delete affected turns instead of redacting them",
+    )
+    p_sanitize.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Confirm an --apply run (required; no interactive prompt)",
+    )
+    p_sanitize.add_argument("--project", help="Restrict to a project root")
+    p_sanitize.add_argument("--provider", help="Restrict to a provider")
+    p_sanitize.add_argument("--session", help="Restrict to a session id")
+    p_sanitize.add_argument("--since", help="Restrict to turns at/after an ISO date")
 
     # status
     p_status = subparsers.add_parser("status", help="Show provider/backfill/embedding status")
@@ -462,6 +578,7 @@ def main():
         "reset": cmd_reset,
         "stats": cmd_stats,
         "migrate-schema": cmd_migrate_schema,
+        "sanitize": cmd_sanitize,
         "status": cmd_status,
         "backfill": cmd_backfill,
     }

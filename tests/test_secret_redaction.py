@@ -76,6 +76,12 @@ PEM_BLOCK = (
 # A high-entropy token matching NO provider format (Tier-3 entropy only).
 ENTROPY_TOKEN = "Zk9wYmFyQmF6UXV4OTk4MjM3NDYxMjkwTm9wZQ"
 
+# A 32-char high-entropy token (entropy >= 4.0, not UUID / 40hex / 64hex) used by
+# the SESF-42 snippet-leak regression. Assembled from parts so no contiguous secret
+# literal appears in this source. It is forced (keyword-adjacent within 40 chars) in
+# the full line but sits OUTSIDE the +-24 snippet window of its forcing keyword.
+ENTROPY_FORCED_TOKEN = "Xk7Qm2Wp9Lr4Bn8" + "Zt5Cv3Hd6Fj1Gs0Yo"
+
 # Allowlist shapes that MUST NOT be flagged (AC-9).
 UUID_VALUE = "550e8400-e29b-41d4-a716-446655440000"
 GIT_SHA40 = "5e150f177902427c6f79e1713b608de8f4c5964a"
@@ -602,3 +608,189 @@ def test_ac10_redaction_surface_present_before_collection_exists(add_turns_harne
     stats = rag_engine.get_stats(db_path=DB)
     assert "redaction" in stats  # never KeyErrors (AC-10 contract on every path)
     assert stats["redaction"]["enabled"] is True
+
+
+# === SESF-42 — scan_spans (span-aware, value-free audit scan) ===============
+#
+# TDD red phase for the new `secret_redaction.scan_spans` companion to `redact`.
+# Contract (design.md, Component 1 / Data Models):
+#   scan_spans(text, *, mode, allowlist=None) -> tuple[str, list[Span]]
+#   Span = NamedTuple(rule_name: str, tier: int, start: int, end: int,
+#                     masked_snippet: str)
+# Invariants vs redact():
+#   * per-OCCURRENCE spans (NO dedup-by-value) with offsets into the ORIGINAL text;
+#   * masked_snippet is value-free (the window is redact(..., enforce)-masked);
+#   * spans are identical in "report" and "enforce"; only the returned text differs;
+#   * deterministic; redact()'s own public contract stays unchanged.
+#
+# Every token here reuses the part-assembled synthetic fixtures above (AC-18).
+
+
+def _has_scan_spans():
+    """Return True once `secret_redaction.scan_spans` exists (else skip-on-stub)."""
+    return hasattr(secret_redaction, "scan_spans")
+
+
+def test_scan_spans_per_occurrence_no_value_dedup():
+    """Two occurrences of the SAME synthetic secret yield TWO spans (no dedup)."""
+    scan_spans = secret_redaction.scan_spans
+    prefix = "first key "
+    middle = " and second key "
+    text = f"{prefix}{AWS_KEY}{middle}{AWS_KEY} end"
+    _, spans = scan_spans(text, mode="report")
+    aws_spans = [s for s in spans if s.rule_name == "AWS"]
+    # Two distinct occurrences -> two spans (redact() would dedup to one Hit).
+    assert len(aws_spans) == 2
+    # Offsets index into the ORIGINAL text and recover the exact value.
+    for s in aws_spans:
+        assert s.tier == 1
+        assert text[s.start:s.end] == AWS_KEY
+    # The two spans are at the two real positions, not duplicates of one offset.
+    starts = sorted(s.start for s in aws_spans)
+    assert starts == [text.find(AWS_KEY), text.find(AWS_KEY, text.find(AWS_KEY) + 1)]
+
+
+def test_scan_spans_one_span_per_distinct_tier1_token():
+    """Each distinct Tier-1 provider token in the text yields its own span."""
+    scan_spans = secret_redaction.scan_spans
+    text = (
+        f"aws {AWS_KEY} gh {GH_KEY} gitlab {GITLAB_KEY} "
+        f"openai {OPENAI_KEY} anthropic {ANTHROPIC_KEY}"
+    )
+    _, spans = scan_spans(text, mode="report")
+    rules = sorted(s.rule_name for s in spans)
+    for expected in ("AWS", "GITHUB", "GITLAB", "OPENAI", "ANTHROPIC"):
+        assert expected in rules
+    # Each is tier 1 and its offsets recover the right token.
+    by_rule = {s.rule_name: s for s in spans}
+    assert by_rule["AWS"].tier == 1
+    assert text[by_rule["AWS"].start:by_rule["AWS"].end] == AWS_KEY
+    assert text[by_rule["GITHUB"].start:by_rule["GITHUB"].end] == GH_KEY
+
+
+def test_scan_spans_tier2_assignment_span():
+    """A Tier-2 keyword=value assignment yields an ASSIGNMENT / tier-2 span."""
+    scan_spans = secret_redaction.scan_spans
+    text = f"api_key: {ASSIGN_SECRET_VALUE}"
+    _, spans = scan_spans(text, mode="report")
+    assign = [s for s in spans if s.rule_name == "ASSIGNMENT"]
+    assert assign, "expected an ASSIGNMENT span for the Tier-2 value"
+    s = assign[0]
+    assert s.tier == 2
+    # The span covers the value (not the key); offsets recover the secret value.
+    assert text[s.start:s.end] == ASSIGN_SECRET_VALUE
+
+
+def test_scan_spans_masked_snippet_is_value_free():
+    """masked_snippet never contains the synthetic secret substring."""
+    scan_spans = secret_redaction.scan_spans
+    text = f"my credential is {AWS_KEY} ok"
+    _, spans = scan_spans(text, mode="report")
+    assert spans
+    for s in spans:
+        assert AWS_KEY not in s.masked_snippet
+
+
+def test_scan_spans_masked_snippet_masks_neighbor_secret_in_window():
+    """Two synthetic secrets within +-24 chars: BOTH masked in each snippet.
+
+    The ±_SNIPPET_PAD window around one secret may overlap a neighbor; the snippet
+    is produced via redact(window, enforce) so the neighbor is masked too.
+    """
+    scan_spans = secret_redaction.scan_spans
+    # GH_KEY immediately after AWS_KEY (separated by a single space) -> well within
+    # the ±24-char window, so each secret sits in the other's snippet window.
+    text = f"creds {AWS_KEY} {GH_KEY} done"
+    _, spans = scan_spans(text, mode="report")
+    assert spans
+    for s in spans:
+        assert AWS_KEY not in s.masked_snippet
+        assert GH_KEY not in s.masked_snippet
+
+
+def test_scan_spans_forced_entropy_snippet_value_free_when_keyword_outside_window():
+    """A forced Tier-3 entropy token must not leak RAW in its own snippet (SESF-42).
+
+    Regression: ``_collect_spans`` used to rebuild each snippet by re-running
+    ``redact(window, enforce)`` over the +-24-char window. A HIGH_ENTROPY hit is
+    only force-masked when a secret keyword is within 40 chars (``_keyword_adjacent``)
+    or inside a fence. When the forcing keyword sits >24 but <40 chars from the token,
+    the +-24 window EXCLUDES it, so ``redact(window)`` re-evaluated the token as
+    un-forced and left it RAW in the snippet -- even though the span was still
+    reported. The snippet must be value-free regardless of keyword distance.
+    """
+    scan_spans = secret_redaction.scan_spans
+    token = ENTROPY_FORCED_TOKEN
+    # keyword, then ~28 chars of filler, then the token: keyword is within 40 chars
+    # (so the token is forced/reported) but outside the token's +-24 snippet window.
+    text = "api_key " + "x" * 28 + " " + token
+    _, spans = scan_spans(text, mode="report")
+    # (1) the token is reported as a forced HIGH_ENTROPY span.
+    entropy_spans = [
+        s for s in spans
+        if s.rule_name == "HIGH_ENTROPY" and text[s.start:s.end] == token
+    ]
+    assert entropy_spans, "expected a forced HIGH_ENTROPY span for the token"
+    # (2) the raw token never appears in ANY span's snippet.
+    for s in spans:
+        assert token not in s.masked_snippet
+    # The target span's own snippet carries the typed placeholder instead.
+    assert any("[REDACTED:HIGH_ENTROPY]" in s.masked_snippet for s in entropy_spans)
+
+
+def test_scan_spans_identical_in_report_and_enforce():
+    """Spans are identical across modes; only the returned text differs."""
+    scan_spans = secret_redaction.scan_spans
+    text = f"cred {AWS_KEY} and {GH_KEY} end"
+    report_text, report_spans = scan_spans(text, mode="report")
+    enforce_text, enforce_spans = scan_spans(text, mode="enforce")
+    # Same audit metadata in both modes.
+    assert report_spans == enforce_spans
+    # report leaves text unchanged; enforce masks it.
+    assert report_text == text
+    assert AWS_KEY not in enforce_text
+    assert GH_KEY not in enforce_text
+    assert "[REDACTED:AWS]" in enforce_text
+
+
+def test_scan_spans_determinism():
+    """Identical input -> identical spans and identical returned text."""
+    scan_spans = secret_redaction.scan_spans
+    text = f"key {AWS_KEY} then {OPENAI_KEY} done"
+    first = scan_spans(text, mode="enforce")
+    second = scan_spans(text, mode="enforce")
+    assert first == second
+
+
+def test_scan_spans_span_namedtuple_shape():
+    """Span carries exactly rule_name, tier, start, end, masked_snippet."""
+    scan_spans = secret_redaction.scan_spans
+    _, spans = scan_spans(f"key {AWS_KEY} done", mode="report")
+    assert spans
+    assert tuple(type(spans[0])._fields) == (
+        "rule_name", "tier", "start", "end", "masked_snippet",
+    )
+
+
+def test_scan_spans_allowlist_excludes_value():
+    """An operator-allowlisted value yields no span (parity with redact)."""
+    import re
+
+    scan_spans = secret_redaction.scan_spans
+    text = f"internal {AWS_KEY} ok"
+    _, spans = scan_spans(
+        text, mode="report", allowlist=[re.compile(re.escape(AWS_KEY))]
+    )
+    assert not any(s.rule_name == "AWS" for s in spans)
+    # Positive control: without the allowlist the AWS span IS present.
+    _, spans2 = scan_spans(text, mode="report")
+    assert any(s.rule_name == "AWS" for s in spans2)
+
+
+def test_redact_public_contract_unchanged():
+    """redact() still returns (str, list[Hit]) with rule_name/tier only."""
+    out, hits = redact(f"key {AWS_KEY} done", mode="report")
+    assert isinstance(out, str)
+    assert isinstance(hits, list)
+    assert hits
+    assert tuple(type(hits[0])._fields) == ("rule_name", "tier")

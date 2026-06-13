@@ -31,7 +31,7 @@ from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
 from pymilvus.exceptions import MilvusException
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
-from typing import Iterator, List, Dict, Optional
+from typing import Iterator, List, Dict, NamedTuple, Optional
 import asyncio
 import logging
 import sys
@@ -1954,6 +1954,131 @@ def delete_by_session(session_id: str, db_path: Optional[str] = None) -> int:
         logger.warning("FTS delete by session failed (non-fatal): %s", e)
 
     return len(results)
+
+
+class UpsertResult(NamedTuple):
+    """Outcome of an in-place document overwrite across both stores (SESF-42).
+
+    Attributes:
+        milvus_ok: True when the Milvus upsert (atomic by primary key) succeeded.
+        fts_ok: True when the FTS delete-then-insert of the redacted content
+            succeeded. Reported distinctly from ``milvus_ok``: a Milvus-clean but
+            FTS-failed row still satisfies a keyword search for the old secret, so
+            the caller must treat ``fts_ok is False`` as unfinished/retryable and
+            NOT mark the row done. FTS background healing only hydrates *missing*
+            doc_ids, so a stale row left in place is never auto-redacted.
+    """
+
+    milvus_ok: bool
+    fts_ok: bool
+
+
+def upsert_document(doc_id: str, *, new_document: str, new_vector: list,
+                    db_path: Optional[str] = None) -> UpsertResult:
+    """Overwrite a single turn's document + vector in place, then rewrite FTS.
+
+    Reads the existing Milvus row for ``doc_id`` (preserving every metadata
+    field), swaps in the new ``document`` (UTF-8 truncated to the VARCHAR cap)
+    and ``vector``, and upserts it by primary key (atomic — the row is either
+    fully old or fully new). Then rewrites the FTS sidecar as a delete-then-insert
+    of the new content (``FTSIndex.insert`` skips existing doc_ids, so the prior
+    row must be deleted first).
+
+    Unlike ``delete_by_session``, an FTS failure here is surfaced rather than
+    swallowed: a failed rewrite leaves the old secret-bearing row searchable, and
+    the FTS heal path only hydrates *missing* doc_ids, so it would never be
+    re-redacted by background healing.
+
+    Args:
+        doc_id: Stable document id of the turn to overwrite.
+        new_document: Replacement document text (the redacted content).
+        new_vector: Replacement embedding vector for ``new_document``.
+        db_path: Optional Milvus DB path; also derives the FTS sidecar path.
+
+    Returns:
+        UpsertResult: ``milvus_ok`` and ``fts_ok`` reported independently. The
+        row is fully sanitized only when both are True.
+    """
+    milvus_ok = False
+    try:
+        with milvus_client(db_path) as client:
+            if not client.has_collection(COLLECTION_NAME):
+                return UpsertResult(False, False)
+            escaped_doc = _escape_filter_scalar(doc_id)
+            rows = client.query(
+                collection_name=COLLECTION_NAME,
+                filter=f'doc_id == "{escaped_doc}"',
+                output_fields=["*"],
+            )
+            if not rows:
+                return UpsertResult(False, False)
+            row = dict(rows[0])
+            row["document"] = _truncate_utf8(new_document, 65535)
+            row["vector"] = new_vector
+            client.upsert(collection_name=COLLECTION_NAME, data=[row])
+        milvus_ok = True
+    except Exception as e:
+        logger.warning("Milvus upsert failed for doc_id: %s", _scrub_exception(e))
+        return UpsertResult(False, False)
+
+    # FTS rewrite: delete-then-insert (insert dedups by doc_id, so the stale
+    # row must go first). FTS failure is surfaced, never swallowed.
+    fts_ok = False
+    if db_path:
+        try:
+            conn = _fts.connection(db_path)
+            _fts.delete(conn, "doc_id", doc_id)
+            _fts.insert(conn, [{"doc_id": doc_id, "content": new_document}])
+            _fts.close_ephemeral(conn)
+            fts_ok = True
+        except Exception as e:
+            logger.warning("FTS rewrite failed for doc_id: %s", _scrub_exception(e))
+            fts_ok = False
+    else:
+        fts_ok = True
+
+    return UpsertResult(milvus_ok, fts_ok)
+
+
+def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> int:
+    """Delete a single turn from both Milvus (by PK) and FTS (by doc_id).
+
+    Mirrors ``delete_by_session``'s symmetric dual-write: the Milvus delete keys
+    on the stable primary key derived from ``doc_id`` (the same
+    ``int(sha256(doc_id)[:15], 16)`` derivation used at insert time), and the FTS
+    delete is non-fatal.
+
+    Args:
+        doc_id: Stable document id of the turn to delete.
+        db_path: Optional Milvus DB path; also derives the FTS sidecar path.
+
+    Returns:
+        int: number of Milvus rows deleted (0 or 1).
+    """
+    pk = int(hashlib.sha256(doc_id.encode()).hexdigest()[:15], 16)
+    deleted = 0
+    with milvus_client(db_path) as client:
+        if not client.has_collection(COLLECTION_NAME):
+            return 0
+        results = client.query(
+            collection_name=COLLECTION_NAME,
+            filter=f"id == {pk}",
+            output_fields=["id"],
+        )
+        if results:
+            client.delete(collection_name=COLLECTION_NAME, filter=f"id == {pk}")
+            deleted = len(results)
+
+    # Also delete from FTS (non-fatal — mirrors delete_by_session).
+    try:
+        if db_path:
+            conn = _fts.connection(db_path)
+            _fts.delete(conn, "doc_id", doc_id)
+            _fts.close_ephemeral(conn)
+    except Exception as e:
+        logger.warning("FTS delete by doc_id failed (non-fatal): %s", _scrub_exception(e))
+
+    return deleted
 
 
 def delete_by_branch(git_branch: str, db_path: Optional[str] = None) -> int:
