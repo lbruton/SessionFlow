@@ -787,6 +787,35 @@ def test_scan_spans_allowlist_excludes_value():
     assert any(s.rule_name == "AWS" for s in spans2)
 
 
+def test_scan_spans_and_redact_agree_on_masked_values():
+    """redact() and scan_spans() agree on every value redact() actually masks.
+
+    Both paths route through `_aggregate_maskable_candidates`, so each value
+    redact() removes from enforce-mode output must be reported by scan_spans() at
+    the same rule/tier — no behavioral drift between the SESF-41 live guard and
+    the SESF-42 retroactive scanner. (redact()'s Hit list additionally carries
+    non-forced advisory entropy hits, which scan_spans rightly omits; this test
+    compares against the maskable set, the values enforce truly replaces.)
+    """
+    text = (
+        f"aws {AWS_KEY} gh {GH_KEY} api_key: {ASSIGN_SECRET_VALUE} "
+        f"issue {ISSUE_ID}"
+    )
+    redacted, _ = redact(text, mode="enforce")
+    _, spans = secret_redaction.scan_spans(text, mode="report")
+    # The (value, rule, tier) the masker would replace == what spans report.
+    maskable = {
+        (text[s.start:s.end], s.rule_name, s.tier) for s in spans
+    }
+    assert maskable == set(secret_redaction._maskable_values(text, []))
+    # Every maskable value is actually gone from redact()'s enforce output.
+    for value, _rule, _tier in maskable:
+        assert value not in redacted
+    # The structurally-exempt issue ID survives and is never reported.
+    assert ISSUE_ID in redacted
+    assert ISSUE_ID not in {v for v, _r, _t in maskable}
+
+
 def test_redact_public_contract_unchanged():
     """redact() still returns (str, list[Hit]) with rule_name/tier only."""
     out, hits = redact(f"key {AWS_KEY} done", mode="report")

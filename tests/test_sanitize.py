@@ -1,4 +1,4 @@
-"""TDD red-phase tests for the SESF-42 retroactive secret sanitizer.
+"""Tests for the SESF-42 retroactive secret sanitizer.
 
 Two cohorts live here:
 
@@ -6,13 +6,17 @@ Two cohorts live here:
   and the ``SanitizeReport`` it returns. The orchestrator drives the dry-run/apply
   flow, throttling, checkpointing, and the secret-free audit trail (design.md
   Component 3). It owns policy only — detection routes through
-  ``secret_redaction.scan_spans`` and data access through the two new
-  ``rag_engine`` primitives.
+  ``secret_redaction.scan_spans`` and data access through the
+  ``rag_engine`` primitives (``upsert_document`` / ``delete_by_doc_id`` /
+  ``get_row_by_doc_id``). The worklist holds only doc_ids + value-free audit
+  metadata; affected rows are fetched just-in-time at apply time so memory stays
+  bounded on large indices, and a resumed run loads the worklist + run_id from
+  the checkpoint without a re-scan.
 * **Primitives** — ``rag_engine.upsert_document`` / ``rag_engine.delete_by_doc_id``
   (design.md Component 2): the in-place Milvus overwrite + FTS rewrite, and the
   doc-id-scoped dual delete.
 
-None of the target code exists yet; every test here is RED until SESF-42 lands.
+The implementation is present; this suite is the green contract that guards it.
 
 Every token in this file is **synthetic and non-functional** (AC-18 / Requirement
 5.3) — assembled from string parts so no contiguous secret literal appears, and no
@@ -100,6 +104,7 @@ def stubbed_engine(monkeypatch):
         "budget_calls": [],    # ("before"|"after", ...) budget interactions
         "upsert_result": None,  # override the UpsertResult the stub returns
         "delete_result": None,  # override the DeleteResult the stub returns
+        "before_decisions": None,  # optional list of _Decision to serve in order
     }
 
     def fake_query_batches(output_fields, *args, **kwargs):
@@ -107,6 +112,19 @@ def stubbed_engine(monkeypatch):
             yield list(cap["rows"])
 
     monkeypatch.setattr(rag_engine, "_query_batches", fake_query_batches, raising=False)
+
+    def fake_get_row_by_doc_id(doc_id, db_path=None):
+        # JIT fetch (SESF-42 Fix A): apply pulls each affected row's full payload
+        # by doc_id at write time instead of from an all-rows cache. Serve from
+        # the same synthetic rows the scan iterator yields.
+        for row in cap["rows"]:
+            if row.get("doc_id") == doc_id:
+                return dict(row)
+        return None
+
+    monkeypatch.setattr(
+        rag_engine, "get_row_by_doc_id", fake_get_row_by_doc_id, raising=False
+    )
 
     def fake_embed_texts(texts, is_query=False):
         cap["embed_inputs"].append(list(texts))
@@ -153,6 +171,11 @@ def stubbed_engine(monkeypatch):
 
         def before_batch(self, *a, **k):
             cap["budget_calls"].append(("before", a, k))
+            # When a test seeds a deny decision queue, serve those in order; the
+            # last one is reused once the queue drains.
+            queue = cap["before_decisions"]
+            if queue:
+                return queue.pop(0) if len(queue) > 1 else queue[0]
             return _Decision()
 
         def after_batch(self, *a, **k):
@@ -319,43 +342,30 @@ def test_apply_without_confirmation_makes_no_calls(sanitize_env, stubbed_engine)
 # === FTS-failure incompletion ===============================================
 
 
-def test_apply_fts_failure_leaves_row_incomplete(sanitize_env, stubbed_engine):
-    """fts_ok=False -> doc not 'done', incomplete_fts increments, status='incomplete'."""
+@pytest.mark.parametrize("drop", [False, True], ids=["redact", "drop"])
+def test_apply_fts_failure_leaves_row_incomplete(sanitize_env, stubbed_engine, drop):
+    """fts_ok=False (either path) -> doc not 'done', incomplete_fts, status='incomplete'.
+
+    Parameterized over redact (FTS rewrite fails) and drop (FTS delete fails): in
+    both, the Milvus side succeeded but the FTS row may still carry the secret, so
+    the doc_id must stay on the worklist, off the ``done`` set.
+    """
     sanitize = _require("sanitize")
     rag_engine, cap = stubbed_engine
     cap["rows"] = [_milvus_row("d1", f"cred {AWS_KEY} end")]
-    # Milvus succeeded, but the FTS rewrite failed.
-    cap["upsert_result"] = rag_engine.UpsertResult(milvus_ok=True, fts_ok=False)
+    if drop:
+        cap["delete_result"] = rag_engine.DeleteResult(deleted=1, fts_ok=False)
+    else:
+        cap["upsert_result"] = rag_engine.UpsertResult(milvus_ok=True, fts_ok=False)
 
     report = sanitize.apply(
-        sanitize.Scope(project_root=PROJECT), drop=False, confirmed=True
+        sanitize.Scope(project_root=PROJECT), drop=drop, confirmed=True
     )
 
     assert report.incomplete_fts >= 1
     assert report.status == "incomplete"  # NOT complete while FTS-failed rows remain
 
     # The doc_id stays in the checkpoint worklist, off the `done` set.
-    state_path = Path(sanitize_env) / ".sessionflow" / "sanitize_state.json"
-    state = json.loads(state_path.read_text())
-    assert "d1" not in state.get("done", [])
-    assert "d1" in state.get("worklist", [])
-
-
-def test_apply_drop_fts_failure_leaves_row_incomplete(sanitize_env, stubbed_engine):
-    """drop path: an FTS-delete failure must NOT mark the doc done (mirrors redact)."""
-    sanitize = _require("sanitize")
-    rag_engine, cap = stubbed_engine
-    cap["rows"] = [_milvus_row("d1", f"cred {AWS_KEY} end")]
-    # Milvus delete ran, but the FTS row may still carry the secret.
-    cap["delete_result"] = rag_engine.DeleteResult(deleted=1, fts_ok=False)
-
-    report = sanitize.apply(
-        sanitize.Scope(project_root=PROJECT), drop=True, confirmed=True
-    )
-
-    assert report.incomplete_fts >= 1
-    assert report.status == "incomplete"
-
     state_path = Path(sanitize_env) / ".sessionflow" / "sanitize_state.json"
     state = json.loads(state_path.read_text())
     assert "d1" not in state.get("done", [])
@@ -467,6 +477,199 @@ def test_apply_reembed_invokes_embedding_budget(sanitize_env, stubbed_engine):
     kinds = [c[0] for c in cap["budget_calls"]]
     assert "before" in kinds, "re-embed must request budget via before_batch"
     assert "after" in kinds, "re-embed must report completion via after_batch"
+
+
+def test_apply_budget_hard_deny_aborts_without_embed(sanitize_env, stubbed_engine):
+    """A budget hard-deny (allowed=False, no retry) -> no embed, status='paused'.
+
+    Mirrors rag_engine.add_turns: when the budget denies with no retry delay (a
+    pause/cap), the run must NOT bypass the gate and embed — it aborts cleanly,
+    checkpoints the un-processed turn, and reports status='paused'.
+    """
+    sanitize = _require("sanitize")
+    rag_engine, cap = stubbed_engine
+    cap["rows"] = [_milvus_row("d1", f"cred {AWS_KEY} end")]
+
+    class _HardDeny:
+        allowed = False
+        retry_after_seconds = 0.0
+        reason = "paused"
+
+    cap["before_decisions"] = [_HardDeny()]
+
+    report = sanitize.apply(
+        sanitize.Scope(project_root=PROJECT), drop=False, confirmed=True
+    )
+
+    # The gate was respected: no embed, no upsert for the denied turn.
+    assert cap["embed_inputs"] == [], "hard-deny must not embed past the gate"
+    assert cap["upserts"] == []
+    assert report.status == "paused"
+    # The un-processed turn stays on the worklist for the next run.
+    state_path = Path(sanitize_env) / ".sessionflow" / "sanitize_state.json"
+    state = json.loads(state_path.read_text())
+    assert "d1" in state.get("worklist", [])
+    assert "d1" not in state.get("done", [])
+
+
+def test_apply_budget_soft_deny_then_retry_embeds(sanitize_env, stubbed_engine):
+    """A soft-deny (retry_after>0) sleeps then retries; the second decision allows."""
+    sanitize = _require("sanitize")
+    rag_engine, cap = stubbed_engine
+    cap["rows"] = [_milvus_row("d1", f"cred {AWS_KEY} end")]
+
+    class _SoftDeny:
+        allowed = False
+        retry_after_seconds = 0.001
+        reason = "cooldown"
+
+    class _Allow:
+        allowed = True
+        retry_after_seconds = 0.0
+        reason = ""
+
+    cap["before_decisions"] = [_SoftDeny(), _Allow()]
+
+    report = sanitize.apply(
+        sanitize.Scope(project_root=PROJECT), drop=False, confirmed=True
+    )
+
+    # After the cooldown the embed runs and the turn completes.
+    assert cap["embed_inputs"], "soft-deny must retry and then embed"
+    assert report.status == "complete"
+
+
+# === Worklist is bounded (doc_ids only, JIT fetch) ==========================
+
+
+def test_build_worklist_holds_doc_ids_not_full_rows(sanitize_env, stubbed_engine):
+    """_build_worklist returns doc_ids + value-free metadata, never document text.
+
+    Guards SESF-42 Fix A: the worklist must not cache every scanned row's payload
+    (which OOMs on large indices). The per-turn metadata it does keep must never
+    carry the ``document`` field.
+    """
+    sanitize = _require("sanitize")
+    rag_engine, cap = stubbed_engine
+    cap["rows"] = [
+        _milvus_row("d1", f"cred {AWS_KEY} end"),
+        _milvus_row("d2", "totally benign text"),
+    ]
+
+    worklist, meta_by_id, _counts = sanitize._build_worklist(
+        sanitize.Scope(project_root=PROJECT), [], None
+    )
+
+    # Only the secret-bearing turn is listed; the benign one is dropped.
+    assert worklist == ["d1"]
+    # Metadata is value-free: no document text is cached for any doc_id.
+    for meta in meta_by_id.values():
+        assert "document" not in meta
+    assert set(meta_by_id) == {"d1"}
+
+
+def test_apply_jit_fetches_document_via_get_row_by_doc_id(
+    sanitize_env, stubbed_engine
+):
+    """apply() reads each affected row's document just-in-time, not from a cache."""
+    sanitize = _require("sanitize")
+    rag_engine, cap = stubbed_engine
+    cap["rows"] = [_milvus_row("d1", f"cred {AWS_KEY} end")]
+
+    seen = []
+    real = rag_engine.get_row_by_doc_id
+
+    def spy(doc_id, db_path=None):
+        seen.append(doc_id)
+        return real(doc_id, db_path=db_path)
+
+    import unittest.mock as _mock
+
+    with _mock.patch.object(rag_engine, "get_row_by_doc_id", spy):
+        sanitize.apply(
+            sanitize.Scope(project_root=PROJECT), drop=False, confirmed=True
+        )
+
+    assert seen == ["d1"], "apply must JIT-fetch the row by doc_id"
+
+
+def test_apply_resume_loads_worklist_and_run_id_without_rescan(
+    sanitize_env, stubbed_engine, monkeypatch
+):
+    """resume=True loads worklist + run_id from the checkpoint, skipping _build_worklist.
+
+    Guards SESF-42 Fix B/D: a resumed run must not re-scan (worklist comes from the
+    checkpoint) and must reuse the prior run_id so the audit appends to the same
+    redaction-<runid>.jsonl rather than starting a fresh trail.
+    """
+    sanitize = _require("sanitize")
+    rag_engine, cap = stubbed_engine
+    cap["rows"] = [_milvus_row("d2", f"token {GH_KEY} end")]
+
+    # Fail loudly if apply re-scans instead of trusting the checkpoint worklist.
+    def _no_rescan(*a, **k):
+        raise AssertionError("resume must not call _build_worklist")
+
+    monkeypatch.setattr(sanitize, "_build_worklist", _no_rescan)
+
+    state_dir = Path(sanitize_env) / ".sessionflow"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "sanitize_state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "priorrun01",
+                "mode": "redact",
+                "scope": {"project_root": PROJECT},
+                "worklist": ["d2"],
+                "done": [],
+                "counts": {"GITHUB": 1},
+                "status": "applying",
+            }
+        )
+    )
+
+    report = sanitize.apply(
+        sanitize.Scope(project_root=PROJECT),
+        drop=False,
+        confirmed=True,
+        resume=True,
+    )
+
+    # The worklist came from the checkpoint (no re-scan), d2 was processed.
+    assert [u[0] for u in cap["upserts"]] == ["d2"]
+    # Same run_id reused -> audit appends to redaction-priorrun01.jsonl.
+    assert report.audit_path.endswith("redaction-priorrun01.jsonl")
+
+
+def test_audit_writer_appends_on_resume(sanitize_env):
+    """A second _AuditWriter for the same run_id appends, not truncates (Fix D)."""
+    sanitize = _require("sanitize")
+
+    class _Span:
+        rule_name = "AWS"
+        tier = 2
+        start = 0
+        end = 4
+        masked_snippet = "AK..."
+
+    row = {"doc_id": "d1", "provider": PROVIDER}
+
+    w1 = sanitize._AuditWriter("sharedrun")
+    w1.write(row=row, spans=[_Span()], action="redact")
+    w1.close()
+
+    # A resumed run reuses the same run_id; the prior line must survive.
+    w2 = sanitize._AuditWriter("sharedrun")
+    w2.write(row=row, spans=[_Span()], action="redact")
+    w2.close()
+
+    text = Path(w2.path).read_text()
+    assert len(text.splitlines()) == 2, "append mode must preserve the prior line"
+    # File is owner-only (0600) from creation.
+    import stat
+
+    mode = stat.S_IMODE(Path(w2.path).stat().st_mode)
+    assert mode == 0o600
 
 
 # === No-leak (cross-cutting) ================================================

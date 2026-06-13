@@ -241,15 +241,18 @@ class _AuditWriter:
     """
 
     def __init__(self, run_id: str):
-        """Open (truncate) the audit file for ``run_id`` with 0600 permissions."""
+        """Open the audit file for ``run_id`` in append mode, 0600 at creation.
+
+        Opened with ``O_CREAT | O_APPEND`` at mode 0600 so (1) a resumed run that
+        reuses the same ``run_id`` appends to its existing trail rather than
+        truncating it, and (2) the file is owner-only from the instant it is
+        created — closing the perms-after-create race a separate ``chmod`` left
+        open.
+        """
         self.run_id = run_id
         self.path = _audit_path(run_id)
-        # Truncate any prior file for this run id, then lock down permissions.
-        self._handle = open(self.path, "w", encoding="utf-8")
-        try:
-            os.chmod(self.path, _FILE_MODE)
-        except OSError:
-            pass
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _FILE_MODE)
+        self._handle = os.fdopen(fd, "a", encoding="utf-8")
 
     def write(self, *, row: dict, spans: list, action: str) -> None:
         """Append one audit line per span for ``row`` under ``action``."""
@@ -353,26 +356,36 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _throttled_embed(redacted: str) -> list:
+def _throttled_embed(redacted: str) -> Optional[list]:
     """Embed ``redacted`` through the shared budget, honoring the cooldown floor.
 
     Routes the single-text re-embed through the process-wide embedding budget's
     ``split_batches`` / ``before_batch`` / ``after_batch`` so the MLX cooldown floor
-    is never undercut. Returns the embedding vector for ``redacted``.
+    is never undercut. Mirrors :func:`rag_engine.add_turns`' deny handling:
+
+    * Denied **with** a ``retry_after_seconds`` delay → sleep that delay and retry
+      once (the budget is asking us to wait out a cooldown).
+    * Denied **without** a delay → a hard pause/cap. Do **not** embed; return
+      ``None`` so the caller aborts the run cleanly (checkpoint + ``paused``).
+
+    Returns:
+        The embedding vector for ``redacted``, or ``None`` when the budget
+        hard-denied the batch (the gate must not be bypassed).
     """
     budget = rag_engine.get_embedding_budget()
     batches = budget.split_batches([redacted])
     vector: Optional[list] = None
     for batch in batches:
-        # Wait out any cooldown the budget asks for; never busy-spin below the floor.
-        while True:
-            decision = budget.before_batch(len(batch), 0)
-            if getattr(decision, "allowed", True):
-                break
+        decision = budget.before_batch(len(batch), 0)
+        if not getattr(decision, "allowed", True):
             delay = getattr(decision, "retry_after_seconds", 0.0) or 0.0
-            if delay <= 0:
-                break
-            time.sleep(delay)
+            if delay > 0:
+                # Soft deny: wait out the cooldown, then retry once.
+                time.sleep(delay)
+                decision = budget.before_batch(len(batch), 0)
+            if not getattr(decision, "allowed", True):
+                # Hard deny (pause/cap, no delay) — never embed past the gate.
+                return None
         started = time.monotonic()
         error: Optional[BaseException] = None
         try:
@@ -387,37 +400,58 @@ def _throttled_embed(redacted: str) -> list:
     return vector if vector is not None else []
 
 
+def _audit_meta(row: dict) -> dict:
+    """Extract only the value-free audit metadata from a scan row.
+
+    Never carries ``document`` — the one field that may hold a secret. The
+    document is fetched just-in-time at apply time via
+    :func:`rag_engine.get_row_by_doc_id`, so the worklist's per-turn metadata
+    stays bounded regardless of collection size.
+    """
+    return {
+        "provider": row.get("provider"),
+        "source_path": row.get("source_path"),
+        "turn_index": row.get("turn_index"),
+        "timestamp": row.get("timestamp"),
+    }
+
+
 def _build_worklist(
     scope: Scope,
     allowlist: list,
     db_path: Optional[str],
 ) -> tuple[list[str], dict[str, dict], dict]:
-    """Scan ``scope`` to build the affected worklist, row cache, and counts.
+    """Scan ``scope`` to build the affected worklist + audit metadata + counts.
+
+    Streams the scope one row at a time and keeps **only** the doc_ids of
+    secret-bearing turns plus their tiny value-free audit metadata
+    (provider/source_path/turn_index/timestamp). The document text is never
+    cached — :func:`apply` fetches each affected row's ``document``
+    just-in-time by doc_id, so memory stays bounded on large indices.
 
     Returns:
-        ``(worklist, rows_by_id, counts)`` where ``worklist`` is the ordered list of
-        affected ``doc_id``s, ``rows_by_id`` caches each affected row so apply needs
-        no extra Milvus round-trip, and ``counts`` is the per-rule histogram.
+        ``(worklist, meta_by_id, counts)`` where ``worklist`` is the ordered
+        list of affected ``doc_id``s, ``meta_by_id`` maps each affected doc_id
+        to its value-free audit metadata, and ``counts`` is the per-rule
+        histogram.
     """
     worklist: list[str] = []
-    rows_by_id: dict[str, dict] = {}
+    seen: set[str] = set()
+    meta_by_id: dict[str, dict] = {}
     counts: dict = {}
     for row in _iter_rows(scope, db_path):
         doc_id = row.get("doc_id")
-        # Cache every scanned row's payload so a resumed worklist entry whose
-        # Milvus document is already redacted (no spans) is still recoverable for
-        # an FTS-only converge — the worklist/counts only track secret-bearing turns.
-        if doc_id not in rows_by_id:
-            rows_by_id[doc_id] = row
         _scanned, spans = secret_redaction.scan_spans(
             row.get("document", ""), mode="report", allowlist=allowlist
         )
         if not spans:
             continue
-        if doc_id not in worklist:
+        if doc_id not in seen:
+            seen.add(doc_id)
             worklist.append(doc_id)
+            meta_by_id[doc_id] = _audit_meta(row)
             _accumulate_counts(counts, spans)
-    return worklist, rows_by_id, counts
+    return worklist, meta_by_id, counts
 
 
 def apply(
@@ -471,21 +505,20 @@ def apply(
     db_path = _db_path()
 
     checkpoint = _load_checkpoint() if resume else None
-    if checkpoint is not None:
+    meta_by_id: dict[str, dict] = {}
+    if checkpoint is not None and checkpoint.get("worklist") is not None:
+        # Resume from the durable checkpoint without a re-scan (Fix B): the
+        # worklist + done-set load straight from disk, and each affected row's
+        # document is fetched just-in-time by doc_id at apply time (Fix A). The
+        # run_id is reused so the audit appends to the same redaction-<runid>.jsonl.
         run_id = checkpoint.get("run_id") or _new_run_id()
         done: set[str] = set(checkpoint.get("done", []))
         counts: dict = dict(checkpoint.get("counts", {}))
-        # Re-scan to recover the row payloads (the checkpoint stores ids, not rows).
-        _scan_worklist, rows_by_id, scan_counts = _build_worklist(
-            scope, allowlist, db_path
-        )
-        worklist: list[str] = list(checkpoint.get("worklist", _scan_worklist))
-        if not counts:
-            counts = scan_counts
+        worklist: list[str] = list(checkpoint.get("worklist", []))
     else:
         run_id = _new_run_id()
         done = set()
-        worklist, rows_by_id, counts = _build_worklist(scope, allowlist, db_path)
+        worklist, meta_by_id, counts = _build_worklist(scope, allowlist, db_path)
 
     audit = _AuditWriter(run_id)
     processed = 0
@@ -514,15 +547,28 @@ def apply(
                 paused = True
                 break
 
-            row = rows_by_id.get(doc_id)
+            # Just-in-time fetch (Fix A): the document text is never cached
+            # across the whole worklist, so memory stays bounded on large indices.
+            row = rag_engine.get_row_by_doc_id(doc_id, db_path=db_path)
             if row is None:
-                # Affected id with no recoverable row payload — leave for a re-run.
+                # Affected id no longer present (already deleted/moved) — leave it
+                # off the done set so a re-run can reconcile.
                 continue
 
+            meta = meta_by_id.get(doc_id)
             if drop:
-                fts_ok = _apply_drop(doc_id, row, allowlist, audit, db_path)
+                fts_ok: Optional[bool] = _apply_drop(
+                    doc_id, row, meta, allowlist, audit, db_path
+                )
             else:
-                fts_ok = _apply_redact(doc_id, row, allowlist, audit, db_path)
+                fts_ok = _apply_redact(
+                    doc_id, row, meta, allowlist, audit, db_path
+                )
+            if fts_ok is None:
+                # Budget hard-denied the re-embed (pause/cap) — abort cleanly,
+                # leaving this turn on the worklist for the next run (Fix C).
+                paused = True
+                break
             if fts_ok:
                 done.add(doc_id)
                 processed += 1
@@ -553,13 +599,29 @@ def apply(
     )
 
 
+def _audit_row(doc_id: str, row: dict, meta: Optional[dict]) -> dict:
+    """Build the value-free audit metadata dict for one turn.
+
+    Prefers the just-in-time-fetched ``row`` (which carries the live metadata),
+    falling back to the worklist ``meta`` captured at scan time. Never includes
+    ``document``.
+    """
+    base = dict(meta) if meta else {}
+    base["doc_id"] = doc_id
+    for key in ("provider", "source_path", "turn_index", "timestamp"):
+        if row.get(key) is not None:
+            base[key] = row.get(key)
+    return base
+
+
 def _apply_redact(
     doc_id: str,
     row: dict,
+    meta: Optional[dict],
     allowlist: list,
     audit: "_AuditWriter",
     db_path: Optional[str],
-) -> bool:
+) -> Optional[bool]:
     """Redact + re-embed + upsert one turn; return whether the FTS rewrite succeeded.
 
     On a resumed row already clean in Milvus (``scan_spans`` yields no spans) the
@@ -568,7 +630,9 @@ def _apply_redact(
 
     Returns:
         ``True`` when the row is fully sanitized (Milvus + FTS both ok), ``False``
-        when Milvus is clean but the FTS rewrite still needs a retry.
+        when Milvus is clean but the FTS rewrite still needs a retry, or ``None``
+        when the embedding budget hard-denied the re-embed (a pause/cap) and the
+        run must abort without writing this turn.
     """
     document = row.get("document", "")
     redacted, spans = secret_redaction.scan_spans(
@@ -584,8 +648,12 @@ def _apply_redact(
         )
         return bool(result.milvus_ok and result.fts_ok)
 
-    audit.write(row=row, spans=spans, action="redact")
     vector = _throttled_embed(redacted)
+    if vector is None:
+        # Budget hard-denied the re-embed (pause/cap, no retry delay). Do not
+        # write this turn — signal the caller to abort and checkpoint.
+        return None
+    audit.write(row=_audit_row(doc_id, row, meta), spans=spans, action="redact")
     result = rag_engine.upsert_document(
         doc_id, new_document=redacted, new_vector=vector, db_path=db_path
     )
@@ -595,6 +663,7 @@ def _apply_redact(
 def _apply_drop(
     doc_id: str,
     row: dict,
+    meta: Optional[dict],
     allowlist: list,
     audit: "_AuditWriter",
     db_path: Optional[str],
@@ -609,6 +678,6 @@ def _apply_drop(
     _scanned, spans = secret_redaction.scan_spans(
         row.get("document", ""), mode="report", allowlist=allowlist
     )
-    audit.write(row=row, spans=spans, action="drop")
+    audit.write(row=_audit_row(doc_id, row, meta), spans=spans, action="drop")
     result = rag_engine.delete_by_doc_id(doc_id, db_path=db_path)
     return bool(result.fts_ok)

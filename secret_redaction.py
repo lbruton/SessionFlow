@@ -330,6 +330,45 @@ def _collect_candidates(text: str) -> list[tuple[str, str, int, bool]]:
     return candidates
 
 
+def _aggregate_maskable_candidates(
+    text: str,
+    allowlist: list[Pattern[str]],
+) -> dict[str, dict]:
+    """Aggregate detection candidates into one entry per distinct maskable value.
+
+    Runs :func:`_collect_candidates`, applies the operator allowlist to every tier
+    and the structural-shape exemption to Tier-3 only, then dedups by value: when
+    one value is matched by several tiers (e.g. a structured token the entropy
+    scanner also flags) the lowest tier wins and ``force`` is OR-ed across the
+    occurrences. This is the single source of truth shared by :func:`redact` (live
+    redaction, SESF-41) and :func:`_maskable_values` (retroactive span scanning,
+    SESF-42), so the two paths can never drift in which values they mask.
+
+    Args:
+        text: The text to scan.
+        allowlist: Operator-supplied compiled regex patterns whose matches are
+            exempt from detection on all tiers (AC-9).
+
+    Returns:
+        A mapping of ``value`` to an entry dict ``{"tier": int, "rule": str,
+        "force": bool}``. Allowlisted and structurally-exempt values are absent.
+    """
+    agg: dict[str, dict] = {}
+    for value, rule_name, tier, force in _collect_candidates(text):
+        if _is_operator_allowlisted(value, allowlist):
+            continue
+        if tier == 3 and _is_structurally_allowlisted(value):
+            continue
+        entry = agg.get(value)
+        if entry is None:
+            agg[value] = {"tier": tier, "rule": rule_name, "force": force}
+        else:
+            if tier < entry["tier"]:
+                entry["tier"], entry["rule"] = tier, rule_name
+            entry["force"] = entry["force"] or force
+    return agg
+
+
 def redact(
     text: str,
     *,
@@ -358,25 +397,12 @@ def redact(
     """
     allowlist = allowlist or []
 
-    # De-duplicate by value so one secret yields one classification. When the same
-    # value is matched by several tiers (e.g. a structured token the entropy scanner
-    # also flags), the lowest tier wins and ``force`` is OR-ed across occurrences.
-    # Allowlist (AC-9): operator patterns apply to ALL tiers; the structural shape
-    # exemption (UUID/hex/issue) applies to Tier-3 entropy ONLY, so a high-confidence
-    # Tier-1/Tier-2 hit on an all-hex secret is still redacted.
-    agg: dict[str, dict] = {}
-    for value, rule_name, tier, force in _collect_candidates(text):
-        if _is_operator_allowlisted(value, allowlist):
-            continue
-        if tier == 3 and _is_structurally_allowlisted(value):
-            continue
-        entry = agg.get(value)
-        if entry is None:
-            agg[value] = {"tier": tier, "rule": rule_name, "force": force}
-        else:
-            if tier < entry["tier"]:
-                entry["tier"], entry["rule"] = tier, rule_name
-            entry["force"] = entry["force"] or force
+    # De-duplicate by value so one secret yields one classification (lowest tier
+    # wins, ``force`` OR-ed), with the operator allowlist on every tier and the
+    # structural-shape exemption on Tier-3 only. Shared verbatim with
+    # :func:`_maskable_values` via the common aggregator so the two paths cannot
+    # drift in which values they mask.
+    agg = _aggregate_maskable_candidates(text, allowlist)
 
     hits = [Hit(rule_name=e["rule"], tier=e["tier"]) for e in agg.values()]
 
@@ -406,7 +432,8 @@ def _maskable_values(
 ) -> list[tuple[str, str, int]]:
     """Return the ``(value, rule_name, tier)`` triples that enforce mode would mask.
 
-    Mirrors :func:`redact`'s aggregation exactly — operator allowlist on all tiers,
+    Reuses :func:`redact`'s aggregation via the shared
+    :func:`_aggregate_maskable_candidates` helper — operator allowlist on all tiers,
     structural shape exemption on Tier-3 only, dedup-by-value with the lowest tier
     winning and ``force`` OR-ed — but returns one triple per distinct value rather
     than a :class:`Hit`. A Tier-3 value is included only when it is forced (keyword
@@ -414,19 +441,7 @@ def _maskable_values(
     tier then descending value length so longer/structured values are placed first,
     the same precedence the masker uses.
     """
-    agg: dict[str, dict] = {}
-    for value, rule_name, tier, force in _collect_candidates(text):
-        if _is_operator_allowlisted(value, allowlist):
-            continue
-        if tier == 3 and _is_structurally_allowlisted(value):
-            continue
-        entry = agg.get(value)
-        if entry is None:
-            agg[value] = {"tier": tier, "rule": rule_name, "force": force}
-        else:
-            if tier < entry["tier"]:
-                entry["tier"], entry["rule"] = tier, rule_name
-            entry["force"] = entry["force"] or force
+    agg = _aggregate_maskable_candidates(text, allowlist)
 
     maskable = [
         (value, entry["rule"], entry["tier"])

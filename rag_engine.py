@@ -1989,6 +1989,37 @@ class DeleteResult(NamedTuple):
     fts_ok: bool
 
 
+def get_row_by_doc_id(doc_id: str,
+                      db_path: Optional[str] = None) -> Optional[dict]:
+    """Fetch a single Milvus row by ``doc_id``, or ``None`` when absent.
+
+    Used by the SESF-42 sanitizer to read an affected row's full payload
+    (document + metadata) just-in-time at apply time, so a large scan never has
+    to cache every row's text in memory. The filter is built via
+    :func:`_escape_filter_scalar`, never raw f-string interpolation of the id.
+
+    Args:
+        doc_id: Stable document id of the turn to read.
+        db_path: Optional Milvus DB path.
+
+    Returns:
+        The row as a plain dict (every field, ``output_fields=["*"]``), or
+        ``None`` when the collection is missing or no row matches.
+    """
+    with milvus_client(db_path) as client:
+        if not client.has_collection(COLLECTION_NAME):
+            return None
+        escaped_doc = _escape_filter_scalar(doc_id)
+        rows = client.query(
+            collection_name=COLLECTION_NAME,
+            filter=f'doc_id == "{escaped_doc}"',
+            output_fields=["*"],
+        )
+        if not rows:
+            return None
+        return dict(rows[0])
+
+
 def upsert_document(doc_id: str, *, new_document: str,
                     new_vector: Optional[list] = None,
                     db_path: Optional[str] = None) -> UpsertResult:
@@ -2055,6 +2086,7 @@ def upsert_document(doc_id: str, *, new_document: str,
     # ingest FTS record carries is preserved — content is the redacted document.
     fts_ok = False
     if db_path:
+        conn = None
         try:
             conn = _fts.connection(db_path)
             _fts.delete(conn, "doc_id", doc_id)
@@ -2076,11 +2108,16 @@ def upsert_document(doc_id: str, *, new_document: str,
                 "project_root": row.get("project_root", ""),
                 "issue_ids": row.get("issue_ids", ""),
             }])
-            _fts.close_ephemeral(conn)
             fts_ok = True
         except Exception as e:
             logger.warning("FTS rewrite failed for doc_id: %s", _scrub_exception(e))
             fts_ok = False
+        finally:
+            # Always release the ephemeral connection, even when the rewrite
+            # raised partway through — otherwise a failed sanitize leaks a
+            # SQLite handle per affected row.
+            if conn is not None:
+                _fts.close_ephemeral(conn)
     else:
         fts_ok = True
 
@@ -2127,15 +2164,20 @@ def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> DeleteResult
     # can keep an FTS-failed doc_id on the worklist instead of marking it done.
     fts_ok = False
     if db_path:
+        conn = None
         try:
             conn = _fts.connection(db_path)
             _fts.delete(conn, "doc_id", doc_id)
-            _fts.close_ephemeral(conn)
             fts_ok = True
         except Exception as e:
             logger.warning(
                 "FTS delete by doc_id failed: %s", _scrub_exception(e))
             fts_ok = False
+        finally:
+            # Release the ephemeral connection on every path so a failed FTS
+            # delete doesn't leak a SQLite handle.
+            if conn is not None:
+                _fts.close_ephemeral(conn)
     else:
         fts_ok = True
 
