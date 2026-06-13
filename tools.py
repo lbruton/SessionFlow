@@ -665,7 +665,9 @@ def register_tools(server: Server):
                 )
 
                 if not do_apply:
-                    report = sanitize.scan(scope)
+                    # Offload to a thread: scan reads/iterates many turns and
+                    # would otherwise block the asyncio event loop.
+                    report = await asyncio.to_thread(sanitize.scan, scope)
                     return [types.TextContent(
                         type="text", text=format_sanitize_report(report))]
 
@@ -682,7 +684,10 @@ def register_tools(server: Server):
                         ),
                     )]
 
-                report = sanitize.apply(scope, drop=do_drop, confirmed=True)
+                # Offload to a thread: apply re-embeds many turns and would
+                # otherwise block the asyncio event loop for the whole run.
+                report = await asyncio.to_thread(
+                    sanitize.apply, scope, drop=do_drop, confirmed=True)
                 return [types.TextContent(
                     type="text", text=format_sanitize_report(report))]
 

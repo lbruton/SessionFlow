@@ -890,7 +890,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
         # Stable hash: SHA-256 truncated to int64. Python's hash() is
         # randomized per process, so the same doc_id would get different
         # primary keys across server restarts.
-        int_id = int(hashlib.sha256(turn["doc_id"].encode()).hexdigest()[:15], 16)
+        int_id = _pk_from_doc_id(turn["doc_id"])
         data.append({
             "id": int_id,
             "vector": emb,
@@ -1956,6 +1956,11 @@ def delete_by_session(session_id: str, db_path: Optional[str] = None) -> int:
     return len(results)
 
 
+def _pk_from_doc_id(doc_id: str) -> int:
+    """Derive the stable INT64 Milvus primary key from a doc_id (SHA-256, 60-bit)."""
+    return int(hashlib.sha256(doc_id.encode()).hexdigest()[:15], 16)
+
+
 class UpsertResult(NamedTuple):
     """Outcome of an in-place document overwrite across both stores (SESF-42).
 
@@ -1995,8 +2000,10 @@ def get_row_by_doc_id(doc_id: str,
 
     Used by the SESF-42 sanitizer to read an affected row's full payload
     (document + metadata) just-in-time at apply time, so a large scan never has
-    to cache every row's text in memory. The filter is built via
-    :func:`_escape_filter_scalar`, never raw f-string interpolation of the id.
+    to cache every row's text in memory. Looks the row up by its integer primary
+    key (``_pk_from_doc_id``) for an O(1) point lookup rather than a VARCHAR scan;
+    the numeric filter needs no escaping. The returned row still carries every
+    field, including the original ``id`` and ``doc_id``.
 
     Args:
         doc_id: Stable document id of the turn to read.
@@ -2009,10 +2016,9 @@ def get_row_by_doc_id(doc_id: str,
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
             return None
-        escaped_doc = _escape_filter_scalar(doc_id)
         rows = client.query(
             collection_name=COLLECTION_NAME,
-            filter=f'doc_id == "{escaped_doc}"',
+            filter=f"id == {_pk_from_doc_id(doc_id)}",
             output_fields=["*"],
         )
         if not rows:
@@ -2060,10 +2066,12 @@ def upsert_document(doc_id: str, *, new_document: str,
         with milvus_client(db_path) as client:
             if not client.has_collection(COLLECTION_NAME):
                 return UpsertResult(False, False)
-            escaped_doc = _escape_filter_scalar(doc_id)
+            # Point lookup by integer PK (O(1)) rather than a VARCHAR doc_id
+            # scan; kept inline so the fetched row stays inside this client/
+            # upsert context for the in-place rewrite.
             rows = client.query(
                 collection_name=COLLECTION_NAME,
-                filter=f'doc_id == "{escaped_doc}"',
+                filter=f"id == {_pk_from_doc_id(doc_id)}",
                 output_fields=["*"],
             )
             if not rows:
@@ -2149,7 +2157,7 @@ def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> DeleteResult
         reported independently. The turn is fully removed only when the FTS
         delete also succeeded.
     """
-    pk = int(hashlib.sha256(doc_id.encode()).hexdigest()[:15], 16)
+    pk = _pk_from_doc_id(doc_id)
     deleted = 0
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):

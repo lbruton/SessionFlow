@@ -326,17 +326,43 @@ def test_apply_drop_deletes_without_reembed(sanitize_env, stubbed_engine):
 # === Confirmation gate ======================================================
 
 
-def test_apply_without_confirmation_makes_no_calls(sanitize_env, stubbed_engine):
-    """apply(confirmed=False) performs no reads or writes."""
+def test_apply_without_confirmation_makes_no_calls(
+    sanitize_env, stubbed_engine, monkeypatch
+):
+    """apply(confirmed=False) performs no reads or writes.
+
+    The confirmation gate must short-circuit *before* any read path runs, not just
+    before the writes — so spy both the scan read (``_query_batches``) and the
+    just-in-time row fetch (``get_row_by_doc_id``) and assert neither fired.
+    """
     sanitize = _require("sanitize")
     rag_engine, cap = stubbed_engine
     cap["rows"] = [_milvus_row("d1", f"cred {AWS_KEY} end")]
 
+    reads = {"query_batches": 0, "get_row": 0}
+    real_query_batches = rag_engine._query_batches
+    real_get_row = rag_engine.get_row_by_doc_id
+
+    def spy_query_batches(*args, **kwargs):
+        reads["query_batches"] += 1
+        yield from real_query_batches(*args, **kwargs)
+
+    def spy_get_row(doc_id, db_path=None):
+        reads["get_row"] += 1
+        return real_get_row(doc_id, db_path=db_path)
+
+    monkeypatch.setattr(rag_engine, "_query_batches", spy_query_batches, raising=False)
+    monkeypatch.setattr(rag_engine, "get_row_by_doc_id", spy_get_row, raising=False)
+
     sanitize.apply(sanitize.Scope(project_root=PROJECT), drop=False, confirmed=False)
 
+    # No writes.
     assert cap["upserts"] == []
     assert cap["deletes"] == []
     assert cap["embed_inputs"] == []
+    # No reads either: the scan iterator and the JIT row fetch never fired.
+    assert reads["query_batches"] == 0
+    assert reads["get_row"] == 0
 
 
 # === FTS-failure incompletion ===============================================
