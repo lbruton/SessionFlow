@@ -35,6 +35,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from typing import Iterator, Optional
 
 import rag_engine
@@ -402,15 +403,19 @@ def _build_worklist(
     rows_by_id: dict[str, dict] = {}
     counts: dict = {}
     for row in _iter_rows(scope, db_path):
+        doc_id = row.get("doc_id")
+        # Cache every scanned row's payload so a resumed worklist entry whose
+        # Milvus document is already redacted (no spans) is still recoverable for
+        # an FTS-only converge — the worklist/counts only track secret-bearing turns.
+        if doc_id not in rows_by_id:
+            rows_by_id[doc_id] = row
         _scanned, spans = secret_redaction.scan_spans(
             row.get("document", ""), mode="report", allowlist=allowlist
         )
         if not spans:
             continue
-        doc_id = row.get("doc_id")
-        if doc_id not in rows_by_id:
+        if doc_id not in worklist:
             worklist.append(doc_id)
-            rows_by_id[doc_id] = row
             _accumulate_counts(counts, spans)
     return worklist, rows_by_id, counts
 
@@ -421,7 +426,7 @@ def apply(
     drop: bool,
     confirmed: bool,
     resume: bool = False,
-    pause_event=None,
+    pause_event: Optional[Event] = None,
 ) -> SanitizeReport:
     """Apply the sanitizer destructively over ``scope`` (guarded by ``confirmed``).
 
@@ -515,16 +520,14 @@ def apply(
                 continue
 
             if drop:
-                _apply_drop(doc_id, row, allowlist, audit, db_path)
+                fts_ok = _apply_drop(doc_id, row, allowlist, audit, db_path)
+            else:
+                fts_ok = _apply_redact(doc_id, row, allowlist, audit, db_path)
+            if fts_ok:
                 done.add(doc_id)
                 processed += 1
             else:
-                fts_ok = _apply_redact(doc_id, row, allowlist, audit, db_path)
-                if fts_ok:
-                    done.add(doc_id)
-                    processed += 1
-                else:
-                    incomplete_fts += 1
+                incomplete_fts += 1
             _checkpoint("applying")
     finally:
         audit.close()
@@ -574,8 +577,10 @@ def _apply_redact(
 
     if not spans:
         # Already redacted in Milvus (resume case): converge FTS only, no re-embed.
+        # Pass new_vector=None so the existing fixed-dim vector is preserved — a
+        # 0-length vector would corrupt the HNSW/COSINE row.
         result = rag_engine.upsert_document(
-            doc_id, new_document=redacted, new_vector=[], db_path=db_path
+            doc_id, new_document=redacted, new_vector=None, db_path=db_path
         )
         return bool(result.milvus_ok and result.fts_ok)
 
@@ -593,10 +598,17 @@ def _apply_drop(
     allowlist: list,
     audit: "_AuditWriter",
     db_path: Optional[str],
-) -> None:
-    """Delete one turn from both stores and audit it (``action="drop"``, no re-embed)."""
+) -> bool:
+    """Delete one turn from both stores and audit it (``action="drop"``, no re-embed).
+
+    Returns:
+        ``True`` when the turn is fully removed (Milvus + FTS both ok), ``False``
+        when the FTS delete failed and the row is still keyword-searchable — the
+        caller must keep the doc_id on the worklist, mirroring the redact path.
+    """
     _scanned, spans = secret_redaction.scan_spans(
         row.get("document", ""), mode="report", allowlist=allowlist
     )
     audit.write(row=row, spans=spans, action="drop")
-    rag_engine.delete_by_doc_id(doc_id, db_path=db_path)
+    result = rag_engine.delete_by_doc_id(doc_id, db_path=db_path)
+    return bool(result.fts_ok)

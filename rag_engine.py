@@ -1973,16 +1973,39 @@ class UpsertResult(NamedTuple):
     fts_ok: bool
 
 
-def upsert_document(doc_id: str, *, new_document: str, new_vector: list,
+class DeleteResult(NamedTuple):
+    """Outcome of a doc-id-scoped dual delete across both stores (SESF-42).
+
+    Attributes:
+        deleted: Number of Milvus rows deleted (0 or 1).
+        fts_ok: True when the FTS delete of ``doc_id`` succeeded. Surfaced
+            distinctly so the drop path can mirror the redact contract: a turn is
+            only marked sanitized when its FTS row is gone too. A swallowed FTS
+            failure would otherwise leave the secret-bearing keyword row alive
+            while the caller marks the doc done.
+    """
+
+    deleted: int
+    fts_ok: bool
+
+
+def upsert_document(doc_id: str, *, new_document: str,
+                    new_vector: Optional[list] = None,
                     db_path: Optional[str] = None) -> UpsertResult:
-    """Overwrite a single turn's document + vector in place, then rewrite FTS.
+    """Overwrite a single turn's document (and optionally vector) in place, then rewrite FTS.
 
     Reads the existing Milvus row for ``doc_id`` (preserving every metadata
-    field), swaps in the new ``document`` (UTF-8 truncated to the VARCHAR cap)
-    and ``vector``, and upserts it by primary key (atomic — the row is either
-    fully old or fully new). Then rewrites the FTS sidecar as a delete-then-insert
-    of the new content (``FTSIndex.insert`` skips existing doc_ids, so the prior
-    row must be deleted first).
+    field), swaps in the new ``document`` (UTF-8 truncated to the VARCHAR cap),
+    and upserts it by primary key (atomic — the row is either fully old or fully
+    new). Then rewrites the FTS sidecar as a delete-then-insert of the new
+    content (``FTSIndex.insert`` skips existing doc_ids, so the prior row must be
+    deleted first).
+
+    When ``new_vector`` is None, the existing embedding is left untouched and only
+    the ``document`` field + FTS row are converged. This is the resume/no-spans
+    path: a row already redacted in Milvus must not have its fixed-dim HNSW vector
+    clobbered by a zero-length list — so callers that only need to retry the FTS
+    rewrite pass ``new_vector=None``.
 
     Unlike ``delete_by_session``, an FTS failure here is surfaced rather than
     swallowed: a failed rewrite leaves the old secret-bearing row searchable, and
@@ -1992,7 +2015,8 @@ def upsert_document(doc_id: str, *, new_document: str, new_vector: list,
     Args:
         doc_id: Stable document id of the turn to overwrite.
         new_document: Replacement document text (the redacted content).
-        new_vector: Replacement embedding vector for ``new_document``.
+        new_vector: Replacement embedding vector for ``new_document``. When None,
+            the stored vector is preserved (document + FTS converge only).
         db_path: Optional Milvus DB path; also derives the FTS sidecar path.
 
     Returns:
@@ -2000,6 +2024,7 @@ def upsert_document(doc_id: str, *, new_document: str, new_vector: list,
         row is fully sanitized only when both are True.
     """
     milvus_ok = False
+    row: dict = {}
     try:
         with milvus_client(db_path) as client:
             if not client.has_collection(COLLECTION_NAME):
@@ -2014,7 +2039,10 @@ def upsert_document(doc_id: str, *, new_document: str, new_vector: list,
                 return UpsertResult(False, False)
             row = dict(rows[0])
             row["document"] = _truncate_utf8(new_document, 65535)
-            row["vector"] = new_vector
+            # Leave the existing fixed-dim vector intact when no replacement is
+            # supplied — never write a 0-length vector into an HNSW/COSINE row.
+            if new_vector is not None:
+                row["vector"] = new_vector
             client.upsert(collection_name=COLLECTION_NAME, data=[row])
         milvus_ok = True
     except Exception as e:
@@ -2022,13 +2050,32 @@ def upsert_document(doc_id: str, *, new_document: str, new_vector: list,
         return UpsertResult(False, False)
 
     # FTS rewrite: delete-then-insert (insert dedups by doc_id, so the stale
-    # row must go first). FTS failure is surfaced, never swallowed.
+    # row must go first). FTS failure is surfaced, never swallowed. The record is
+    # built from the already-fetched row so every metadata column the normal
+    # ingest FTS record carries is preserved — content is the redacted document.
     fts_ok = False
     if db_path:
         try:
             conn = _fts.connection(db_path)
             _fts.delete(conn, "doc_id", doc_id)
-            _fts.insert(conn, [{"doc_id": doc_id, "content": new_document}])
+            _fts.insert(conn, [{
+                "doc_id": doc_id,
+                "content": new_document,
+                "session_id": row.get("session_id", ""),
+                "logical_session_id": row.get(
+                    "logical_session_id", row.get("session_id", "")),
+                "provider": row.get("provider", ""),
+                "source_kind": row.get("source_kind", ""),
+                "source_class": row.get("source_class", ""),
+                "source_id": row.get("source_id", ""),
+                "source_path": row.get("source_path", ""),
+                "git_branch": row.get("git_branch", ""),
+                "turn_index": row.get("turn_index", 0),
+                "timestamp": row.get("timestamp", ""),
+                "chunk_type": row.get("chunk_type", "turn"),
+                "project_root": row.get("project_root", ""),
+                "issue_ids": row.get("issue_ids", ""),
+            }])
             _fts.close_ephemeral(conn)
             fts_ok = True
         except Exception as e:
@@ -2040,26 +2087,33 @@ def upsert_document(doc_id: str, *, new_document: str, new_vector: list,
     return UpsertResult(milvus_ok, fts_ok)
 
 
-def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> int:
+def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> DeleteResult:
     """Delete a single turn from both Milvus (by PK) and FTS (by doc_id).
 
     Mirrors ``delete_by_session``'s symmetric dual-write: the Milvus delete keys
     on the stable primary key derived from ``doc_id`` (the same
-    ``int(sha256(doc_id)[:15], 16)`` derivation used at insert time), and the FTS
-    delete is non-fatal.
+    ``int(sha256(doc_id)[:15], 16)`` derivation used at insert time).
+
+    Unlike ``delete_by_session``, the FTS delete outcome is surfaced rather than
+    swallowed: a turn that is gone from Milvus but still keyword-searchable in FTS
+    has not been sanitized, and FTS healing only hydrates *missing* doc_ids, so a
+    surviving stale row is never auto-redacted. Callers must treat
+    ``fts_ok is False`` as unfinished and not mark the doc done.
 
     Args:
         doc_id: Stable document id of the turn to delete.
         db_path: Optional Milvus DB path; also derives the FTS sidecar path.
 
     Returns:
-        int: number of Milvus rows deleted (0 or 1).
+        DeleteResult: ``deleted`` (Milvus rows removed, 0 or 1) and ``fts_ok``
+        reported independently. The turn is fully removed only when the FTS
+        delete also succeeded.
     """
     pk = int(hashlib.sha256(doc_id.encode()).hexdigest()[:15], 16)
     deleted = 0
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
-            return 0
+            return DeleteResult(0, True)
         results = client.query(
             collection_name=COLLECTION_NAME,
             filter=f"id == {pk}",
@@ -2069,16 +2123,23 @@ def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> int:
             client.delete(collection_name=COLLECTION_NAME, filter=f"id == {pk}")
             deleted = len(results)
 
-    # Also delete from FTS (non-fatal — mirrors delete_by_session).
-    try:
-        if db_path:
+    # Also delete from FTS. The outcome is surfaced (not swallowed) so the caller
+    # can keep an FTS-failed doc_id on the worklist instead of marking it done.
+    fts_ok = False
+    if db_path:
+        try:
             conn = _fts.connection(db_path)
             _fts.delete(conn, "doc_id", doc_id)
             _fts.close_ephemeral(conn)
-    except Exception as e:
-        logger.warning("FTS delete by doc_id failed (non-fatal): %s", _scrub_exception(e))
+            fts_ok = True
+        except Exception as e:
+            logger.warning(
+                "FTS delete by doc_id failed: %s", _scrub_exception(e))
+            fts_ok = False
+    else:
+        fts_ok = True
 
-    return deleted
+    return DeleteResult(deleted, fts_ok)
 
 
 def delete_by_branch(git_branch: str, db_path: Optional[str] = None) -> int:

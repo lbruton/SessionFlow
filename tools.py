@@ -671,13 +671,14 @@ def register_tools(server: Server):
 
                 if not do_confirm:
                     # Refuse before any read or write: apply requires explicit confirm.
+                    action = "delete" if do_drop else "redact"
+                    alt = "" if do_drop else " (drop=true to delete instead)"
                     return [types.TextContent(
                         type="text",
                         text=(
                             "Refusing to apply: confirmation required. Re-run with "
-                            "confirm=true to redact"
-                            + (" (drop=true to delete instead)" if not do_drop else "")
-                            + " the affected turns. No changes were made."
+                            f"confirm=true to {action}{alt} the affected turns. "
+                            "No changes were made."
                         ),
                     )]
 

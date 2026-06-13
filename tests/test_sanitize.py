@@ -99,6 +99,7 @@ def stubbed_engine(monkeypatch):
         "fts_calls": [],       # ordered ("delete"|"insert", doc_id) for ordering checks
         "budget_calls": [],    # ("before"|"after", ...) budget interactions
         "upsert_result": None,  # override the UpsertResult the stub returns
+        "delete_result": None,  # override the DeleteResult the stub returns
     }
 
     def fake_query_batches(output_fields, *args, **kwargs):
@@ -115,8 +116,12 @@ def stubbed_engine(monkeypatch):
 
     # UpsertResult is a NamedTuple introduced by SESF-42; build via the module so
     # the test binds to the real type once it exists.
-    def fake_upsert_document(doc_id, *, new_document, new_vector, db_path=None):
-        cap["upserts"].append((doc_id, new_document, list(new_vector)))
+    def fake_upsert_document(doc_id, *, new_document, new_vector=None, db_path=None):
+        # Record the vector as-passed (None for the resume/FTS-only path) so a test
+        # can assert the resume branch never sends a zero-length vector.
+        cap["upserts"].append(
+            (doc_id, new_document, None if new_vector is None else list(new_vector))
+        )
         cap["fts_calls"].append(("delete", doc_id))
         cap["fts_calls"].append(("insert", doc_id))
         if cap["upsert_result"] is not None:
@@ -129,7 +134,9 @@ def stubbed_engine(monkeypatch):
 
     def fake_delete_by_doc_id(doc_id, db_path=None):
         cap["deletes"].append(doc_id)
-        return 1
+        if cap["delete_result"] is not None:
+            return cap["delete_result"]
+        return rag_engine.DeleteResult(deleted=1, fts_ok=True)
 
     monkeypatch.setattr(
         rag_engine, "delete_by_doc_id", fake_delete_by_doc_id, raising=False
@@ -334,6 +341,27 @@ def test_apply_fts_failure_leaves_row_incomplete(sanitize_env, stubbed_engine):
     assert "d1" in state.get("worklist", [])
 
 
+def test_apply_drop_fts_failure_leaves_row_incomplete(sanitize_env, stubbed_engine):
+    """drop path: an FTS-delete failure must NOT mark the doc done (mirrors redact)."""
+    sanitize = _require("sanitize")
+    rag_engine, cap = stubbed_engine
+    cap["rows"] = [_milvus_row("d1", f"cred {AWS_KEY} end")]
+    # Milvus delete ran, but the FTS row may still carry the secret.
+    cap["delete_result"] = rag_engine.DeleteResult(deleted=1, fts_ok=False)
+
+    report = sanitize.apply(
+        sanitize.Scope(project_root=PROJECT), drop=True, confirmed=True
+    )
+
+    assert report.incomplete_fts >= 1
+    assert report.status == "incomplete"
+
+    state_path = Path(sanitize_env) / ".sessionflow" / "sanitize_state.json"
+    state = json.loads(state_path.read_text())
+    assert "d1" not in state.get("done", [])
+    assert "d1" in state.get("worklist", [])
+
+
 # === Checkpoint / resume ====================================================
 
 
@@ -376,6 +404,53 @@ def test_apply_resume_skips_already_done_doc_ids(
     upserted_ids = [u[0] for u in cap["upserts"]]
     assert "d1" not in upserted_ids
     assert "d2" in upserted_ids
+
+
+def test_apply_resume_no_spans_passes_none_vector(
+    sanitize_env, stubbed_engine
+):
+    """A resumed row already clean in Milvus (no spans) upserts with new_vector=None.
+
+    The resume/FTS-only converge path must never send a 0-length vector — that
+    would corrupt the fixed-dim HNSW row. It also performs no re-embed.
+    """
+    sanitize = _require("sanitize")
+    rag_engine, cap = stubbed_engine
+    # The row's Milvus document is already redacted (scan_spans yields no spans),
+    # but the doc_id is still on the durable worklist from a prior crash — so the
+    # resume pass must converge FTS only.
+    cap["rows"] = [_milvus_row("d1", "totally benign already redacted text")]
+
+    state_dir = Path(sanitize_env) / ".sessionflow"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "sanitize_state.json").write_text(
+        json.dumps(
+            {
+                "run_id": "prior",
+                "mode": "redact",
+                "scope": {"project_root": PROJECT},
+                "worklist": ["d1"],
+                "done": [],
+                "counts": {},
+                "status": "applying",
+            }
+        )
+    )
+
+    sanitize.apply(
+        sanitize.Scope(project_root=PROJECT),
+        drop=False,
+        confirmed=True,
+        resume=True,
+    )
+
+    assert cap["upserts"], "the FTS-only converge still calls upsert_document"
+    doc_id, _new_doc, vector = cap["upserts"][0]
+    assert doc_id == "d1"
+    # None — not [] — so the stored vector is preserved, not zeroed.
+    assert vector is None
+    # No re-embed on the clean/resume path.
+    assert cap["embed_inputs"] == []
 
 
 # === Budget throttle ========================================================
@@ -504,6 +579,7 @@ def test_upsert_document_milvus_upsert_and_fts_rewrite(primitive_harness):
         "id": 123,
         "doc_id": "d1",
         "document": f"old {AWS_KEY}",
+        "vector": [0.5] * 8,
         "provider": PROVIDER,
         "session_id": SESSION,
         "project_root": PROJECT,
@@ -521,6 +597,7 @@ def test_upsert_document_milvus_upsert_and_fts_rewrite(primitive_harness):
     assert cap["milvus_upserts"] is not None
     row = cap["milvus_upserts"][0]
     assert row["document"] == "redacted [REDACTED:AWS]"
+    assert row["vector"] == [0.0] * 8
     assert row["doc_id"] == "d1"
     assert AWS_KEY not in row["document"]
     # FTS rewrite is delete-then-insert (ordering matters).
@@ -528,6 +605,92 @@ def test_upsert_document_milvus_upsert_and_fts_rewrite(primitive_harness):
     assert kinds == ["delete", "insert"]
     inserted = cap["fts_ops"][1][1][0]
     assert inserted["content"] == "redacted [REDACTED:AWS]"
+
+
+def test_upsert_document_none_vector_preserves_stored_vector(primitive_harness):
+    """new_vector=None keeps the existing fixed-dim vector and still rewrites FTS.
+
+    The resume/no-spans path passes None so a 0-length list can never clobber the
+    HNSW/COSINE row; the document + FTS sidecar still converge.
+    """
+    rag_engine, cap = primitive_harness
+    original_vector = [0.5] * 8
+    cap["existing_row"] = {
+        "id": 123,
+        "doc_id": "d1",
+        "document": "already redacted [REDACTED:AWS]",
+        "vector": list(original_vector),
+        "provider": PROVIDER,
+        "session_id": SESSION,
+        "project_root": PROJECT,
+    }
+    result = rag_engine.upsert_document(
+        "d1",
+        new_document="already redacted [REDACTED:AWS]",
+        new_vector=None,
+        db_path="/tmp/sf-test.db",
+    )
+
+    assert result.milvus_ok is True
+    assert result.fts_ok is True
+    row = cap["milvus_upserts"][0]
+    # The stored vector is untouched — not zero-length, not replaced.
+    assert row["vector"] == original_vector
+    assert len(row["vector"]) == 8
+    # FTS still converges (delete-then-insert of the redacted content).
+    kinds = [op[0] for op in cap["fts_ops"]]
+    assert kinds == ["delete", "insert"]
+    assert cap["fts_ops"][1][1][0]["content"] == "already redacted [REDACTED:AWS]"
+
+
+def test_upsert_document_fts_record_carries_source_metadata(primitive_harness):
+    """The FTS rewrite copies every metadata column from the fetched row.
+
+    Matches the normal-ingest FTS record shape so filtered/BM25 search survives a
+    sanitize — content is the redacted document, metadata is the source row's.
+    """
+    rag_engine, cap = primitive_harness
+    cap["existing_row"] = {
+        "id": 7,
+        "doc_id": "d1",
+        "document": f"old {AWS_KEY}",
+        "vector": [0.1] * 8,
+        "session_id": SESSION,
+        "logical_session_id": "logical-xyz",
+        "provider": PROVIDER,
+        "source_kind": "transcript",
+        "source_class": "cli",
+        "source_id": "src-42",
+        "source_path": "/synthetic/transcript.jsonl",
+        "git_branch": "main",
+        "turn_index": 5,
+        "timestamp": "2026-05-21T10:00:00Z",
+        "chunk_type": "turn",
+        "project_root": PROJECT,
+        "issue_ids": "SESF-42",
+    }
+    rag_engine.upsert_document(
+        "d1",
+        new_document="redacted [REDACTED:AWS]",
+        new_vector=[0.0] * 8,
+        db_path="/tmp/sf-test.db",
+    )
+
+    inserted = cap["fts_ops"][1][1][0]
+    assert inserted["content"] == "redacted [REDACTED:AWS]"
+    assert inserted["session_id"] == SESSION
+    assert inserted["logical_session_id"] == "logical-xyz"
+    assert inserted["provider"] == PROVIDER
+    assert inserted["source_kind"] == "transcript"
+    assert inserted["source_class"] == "cli"
+    assert inserted["source_id"] == "src-42"
+    assert inserted["source_path"] == "/synthetic/transcript.jsonl"
+    assert inserted["git_branch"] == "main"
+    assert inserted["turn_index"] == 5
+    assert inserted["timestamp"] == "2026-05-21T10:00:00Z"
+    assert inserted["chunk_type"] == "turn"
+    assert inserted["project_root"] == PROJECT
+    assert inserted["issue_ids"] == "SESF-42"
 
 
 def test_upsert_document_fts_failure_reported_distinctly(primitive_harness):
@@ -547,11 +710,31 @@ def test_upsert_document_fts_failure_reported_distinctly(primitive_harness):
 
 
 def test_delete_by_doc_id_dual_delete(primitive_harness):
-    """delete_by_doc_id deletes from BOTH Milvus (by PK) and FTS (by doc_id)."""
+    """delete_by_doc_id deletes from BOTH stores and reports the outcome distinctly."""
     rag_engine, cap = primitive_harness
     cap["existing_row"] = {"id": 999, "doc_id": "d1", "document": "x"}
 
-    rag_engine.delete_by_doc_id("d1", db_path="/tmp/sf-test.db")
+    result = rag_engine.delete_by_doc_id("d1", db_path="/tmp/sf-test.db")
 
+    # Contract: returns a DeleteResult carrying the Milvus deleted count + fts_ok.
+    assert isinstance(result, rag_engine.DeleteResult)
+    assert result.deleted == 1
+    assert result.fts_ok is True
     assert cap["milvus_deletes"], "Milvus delete must run"
     assert any(("delete", ("doc_id", "d1")) == op for op in cap["fts_ops"])
+
+
+def test_delete_by_doc_id_fts_failure_reported_distinctly(primitive_harness):
+    """An FTS-delete failure yields fts_ok=False even when the Milvus delete ran."""
+    rag_engine, cap = primitive_harness
+    cap["existing_row"] = {"id": 999, "doc_id": "d1", "document": "x"}
+
+    def boom(conn, column, value):
+        raise RuntimeError("fts delete failed")
+
+    rag_engine._fts.delete = boom
+    result = rag_engine.delete_by_doc_id("d1", db_path="/tmp/sf-test.db")
+
+    assert result.deleted == 1  # Milvus delete still happened
+    assert result.fts_ok is False  # but the FTS row may survive -> not done
+    assert cap["milvus_deletes"], "Milvus delete must run"
