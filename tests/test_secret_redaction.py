@@ -545,6 +545,37 @@ def test_ac17_fts_insert_error_is_scrubbed(add_turns_harness, monkeypatch, caplo
     assert AWS_KEY not in logged  # FTS failure is non-fatal AND scrubbed
 
 
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        lambda rag: rag.delete_by_session("sess-1", db_path=DB),
+        lambda rag: rag.delete_by_branch("feature/x", db_path=DB),
+        lambda rag: rag.delete_older_than(30, db_path=DB),
+    ],
+    ids=["by_session", "by_branch", "older_than"],
+)
+def test_ac17_fts_delete_error_is_scrubbed(add_turns_harness, monkeypatch, caplog, invoke):
+    """AC-17: a secret in any FTS delete failure message is scrubbed from the log.
+
+    Covers the three cleanup entry points (``delete_by_session`` / ``delete_by_branch``
+    use ``_fts.delete``; ``delete_older_than`` uses ``_fts.delete_where``). A SQLite
+    error string can echo bound parameters or row content, so the non-fatal handler
+    must route ``e`` through ``_scrub_exception`` rather than logging it raw.
+    """
+    rag_engine, _ = add_turns_harness
+
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"delete failed near {AWS_KEY}")
+
+    monkeypatch.setattr(rag_engine._fts, "delete", boom, raising=False)
+    monkeypatch.setattr(rag_engine._fts, "delete_where", boom, raising=False)
+    with caplog.at_level("WARNING"):
+        invoke(rag_engine)  # non-fatal: the forced FTS error must not propagate
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert AWS_KEY not in logged  # delete failure is non-fatal AND scrubbed
+    assert "[REDACTED:AWS]" in logged  # positive control: the scrub actually fired
+
+
 def test_ac17_embedding_error_is_scrubbed(add_turns_harness, monkeypatch):
     """AC-17: a secret in a raised embedding error is scrubbed before re-raise."""
     rag_engine, _ = add_turns_harness

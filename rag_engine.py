@@ -394,7 +394,7 @@ def close_server_mode():
             client.close()
             logger.info("Closed Milvus client: %s", path)
         except Exception as e:
-            logger.warning("Error closing Milvus client %s: %s", path, e)
+            logger.warning("Error closing Milvus client %s: %s", path, _scrub_exception(e))
     _persistent_clients.clear()
     _fts.close_all()
     # Nil the semaphore and lock FIRST so any coroutine that wakes up while we
@@ -416,7 +416,7 @@ def _get_persistent_client(db_path: str) -> MilvusClient:
             _persistent_clients[db_path].has_collection(COLLECTION_NAME)
             return _persistent_clients[db_path]
         except Exception as e:
-            logger.warning("Stale Milvus client for %s: %s — reconnecting", db_path, e)
+            logger.warning("Stale Milvus client for %s: %s — reconnecting", db_path, _scrub_exception(e))
             try:
                 _persistent_clients[db_path].close()
             except Exception:
@@ -441,7 +441,7 @@ def _get_persistent_client(db_path: str) -> MilvusClient:
             )
         logger.info("Opened client: %s", db_path)
     except Exception as e:
-        logger.error("Failed to connect to Milvus at %s: %s", db_path, e)
+        logger.error("Failed to connect to Milvus at %s: %s", db_path, _scrub_exception(e))
         raise
     return _persistent_clients[db_path]
 
@@ -834,7 +834,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
                 if results:
                     existing_ids.add(doc_id)
             except Exception as e:
-                logger.warning("Dedup check failed for doc_id %s: %s", doc_id, e)
+                logger.warning("Dedup check failed for doc_id %s: %s", doc_id, _scrub_exception(e))
 
     new_turns = [t for t in turns if t["doc_id"] not in existing_ids]
     if not new_turns:
@@ -1537,7 +1537,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
             filters=fts_filters or None, db_path=db_path,
         )
     except Exception as e:
-        logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s", canonical, e)
+        logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s", canonical, _scrub_exception(e))
         fts_hits = []
 
     for row in fts_hits:
@@ -1951,7 +1951,7 @@ def delete_by_session(session_id: str, db_path: Optional[str] = None) -> int:
             _fts.delete(conn, "session_id", session_id)
             _fts.close_ephemeral(conn)
     except Exception as e:
-        logger.warning("FTS delete by session failed (non-fatal): %s", e)
+        logger.warning("FTS delete by session failed (non-fatal): %s", _scrub_exception(e))
 
     return len(results)
 
@@ -2217,7 +2217,7 @@ def delete_by_branch(git_branch: str, db_path: Optional[str] = None) -> int:
             _fts.delete(conn, "git_branch", git_branch)
             _fts.close_ephemeral(conn)
     except Exception as e:
-        logger.warning("FTS delete by branch failed (non-fatal): %s", e)
+        logger.warning("FTS delete by branch failed (non-fatal): %s", _scrub_exception(e))
 
     return len(results)
 
@@ -2256,7 +2256,7 @@ def delete_older_than(max_age_days: int, db_path: Optional[str] = None) -> int:
             _fts.delete_where(conn, "timestamp < ? AND timestamp != ''", (cutoff_str,))
             _fts.close_ephemeral(conn)
     except Exception as e:
-        logger.warning("FTS delete older_than failed (non-fatal): %s", e)
+        logger.warning("FTS delete older_than failed (non-fatal): %s", _scrub_exception(e))
 
     return len(results)
 
