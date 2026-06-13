@@ -896,6 +896,33 @@ def test_upsert_document_fts_record_carries_source_metadata(primitive_harness):
     assert inserted["issue_ids"] == "SESF-42"
 
 
+def test_upsert_document_fts_content_matches_truncated_milvus_document(primitive_harness):
+    """FTS content uses the UTF-8-truncated row['document'], not raw new_document.
+
+    A redacted payload can expand past Milvus's 65535-byte VARCHAR cap; both stores
+    must index identical content or the dual-write contract breaks (CodeRabbit).
+    """
+    rag_engine, cap = primitive_harness
+    cap["existing_row"] = {
+        "id": 9,
+        "doc_id": "d1",
+        "document": "old",
+        "vector": [0.1] * 8,
+        "session_id": SESSION,
+        "provider": PROVIDER,
+    }
+    oversized = "x" * 70000  # > 65535 bytes -> Milvus truncates
+    rag_engine.upsert_document(
+        "d1", new_document=oversized, new_vector=[0.0] * 8, db_path="/tmp/sf-test.db"
+    )
+
+    milvus_doc = cap["milvus_upserts"][0]["document"]
+    fts_content = cap["fts_ops"][1][1][0]["content"]
+    assert fts_content == milvus_doc          # the two stores agree
+    assert fts_content != oversized           # truncated, not the raw payload
+    assert len(fts_content.encode("utf-8")) <= 65535
+
+
 def test_upsert_document_fts_failure_reported_distinctly(primitive_harness):
     """An FTS-insert failure yields fts_ok=False (not swallowed) with milvus_ok=True."""
     rag_engine, cap = primitive_harness

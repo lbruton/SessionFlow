@@ -2092,7 +2092,10 @@ def upsert_document(doc_id: str, *, new_document: str,
             _fts.delete(conn, "doc_id", doc_id)
             _fts.insert(conn, [{
                 "doc_id": doc_id,
-                "content": new_document,
+                # Use the UTF-8-truncated text stored in Milvus (row["document"]),
+                # not new_document — a redacted payload can expand past the 65535
+                # cap, and the two stores must index identical content (SESF-42).
+                "content": row["document"],
                 "session_id": row.get("session_id", ""),
                 "logical_session_id": row.get(
                     "logical_session_id", row.get("session_id", "")),
