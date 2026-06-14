@@ -101,7 +101,14 @@ _PEM_RE = re.compile(
 # Tier-2 contextual assignment: a secret-bearing key, then ':'/'=', then a value
 # (optionally quoted). Covers the MCP-config-dump leak class (AC-6).
 _SECRET_KEYWORD = (  # nosec B105 — detection regex of keyword NAMES, not a credential
-    r"api[_-]?key|secret|token|password|passwd|pwd|auth|credential|access[_-]?key"
+    # SESF-44: bare `auth` was dropped — it substring-matched the `author*` /
+    # `authority` / co-author git-metadata family (the dominant Tier-2 false
+    # positive). The auth family is now a left-anchored segment (negative
+    # lookbehind `(?<![A-Za-z])`) so `oauth` no longer matches inside `coauthor` /
+    # `coAuthoredBy`; `auth_token` also still matches via the bare `token` keyword.
+    r"api[_-]?key|secret|token|password|passwd|pwd"
+    r"|(?<![A-Za-z])(?:oauth|authorization|auth[_-]?token)"
+    r"|credential|access[_-]?key"
 )
 _ASSIGN_RE = re.compile(
     r"(?i)(?P<key>[A-Za-z0-9_\-]*(?:" + _SECRET_KEYWORD + r")[A-Za-z0-9_\-]*)"
@@ -109,6 +116,12 @@ _ASSIGN_RE = re.compile(
     r"[\"']?(?P<value>[^\"'\s,}{]+)[\"']?"
 )
 _KEYWORD_RE = re.compile(r"(?i)(?:" + _SECRET_KEYWORD + r")")
+
+# SESF-44: env-interpolation spans ``${…}`` carry no literal secret. A Tier-2
+# match whose key/value falls inside such a span (e.g. ``${FOO_PASSWORD:-default}``)
+# is a non-literal and is dropped. Non-greedy/no-nesting by design (``[^}]*``);
+# nested ``${a${b}}`` is a rare edge that is intentionally not matched.
+_INTERPOLATION_SPAN_RE = re.compile(r"\$\{[^}]*\}")
 
 # Value-shape guard (AC-7): reject placeholder shapes / sub-minimum-length values.
 _MIN_VALUE_LEN = 8
@@ -197,6 +210,37 @@ def _is_placeholder_value(value: str) -> bool:
     if _PLACEHOLDER_SHAPE_RE.match(stripped):
         return True
     return False
+
+
+def _is_nonliteral_assignment(line: str, match: "re.Match[str]") -> bool:
+    """Return True if a Tier-2 assignment is a shell/env non-literal, not a secret (SESF-44).
+
+    Two shapes carry no literal credential and are dropped before a Tier-2
+    ASSIGNMENT candidate is recorded:
+
+    * the captured value is a command substitution ``$(…)`` or begins an
+      interpolation ``${…}`` (e.g. ``KEY=$(security …)`` captures ``$(security``);
+    * the matched key/value falls inside a ``${…}`` interpolation span on the line
+      (e.g. ``x=${FOO_PASSWORD:-default}`` matches key ``FOO_PASSWORD`` with value
+      ``-default`` — the ``${`` precedes the key, so a value-shape check alone
+      misses it).
+
+    Args:
+        line: The full line the Tier-2 scanner is processing.
+        match: The :data:`_ASSIGN_RE` match whose key/value are under evaluation.
+
+    Returns:
+        True if the assignment is a non-literal (command substitution /
+        interpolation) and must not be reported as a secret.
+    """
+    value = match.group("value")
+    if value.startswith("$(") or value.startswith("${"):
+        return True
+    start, end = match.start(), match.end()
+    return any(
+        span.start() < end and start < span.end()
+        for span in _INTERPOLATION_SPAN_RE.finditer(line)
+    )
 
 
 def _is_structurally_allowlisted(value: str) -> bool:
@@ -324,6 +368,9 @@ def _collect_candidates(text: str) -> list[tuple[str, str, int, bool]]:
             for match in _ASSIGN_RE.finditer(line):
                 value = match.group("value")
                 if _is_placeholder_value(value):
+                    continue
+                # SESF-44: drop command-substitution / env-interpolation matches.
+                if _is_nonliteral_assignment(line, match):
                     continue
                 candidates.append((value, "ASSIGNMENT", 2, True))
 

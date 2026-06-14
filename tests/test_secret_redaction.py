@@ -934,7 +934,7 @@ def test_sesf44_ac4_env_interpolation_not_flagged():
     D-2's interpolation-span check lands.
     """
     line = "x=${FOO_PASSWORD:-default}"
-    out, hits = redact(line, mode="enforce")
+    _, hits = redact(line, mode="enforce")
     assert not any(h.tier == 2 for h in hits)
     assert not _has_assignment_span(line)
     # Sanity: a pure `${VAR}` value (no default) is already unflagged (the value
