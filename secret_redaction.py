@@ -106,7 +106,7 @@ _SECRET_KEYWORD = (  # nosec B105 — detection regex of keyword NAMES, not a cr
     # positive). The auth family is now a left-anchored segment (negative
     # lookbehind `(?<![A-Za-z])`) so `oauth` no longer matches inside `coauthor` /
     # `coAuthoredBy`; `auth_token` also still matches via the bare `token` keyword.
-    r"api[_-]?key|secret|token|password|passwd|pwd"
+    r"api[_-]?key|secret|token|password|passwd|pwd"  # noqa: S105 — keyword NAMES, not a credential
     r"|(?<![A-Za-z])(?:oauth|authorization|auth[_-]?token)"
     r"|credential|access[_-]?key"
 )
@@ -218,12 +218,16 @@ def _is_nonliteral_assignment(line: str, match: "re.Match[str]") -> bool:
     Two shapes carry no literal credential and are dropped before a Tier-2
     ASSIGNMENT candidate is recorded:
 
-    * the captured value is a command substitution ``$(…)`` or begins an
-      interpolation ``${…}`` (e.g. ``KEY=$(security …)`` captures ``$(security``);
+    * the captured value is a command substitution ``$(…)`` (e.g.
+      ``KEY=$(security …)`` captures ``$(security``);
     * the matched key/value falls inside a ``${…}`` interpolation span on the line
       (e.g. ``x=${FOO_PASSWORD:-default}`` matches key ``FOO_PASSWORD`` with value
       ``-default`` — the ``${`` precedes the key, so a value-shape check alone
       misses it).
+
+    A captured value can never itself start with ``${``: ``_ASSIGN_RE`` excludes
+    ``{`` from the value class, so the interpolation case is handled solely by the
+    span-overlap check below, not by a value-prefix test.
 
     Args:
         line: The full line the Tier-2 scanner is processing.
@@ -234,7 +238,7 @@ def _is_nonliteral_assignment(line: str, match: "re.Match[str]") -> bool:
         interpolation) and must not be reported as a secret.
     """
     value = match.group("value")
-    if value.startswith("$(") or value.startswith("${"):
+    if value.startswith("$("):
         return True
     start, end = match.start(), match.end()
     return any(

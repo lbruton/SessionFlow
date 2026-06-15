@@ -906,11 +906,13 @@ def test_sesf44_ac1_author_family_not_flagged(key):
     Value is an 8+ char literal that passes the value guard, so suppression is
     proven by KEY shape (not value length). RED on current `main`.
     """
-    line = f'{{"{key}": "{SESF44_LITERAL}"}}'
-    out, hits = redact(line, mode="enforce")
-    assert not any(h.tier == 2 for h in hits), f"{key} should not be a Tier-2 hit"
-    assert SESF44_LITERAL in out  # value left intact (not masked)
-    assert not _has_assignment_span(line), f"{key} should yield no ASSIGNMENT span"
+    # Both JSON-style and shell-style assignment forms (the live FPs appeared as
+    # `{"author": "..."}` PR JSON *and* shell `author=...`).
+    for line in (f'{{"{key}": "{SESF44_LITERAL}"}}', f"{key}={SESF44_LITERAL}"):
+        out, hits = redact(line, mode="enforce")
+        assert not any(h.tier == 2 for h in hits), f"{key!r} in {line!r}: unexpected Tier-2 hit"
+        assert SESF44_LITERAL in out  # value left intact (not masked)
+        assert not _has_assignment_span(line), f"{key!r} in {line!r}: unexpected ASSIGNMENT span"
 
 
 def test_sesf44_ac3_command_substitution_not_flagged():
@@ -924,6 +926,10 @@ def test_sesf44_ac3_command_substitution_not_flagged():
     assert not any(h.tier == 2 for h in hits)
     assert "$(security" in out  # command-sub left intact
     assert not _has_assignment_span(line)
+    # Quoted variant: KEY="$(...)" — the captured value still begins `$(`.
+    quoted = 'FOO_API_KEY="$(security find-generic-password svc)"'
+    assert not _has_tier2_hit(quoted)
+    assert not _has_assignment_span(quoted)
 
 
 def test_sesf44_ac4_env_interpolation_not_flagged():
@@ -942,6 +948,10 @@ def test_sesf44_ac4_env_interpolation_not_flagged():
     pure = "MY_SECRET=${VALUE}"
     assert not _has_tier2_hit(pure)
     assert not _has_assignment_span(pure)
+    # The `${VAR:?error}` (error-if-unset) operator is the same interpolation span.
+    err = "x=${FOO_TOKEN:?missing}"
+    assert not _has_tier2_hit(err)
+    assert not _has_assignment_span(err)
 
 
 # AC-2 / AC-5: genuine secret-bearing keys with a literal value STILL flag.
