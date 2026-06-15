@@ -854,3 +854,132 @@ def test_redact_public_contract_unchanged():
     assert isinstance(hits, list)
     assert hits
     assert tuple(type(hits[0])._fields) == ("rule_name", "tier")
+
+
+# === SESF-44 — Tier-2 ASSIGNMENT precision ==================================
+#
+# Two FP classes the SESF-42 live baseline surfaced:
+#   * the bare `auth` keyword substring-matching the `author*`/`authority`/
+#     co-author family (D-A: drop bare `auth`, add a left-anchored auth family);
+#   * command-substitution `$(…)` and env-interpolation `${…}` values that carry
+#     no literal secret (D-B: reject them in the Tier-2 branch).
+# Every case is asserted through BOTH public paths -- `redact()` (Hit) AND
+# `scan_spans()` (Span) -- because both route through the shared
+# `_aggregate_maskable_candidates` seam (AC-6/AC-7). All tokens are synthetic.
+
+# A synthetic literal value: 16 chars (< _ENTROPY_MIN_LEN=20, so it is NOT a
+# Tier-3 entropy candidate -- isolating the Tier-2 behavior under test) and >= 8
+# chars with mixed case+digits so it passes `_is_placeholder_value`.
+SESF44_LITERAL = "Hunter2" + "Swordfish"
+
+
+def _has_tier2_hit(line):
+    """True if `redact` reports a Tier-2 Hit for `line`."""
+    _, hits = redact(line, mode="enforce")
+    return any(h.tier == 2 for h in hits)
+
+
+def _has_assignment_span(line):
+    """True if `scan_spans` reports an ASSIGNMENT span for `line`."""
+    _, spans = secret_redaction.scan_spans(line, mode="report")
+    return any(s.rule_name == "ASSIGNMENT" for s in spans)
+
+
+# AC-1: the full reconciled author*/authority/co-author family. Each is flagged
+# on current `main` (bare `auth` substring) -> RED until D-1 lands.
+SESF44_AUTHOR_FAMILY = [
+    "author",
+    "authored",
+    "authoredDate",
+    "authorAssociation",
+    "authority",
+    "gradingAuthority",
+    "coauthor",
+    "coAuthoredBy",
+]
+
+
+@pytest.mark.parametrize("key", SESF44_AUTHOR_FAMILY)
+def test_sesf44_ac1_author_family_not_flagged(key):
+    """AC-1: author*/authority/co-author keys are NOT Tier-2 flagged (both paths).
+
+    Value is an 8+ char literal that passes the value guard, so suppression is
+    proven by KEY shape (not value length). RED on current `main`.
+    """
+    # Both JSON-style and shell-style assignment forms (the live FPs appeared as
+    # `{"author": "..."}` PR JSON *and* shell `author=...`).
+    for line in (f'{{"{key}": "{SESF44_LITERAL}"}}', f"{key}={SESF44_LITERAL}"):
+        out, hits = redact(line, mode="enforce")
+        assert not any(h.tier == 2 for h in hits), f"{key!r} in {line!r}: unexpected Tier-2 hit"
+        assert SESF44_LITERAL in out  # value left intact (not masked)
+        assert not _has_assignment_span(line), f"{key!r} in {line!r}: unexpected ASSIGNMENT span"
+
+
+def test_sesf44_ac3_command_substitution_not_flagged():
+    """AC-3: a `$(…)` command-substitution value is not flagged (both paths).
+
+    `export FOO_API_KEY=$(security …)` captures value `$(security` -- flagged on
+    `main` (passes the value guard) -> RED until D-2's value-start check lands.
+    """
+    line = "export FOO_API_KEY=$(security find-generic-password svc)"
+    out, hits = redact(line, mode="enforce")
+    assert not any(h.tier == 2 for h in hits)
+    assert "$(security" in out  # command-sub left intact
+    assert not _has_assignment_span(line)
+    # Quoted variant: KEY="$(...)" — the captured value still begins `$(`.
+    quoted = 'FOO_API_KEY="$(security find-generic-password svc)"'
+    assert not _has_tier2_hit(quoted)
+    assert not _has_assignment_span(quoted)
+
+
+def test_sesf44_ac4_env_interpolation_not_flagged():
+    """AC-4: a `${VAR:-default}` interpolation is not flagged (both paths).
+
+    `x=${FOO_PASSWORD:-default}` matches key `FOO_PASSWORD`, value `-default` --
+    the `${` precedes the key, so a value-shape check alone misses it. RED until
+    D-2's interpolation-span check lands.
+    """
+    line = "x=${FOO_PASSWORD:-default}"
+    _, hits = redact(line, mode="enforce")
+    assert not any(h.tier == 2 for h in hits)
+    assert not _has_assignment_span(line)
+    # Sanity: a pure `${VAR}` value (no default) is already unflagged (the value
+    # capture stops at `{`, leaving a sub-minimum value) -- must stay unflagged.
+    pure = "MY_SECRET=${VALUE}"
+    assert not _has_tier2_hit(pure)
+    assert not _has_assignment_span(pure)
+    # The `${VAR:?error}` (error-if-unset) operator is the same interpolation span.
+    err = "x=${FOO_TOKEN:?missing}"
+    assert not _has_tier2_hit(err)
+    assert not _has_assignment_span(err)
+
+
+# AC-2 / AC-5: genuine secret-bearing keys with a literal value STILL flag.
+# Bare `oauth` is required explicitly -- it is the exact key the D-1 left
+# lookbehind targets. These are positive controls: green on `main` AND after C.
+SESF44_TRUE_POSITIVE_KEYS = [
+    "authorization",
+    "oauth",        # bare -- D-1 lookbehind probe
+    "oauth_token",
+    "auth_token",
+    "auth-token",
+    "authToken",
+    "FOO_API_KEY",
+]
+
+
+@pytest.mark.parametrize("key", SESF44_TRUE_POSITIVE_KEYS)
+def test_sesf44_ac2_ac5_genuine_keys_still_flagged(key):
+    """AC-2/AC-5: genuine secret keys with a literal value STILL flag (both paths)."""
+    line = f'{key}="{SESF44_LITERAL}"'
+    out, hits = redact(line, mode="enforce")
+    assert any(h.tier == 2 for h in hits), f"{key} should still be a Tier-2 hit"
+    assert SESF44_LITERAL not in out  # value masked
+    assert _has_assignment_span(line), f"{key} should still yield an ASSIGNMENT span"
+
+
+def test_sesf44_ac2_placeholder_value_still_skipped():
+    """AC-2 consistency: a genuine key with a placeholder value stays unflagged."""
+    line = "authorization=none"
+    assert not _has_tier2_hit(line)
+    assert not _has_assignment_span(line)
