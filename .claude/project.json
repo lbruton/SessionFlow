@@ -3,5 +3,9 @@
   "tag": "sessionflow",
   "issuePrefix": "SESF",
   "issueTag": "sessionflow",
-  "cachePrefix": "sessionflow"
+  "cachePrefix": "sessionflow",
+  "plane": {
+    "workspace": "lbruton",
+    "projectId": "3835ead1-4cc4-4f89-8145-4923068f7403"
+  }
 }
