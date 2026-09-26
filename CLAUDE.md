@@ -26,7 +26,7 @@ Semantic search over Claude Code session transcripts. Independent project, origi
 - **Milvus Lite gRPC keepalive** — only applies when `SESSIONFLOW_MILVUS_URI` is unset (Lite fallback). Standalone doesn't need the workaround.
 - **Backfill checkpoints every 100 files** — `index_state.json` saves progress. Restart picks up from last checkpoint.
 - **`project_root` for `-/` transcripts** — generic bucket sessions have `cwd="/"`. No project tagging possible.
-- **Never create GitHub issues** — all issues go to Plane via `/issue` (which dispatches on `.specflow/config.json` `issue_backend`).
+- **Never create GitHub issues** — all issues go to Plane via `/issue` (which reads the `plane` block in `.claude/project.json`).
 - **Provider backfill controls (SESF-6)** — multi-harness ingestion (`codex`, `opencode`, `antigravity_cli`, `antigravity_desktop`) shares one embedding budget. Tune via `SESSIONFLOW_EMBED_BATCH_SIZE`, `SESSIONFLOW_EMBED_COOLDOWN_MS` (floor 200ms — MLX Metal SIGSEGVs lower), `SESSIONFLOW_BACKFILL_MODE` (`recent`|`incremental`|`full`), `SESSIONFLOW_BACKFILL_MAX_TURNS_PER_RUN`, `SESSIONFLOW_BACKFILL_MAX_FILES_PER_RUN`, `SESSIONFLOW_BACKFILL_RECENT_DAYS`, `SESSIONFLOW_BACKFILL_PAUSED`. Pause/resume + per-provider control via `python cleanup.py backfill {status|pause|resume|enqueue} [--provider <name>]`. Queue state is durable across restarts.
 - **Claude Desktop / CoWork is probe-only** — `claude-code-sessions/**/local_*.json` is discovered and surfaced in status output, but full turn content is not yet indexed. Do not claim searchable support until the parser spike lands.
 - **Hosted embeddings deferred** — SESF-6 keeps embedding fully local (MLX). No hosted/OpenAI setup steps, credentials, or collections exist. Future hosted path would require a separate identity/collection to avoid vector mixing.
@@ -57,7 +57,7 @@ Pre-PR:
 
 Issues use the `SESF-` prefix and are tracked in Plane: <https://plane.lbruton.cc/lbruton/projects/3835ead1-4cc4-4f89-8145-4923068f7403/>.
 
-Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) on 2026-04-26 with the Plane migration. Pre-migration markdown archived at `DocVault/Archive/Issues-Pre-Plane/SessionFlow/`. New issues are created via `/issue` (which dispatches on `.specflow/config.json` `issue_backend`) or directly via `mcp__plane__create_issue`.
+Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) on 2026-04-26 with the Plane migration. Pre-migration markdown archived at `DocVault/Archive/Issues-Pre-Plane/SessionFlow/`. New issues are created via `/issue` (which reads the `plane` block in `.claude/project.json`) or directly via `mcp__plane__create_issue`.
 
 ## Git Rules
 
