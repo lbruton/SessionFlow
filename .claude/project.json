@@ -7,5 +7,9 @@
   "plane": {
     "workspace": "lbruton",
     "projectId": "3835ead1-4cc4-4f89-8145-4923068f7403"
+  },
+  "mem0": {
+    "userId": "lbruton",
+    "project": "sessionflow"
   }
 }
