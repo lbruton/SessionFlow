@@ -41,6 +41,7 @@ reviews:
 
   # Global path filters — exclude noise
   path_filters:
+    - "!DocVault/**"   # in-repo Obsidian vault (DEVS-78)
     - "!**/node_modules/**"
     - "!**/dist/**"
     - "!**/build/**"

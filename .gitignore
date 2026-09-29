@@ -7,3 +7,8 @@ __pycache__/
 *.egg-info/
 mcp-config-template.json
 .mcp.json
+
+# DocVault (Obsidian) per-machine state
+DocVault/.obsidian/workspace*.json
+DocVault/.obsidian/graph.json
+DocVault/.trash/
