@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "detectedAt": "2026-06-06T01:46:26.812Z",
+  "testing": {
+    "framework": null,
+    "command": null,
+    "configFile": null,
+    "testDir": "tests/",
+    "hasBrowserbase": false
+  },
+  "versioning": {
+    "hasVersionLock": false,
+    "lockFile": null,
+    "packageVersion": null,
+    "userDeclinedSetup": false
+  },
+  "changelog": {
+    "hasChangelog": true,
+    "file": "CHANGELOG.md",
+    "format": "keepachangelog",
+    "docvaultFallback": false
+  }
+}
