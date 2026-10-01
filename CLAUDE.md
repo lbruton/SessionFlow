@@ -57,7 +57,7 @@ Pre-PR:
 
 Issues use the `SESF-` prefix and are tracked in Plane: <https://plane.lbruton.cc/lbruton/projects/3835ead1-4cc4-4f89-8145-4923068f7403/>.
 
-Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) on 2026-04-26 with the Plane migration. Pre-migration markdown archived at `DocVault/Archive/Issues-Pre-Plane/SessionFlow/`. New issues are created via `/issue` (which reads the `plane` block in `.claude/project.json`) or directly via `mcp__plane__create_issue`.
+Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) on 2026-04-26 with the Plane migration. Pre-migration markdown archived at `DocVault/Archive/Issues-Pre-Plane/SessionFlow/`. New issues are created via `/issue` (which reads the `plane` block in `.claude/project.json`) or directly via `mcp__plane__workitem` (`action: "create"`).
 
 ## Git Rules
 
