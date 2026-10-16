@@ -12,5 +12,17 @@
     "userId": "lbruton",
     "project": "sessionflow"
   },
-  "infisical": null
+  "infisical": null,
+  "kind": "code",
+  "harnesses": {
+    "claude": true,
+    "codex": true
+  },
+  "skills": {
+    "profiles": [
+      "code-core"
+    ],
+    "extra": [],
+    "exclude": []
+  }
 }
