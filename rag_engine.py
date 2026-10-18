@@ -1148,8 +1148,13 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     vector_results = []
     if results and results[0]:
         for hit in results[0]:
+            # Milvus COSINE reports similarity (higher = closer) in "distance";
+            # convert so the result's distance is a true distance (SESF-55).
             vector_results.append(
-                _row_to_result(hit["entity"], provider_defaults, distance=hit["distance"])
+                _row_to_result(
+                    hit["entity"], provider_defaults,
+                    distance=1.0 - hit["distance"],
+                )
             )
 
     # --- FTS5 keyword search ---
@@ -1830,7 +1835,6 @@ def _count_milvus_turns(db_path=None, project_root=None) -> int:
             collection_name=COLLECTION_NAME,
             filter=filter_expr or "",
             output_fields=["count(*)"],
-            limit=1,
         )
         return int(res[0]["count(*)"]) if res else 0
 
