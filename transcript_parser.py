@@ -386,8 +386,37 @@ def load_index_state() -> Dict:
             state = {}
 
     _migrate_per_project_states(state)
+    _canonicalize_transcript_keys(state)
     _ensure_provider_cursor_state(state)
     return state
+
+
+def _canonicalize_transcript_keys(state: Dict):
+    """Re-key legacy ``transcripts`` entries by realpath (SESF-56).
+
+    Older backfills keyed offsets by the ``~/.claude/projects`` symlink alias, while
+    the watcher now looks them up by realpath. Without this, an alias-keyed entry
+    reads as offset 0 and the transcript is re-parsed from the start. When an alias
+    and a real key both exist, the furthest offset wins.
+    """
+    transcripts = state.get("transcripts")
+    if not isinstance(transcripts, dict):
+        return
+    merged: Dict[str, Dict] = {}
+    for path, entry in transcripts.items():
+        if not isinstance(entry, dict):
+            merged.setdefault(path, entry)
+            continue
+        key = os.path.realpath(path)
+        current = merged.get(key)
+        if current is None:
+            merged[key] = dict(entry)
+            continue
+        if entry.get("last_byte_offset", 0) > current.get("last_byte_offset", 0):
+            current["last_byte_offset"] = entry["last_byte_offset"]
+        if not current.get("project_root") and entry.get("project_root"):
+            current["project_root"] = entry["project_root"]
+    state["transcripts"] = merged
 
 
 def _ensure_provider_cursor_state(state: Dict):

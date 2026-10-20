@@ -86,6 +86,49 @@ def test_backfill_keys_state_by_real_path(aliased_projects, monkeypatch):
         os.path.realpath(real / "-Users-me-proj" / "abc.jsonl")]
 
 
+def test_filtered_backfill_includes_archived_sessions(aliased_projects, monkeypatch):
+    real, _alias = aliased_projects
+    archived = real / "-Users-me-proj" / "archived-sessions" / "old.jsonl"
+    archived.parent.mkdir()
+    archived.write_text('{"x": 1}\n')
+    (real / "-Users-me-proj" / "abc.jsonl").write_text('{"x": 1}\n')
+    state = {"transcripts": {}}
+    parsed = []
+    monkeypatch.setattr(file_watcher.transcript_parser, "load_index_state", lambda: state)
+    monkeypatch.setattr(file_watcher.transcript_parser, "save_index_state", lambda s: None)
+    monkeypatch.setattr(file_watcher.transcript_parser, "parse_transcript",
+                        lambda path, sid, start_offset=0: (parsed.append(sid) or [], 0))
+    monkeypatch.setattr(file_watcher.transcript_parser, "detect_project_root", lambda p: "")
+
+    watcher = file_watcher.GlobalTranscriptWatcher(db_path="unused")
+    asyncio.run(watcher.backfill(slug_filter="-Users-me-proj"))
+
+    assert sorted(parsed) == ["abc", "old"]
+
+
+def test_load_index_state_migrates_alias_keys_keeping_offsets(aliased_projects, tmp_path,
+                                                               monkeypatch):
+    import json
+    import transcript_parser
+
+    real, alias = aliased_projects
+    real_key = os.path.realpath(real / "-Users-me-proj" / "abc.jsonl")
+    alias_key = str(alias / "-Users-me-proj" / "abc.jsonl")
+    state_path = tmp_path / "index_state.json"
+    state_path.write_text(json.dumps({"transcripts": {
+        alias_key: {"last_byte_offset": 42, "project_root": "/p"},
+        real_key: {"last_byte_offset": 10},
+    }}))
+    monkeypatch.setattr(transcript_parser, "_STATE_PATH", state_path)
+    monkeypatch.setattr(transcript_parser, "_migrated", True)
+
+    state = transcript_parser.load_index_state()
+
+    assert list(state["transcripts"]) == [real_key]
+    assert transcript_parser.get_transcript_offset(state, real_key) == 42
+    assert state["transcripts"][real_key]["project_root"] == "/p"
+
+
 def test_archived_sessions_layout_is_a_main_transcript(aliased_projects):
     real, _alias = aliased_projects
     archived = real / "-Users-me-proj" / "archived-sessions" / "old.jsonl"

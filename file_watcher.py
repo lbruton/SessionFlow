@@ -359,7 +359,7 @@ class GlobalTranscriptWatcher:
         if slug_filter:
             slug_dir = _CLAUDE_PROJECTS / slug_filter
             if slug_dir.is_dir():
-                transcripts = list(slug_dir.glob("*.jsonl"))
+                transcripts = list(slug_dir.rglob("*.jsonl"))
             else:
                 return 0
         else:
