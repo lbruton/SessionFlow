@@ -42,7 +42,7 @@ from provider_adapters import LEGAL_PROVIDERS, is_valid_issue_token
 from backfill_manager import BackfillManager
 from embedding_control import EmbeddingIdentity, get_embedding_budget
 from provider_antigravity import AntigravityAdapter
-from provider_claude import ClaudeCodeCliAdapter, ClaudeDesktopCoworkProbe
+from provider_claude import ClaudeCodeCliAdapter
 from provider_codex import CodexAdapter
 from provider_opencode import OpenCodeAdapter
 from provider_ingestion import ProviderIngestionService, process_startup_provider_backfill
@@ -506,7 +506,6 @@ def _provider_health(deep: bool = False) -> dict:
         return _provider_health_cache
     providers = [
         ClaudeCodeCliAdapter(),
-        ClaudeDesktopCoworkProbe(),
         CodexAdapter(),
         OpenCodeAdapter(),
         AntigravityAdapter(source_kind="cli"),
@@ -680,7 +679,7 @@ async def backfill_control_endpoint(request: Request) -> JSONResponse:
         elif isinstance(providers_arg, list):
             providers = [str(p).strip() for p in providers_arg if str(p).strip()]
         else:
-            providers = sorted(LEGAL_PROVIDERS - {"claude_desktop_cowork"})
+            providers = sorted(LEGAL_PROVIDERS)
         skipped: list[str] = []
         for provider in providers:
             try:

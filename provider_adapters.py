@@ -16,7 +16,6 @@ import re
 
 LEGAL_PROVIDERS = frozenset({
     "claude_code_cli",
-    "claude_desktop_cowork",
     "codex",
     "opencode",
     "antigravity_cli",
@@ -25,7 +24,6 @@ LEGAL_PROVIDERS = frozenset({
 
 LEGAL_SOURCE_KINDS = frozenset({
     "claude_code_jsonl",
-    "claude_desktop_sessions",
     "codex_rollout_jsonl",
     "opencode_storage",
     "antigravity_cli_transcript_jsonl",
@@ -80,7 +78,6 @@ LEGAL_HEALTH_STATUSES = frozenset({
     "missing",
     "warning",
     "partial",
-    "probe-only",
     "error",
 })
 

@@ -348,7 +348,7 @@ def cmd_backfill(args) -> int:
                 providers = [p.strip() for p in providers_arg.split(",") if p.strip()]
             else:
                 from provider_adapters import LEGAL_PROVIDERS
-                providers = sorted(LEGAL_PROVIDERS - {"claude_desktop_cowork"})
+                providers = sorted(LEGAL_PROVIDERS)
             from provider_ingestion import ProviderIngestionService
             import asyncio
 

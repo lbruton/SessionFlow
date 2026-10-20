@@ -4,6 +4,7 @@ Requirements: 6.6, 6.7, 7, 8.
 """
 
 import importlib
+import json
 import asyncio
 from contextlib import contextmanager
 
@@ -206,3 +207,38 @@ async def test_backfill_run_action_uses_shared_drain_path(stub_rag_engine, tmp_p
         assert response.status_code == 200
         assert '"jobs":1' in payload.replace(" ", "")
         assert drain_kwargs == [{"skip_if_locked": False}]
+
+
+def test_provider_health_covers_every_legal_provider_without_cowork_probe(
+    stub_rag_engine, tmp_path, monkeypatch
+):
+    from provider_adapters import LEGAL_PROVIDERS
+
+    with _backfill_client(stub_rag_engine, tmp_path, monkeypatch) as (http_server, _):
+        health = http_server._provider_health(deep=True)
+
+    assert "claude_desktop_cowork" not in health
+    assert set(health) == set(LEGAL_PROVIDERS)
+
+
+@pytest.mark.anyio
+async def test_backfill_run_defaults_to_every_legal_provider(stub_rag_engine, tmp_path, monkeypatch):
+    from provider_adapters import LEGAL_PROVIDERS
+
+    with _backfill_client(stub_rag_engine, tmp_path, monkeypatch) as (http_server, _):
+        class Request:
+            method = "POST"
+
+            async def json(self):
+                return {"action": "run", "mode": "incremental"}
+
+        async def fake_drain(*args, **kwargs):
+            return {"jobs": 0, "processed_sources": 0, "indexed_turns": 0, "errors": 0}
+
+        monkeypatch.setattr(http_server, "_drain_backfill_once", fake_drain)
+
+        response = await http_server.backfill_control_endpoint(Request())
+        payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["run"]["providers"] == sorted(LEGAL_PROVIDERS)
