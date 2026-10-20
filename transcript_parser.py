@@ -109,6 +109,12 @@ def parse_transcript(
     Returns:
         (turns, new_offset) where turns is a list of dicts ready for rag_engine.add_turns()
         and new_offset is the byte position after the last line read.
+
+        Only newline-terminated lines are consumed. If the file ends in a
+        half-written line (Claude Code mid-write), parsing stops there and
+        new_offset points at its start so the next call re-reads it whole. A
+        user turn still pending at that point is not emitted; new_offset
+        rewinds to its user line so the turn is rebuilt with its reply.
     """
     turns = []
     current_user_text = None
@@ -123,15 +129,25 @@ def parse_transcript(
 
     transcript_file = os.path.basename(transcript_path)
 
-    with open(transcript_path, "r", encoding="utf-8") as f:
+    # Binary mode: offsets are true byte positions, and a tail cut inside a
+    # multi-byte character can't raise before we see the line is incomplete.
+    with open(transcript_path, "rb") as f:
         f.seek(start_offset)
         current_offset = start_offset
+        truncated_tail = False
 
-        for line in f:
-            line_bytes = len(line.encode("utf-8"))
+        for raw_line in f:
+            if not raw_line.endswith(b"\n"):
+                truncated_tail = True
+                break
+
+            line_bytes = len(raw_line)
             current_offset += line_bytes
 
-            line = line.strip()
+            try:
+                line = raw_line.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                continue
             if not line:
                 continue
 
@@ -242,6 +258,11 @@ def parse_transcript(
                         text = block.get("text", "").strip()
                         if text:
                             current_assistant_texts.append(text)
+
+        # Half-written tail with a turn still open: its reply may be the line
+        # being written. Leave the turn unflushed and resume at its user line.
+        if truncated_tail and current_user_text is not None:
+            return turns, current_user_start_byte
 
         # Flush final pending turn
         if current_user_text is not None:
@@ -466,10 +487,24 @@ def set_provider_cursor(state: Dict, provider: str, source_id: str, cursor: Dict
 
 
 def save_index_state(state: Dict):
-    """Save centralized index state to ~/.sessionflow/index_state.json."""
+    """Atomically save centralized index state to ~/.sessionflow/index_state.json.
+
+    Writes a temp file in the same directory, then ``os.replace``s it over the
+    target, so a crash mid-write never truncates the resume cursors. On
+    failure the temp file is removed and the original is left untouched.
+    """
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(_STATE_PATH, "w") as f:
-        json.dump(state, f, indent=2)
+    tmp_path = _STATE_PATH.with_name(f"{_STATE_PATH.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp_path, _STATE_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def get_transcript_offset(state: Dict, transcript_path: str) -> int:
