@@ -97,8 +97,7 @@ sources are preferred; terminal/log fallbacks are not used in this release.
 
 | Provider | Status | Source kind | Notes |
 |----------|--------|-------------|-------|
-| `claude_code_cli` | Searchable | `claude_code_jsonl` (`~/.claude/projects/**/*.jsonl`) | Original SessionFlow source. Watcher + backfill both supported. |
-| `claude_desktop_cowork` | Probe only | `claude_desktop_sessions` (`~/Library/Application Support/Claude/claude-code-sessions/**/local_*.json`) | Discovery surfaces files in health/status output. Full turn-content ingestion deferred pending a parser spike. |
+| `claude_code_cli` | Searchable | `claude_code_jsonl` (`~/.claude/projects/**/*.jsonl`) | Original SessionFlow source. Watcher + backfill both supported. Also covers Claude Desktop Code-tab sessions. |
 | `codex` | Searchable | `codex_rollout_jsonl` | Native rollout JSONL; provider-tagged. |
 | `opencode` | Searchable | `opencode_storage` | Native storage; provider-tagged. |
 | `antigravity_cli` | Searchable | `antigravity_cli_transcript_jsonl` (`brain/<id>/.system_generated/logs/transcript.jsonl`) | Authoritative source per discovery. Sibling `.pb` artifacts are NOT parsed in this release. |
@@ -118,10 +117,16 @@ CLI artifacts as migration context only:
 
 ### Claude Desktop / CoWork
 
+Claude Desktop Code-tab sessions, including former CoWork projects, are
+ordinary Claude Code transcripts under `~/.claude/projects/` and are searchable
+as `claude_code_cli`. The
 `~/Library/Application Support/Claude/claude-code-sessions/**/local_*.json`
-files are discovered and reported in health/status output, but full turn
-content is not yet indexed — a parser spike is required before claiming
-searchable support. Treat it as **probe-only** for now.
+files beside them hold only session metadata (title, `cliSessionId`), so there
+is no separate Desktop provider.
+
+Legacy Cowork agent-mode sessions under
+`~/Library/Application Support/Claude/local-agent-mode-sessions/` are not
+indexed yet.
 
 ## Local resource controls (embedding budget)
 

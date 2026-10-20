@@ -1,4 +1,4 @@
-"""SESF-6 red-phase tests for Claude CLI and Desktop/CoWork sources.
+"""SESF-6 red-phase tests for Claude CLI sources (Desktop/CoWork probe retired in SESF-59).
 
 Requirements: 5, 6.5, 8.
 """
@@ -20,19 +20,9 @@ def test_claude_cli_adapter_preserves_existing_turns_with_provider_metadata(synt
     assert parsed.turns[0]["project_root"]
 
 
-def test_claude_desktop_cowork_probe_is_visible_but_not_searchable(tmp_path):
-    from provider_claude import ClaudeDesktopCoworkProbe
+def test_claude_desktop_cowork_probe_is_retired():
+    # SESF-59: Desktop Code-tab sessions (former CoWork projects included) are
+    # ordinary transcripts under ~/.claude/projects, indexed as claude_code_cli.
+    import provider_claude
 
-    root = tmp_path / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
-    session_dir = root / "synthetic"
-    session_dir.mkdir(parents=True)
-    (session_dir / "local_synthetic.json").write_text('{"probe": true}\n')
-
-    probe = ClaudeDesktopCoworkProbe(root=root)
-    health = probe.health()
-    sources = probe.discover_sources()
-
-    assert health.provider == "claude_desktop_cowork"
-    assert sources
-    assert sources[0].status in {"unsupported", "pending"}
-    assert "probe" in sources[0].reason.lower() or "not searchable" in sources[0].reason.lower()
+    assert not hasattr(provider_claude, "ClaudeDesktopCoworkProbe")

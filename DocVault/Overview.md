@@ -42,12 +42,12 @@ Semantic search over Claude Code session transcripts, expanded in SESF-6 to inge
 
 | Provider | Source kind | Status |
 |----------|-------------|--------|
-| Claude Code CLI | `claude_cli_jsonl` | Native, default |
+| Claude Code CLI | `claude_code_jsonl` | Native, default; also covers Claude Desktop Code-tab sessions (former CoWork projects) |
 | Codex | `codex_rollout_jsonl` | Native; active + archive rollouts merged by logical session |
 | OpenCode | `opencode_storage` | Native; session/message/part records reconstructed; settled-window gate |
 | Antigravity CLI | `antigravity_cli` | Native; JSONL transcripts (sibling `.pb`/`.db` flagged but not parsed) |
 | Antigravity Desktop | `antigravity_desktop` | Native; distinct provider tag from CLI variant |
-| Claude Desktop / CoWork | n/a | **Probe-only** — discovered, not indexed |
+| Legacy Cowork agent mode | n/a | Not indexed yet (`local-agent-mode-sessions/`, SESF-60) |
 | Legacy Gemini CLI | `legacy_gemini_history` | Reserved; out of scope (use Antigravity instead) |
 
 Hosted/OpenAI embeddings are **explicitly deferred**. Embedding stays local MLX (EmbeddingGemma) by policy.

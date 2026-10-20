@@ -18,7 +18,6 @@ def test_provider_source_validates_legal_metadata_and_canonical_path(tmp_path):
 
     assert {
         "claude_code_cli",
-        "claude_desktop_cowork",
         "codex",
         "opencode",
         "antigravity_cli",
@@ -46,6 +45,27 @@ def test_provider_source_validates_legal_metadata_and_canonical_path(tmp_path):
 
     assert source.path == str(link_path)
     assert Path(source.canonical_path) == real_path.resolve()
+
+
+def test_retired_cowork_probe_is_not_a_legal_provider_or_source_kind():
+    from provider_adapters import (
+        LEGAL_HEALTH_STATUSES,
+        LEGAL_PROVIDERS,
+        LEGAL_SOURCE_KINDS,
+    )
+
+    assert "claude_desktop_cowork" not in LEGAL_PROVIDERS
+    assert "claude_desktop_sessions" not in LEGAL_SOURCE_KINDS
+    assert "probe-only" not in LEGAL_HEALTH_STATUSES
+
+
+def test_backfill_enqueue_rejects_retired_cowork_provider(tmp_path):
+    from backfill_manager import BackfillManager
+
+    manager = BackfillManager(tmp_path / "backfill_state.json")
+
+    with pytest.raises(ValueError, match="Unknown provider"):
+        manager.enqueue_provider_backfill(provider="claude_desktop_cowork", mode="recent")
 
 
 def test_provider_source_rejects_unknown_provider(tmp_path):

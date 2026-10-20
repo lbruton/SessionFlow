@@ -66,7 +66,7 @@ async def main() -> int:
             f"{adapter.provider}: source={Path(source.path).name} "
             f"turns={len(result.turns)} indexed={indexed} errors={len(result.errors)}"
         )
-        if not result.turns and source.provider != "claude_desktop_cowork":
+        if not result.turns:
             exit_code = 1
     return exit_code
 
