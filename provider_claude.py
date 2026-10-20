@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -116,3 +118,92 @@ class ClaudeCodeCliAdapter:
             roots=[str(self.projects_root)],
         )
 
+
+
+class ClaudeCoworkLegacyAdapter(ClaudeCodeCliAdapter):
+    """Adapter for legacy Claude Cowork agent-mode transcripts (SESF-60).
+
+    Each agent-mode session ran Claude Code with a sandboxed config dir, so its
+    transcripts are ordinary Claude Code JSONL under
+    ``<root>/<space>/<account>/local_<id>/.claude/projects/<slug>/``. Parsing is
+    inherited from :class:`ClaudeCodeCliAdapter`; only discovery and the
+    project tag differ. The transcript's own ``cwd`` is a VM path
+    (``/sessions/<name>``), so ``project_root`` comes from the sibling
+    ``local_<id>.json`` metadata instead. Only ``userSelectedFolders`` and
+    ``cwd`` are read from it; the rest (system prompt, account details) is
+    never touched.
+    """
+
+    provider = "claude_cowork_legacy"
+    source_kind = "claude_cowork_legacy_jsonl"
+
+    def __init__(self, root: str | Path | None = None):
+        """Set the sessions root.
+
+        Args:
+            root: Directory holding the agent-mode sessions. Defaults to
+                ``$SESSIONFLOW_COWORK_LEGACY_ROOT``, else Claude Desktop's
+                ``local-agent-mode-sessions`` folder. Point the env var at a
+                backup copy if Desktop has moved or pruned the original.
+        """
+        if root is None:
+            root = os.environ.get("SESSIONFLOW_COWORK_LEGACY_ROOT") or (
+                Path.home() / "Library" / "Application Support" / "Claude" / "local-agent-mode-sessions"
+            )
+        super().__init__(projects_root=root)
+        self.root = self.projects_root
+
+    def discover_sources(self) -> List[ProviderSource]:
+        """Enumerate session transcripts, including subagent ones, skipping ``audit.jsonl``."""
+        if not self.root.exists():
+            return []
+        project_roots: Dict[Path, str] = {}
+        sources = []
+        for path in sorted(self.root.glob("*/*/local_*/.claude/projects/**/*.jsonl")):
+            session_dir = self._session_dir(path)
+            if session_dir not in project_roots:
+                project_roots[session_dir] = self._project_root_from_metadata(session_dir)
+            logical_session_id = path.stem
+            canonical_path = canonicalize_path(path)
+            sources.append(ProviderSource(
+                provider=self.provider,
+                source_kind=self.source_kind,
+                source_class="native",
+                source_id=build_source_id(self.provider, logical_session_id, canonical_path),
+                logical_session_id=logical_session_id,
+                path=str(path),
+                canonical_path=canonical_path,
+                project_root=project_roots[session_dir],
+                timestamp="",
+                status="eligible",
+            ))
+        return sources
+
+    def _session_dir(self, transcript: Path) -> Path:
+        # <root>/<space>/<account>/local_<id>/.claude/projects/...
+        return self.root.joinpath(*transcript.relative_to(self.root).parts[:3])
+
+    def _project_root_from_metadata(self, session_dir: Path) -> str:
+        meta_path = session_dir.with_name(session_dir.name + ".json")
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "unknown"
+        if not isinstance(meta, dict):
+            return "unknown"
+        for folder in meta.get("userSelectedFolders") or []:
+            if isinstance(folder, str) and folder.strip():
+                return folder.strip()
+        cwd = meta.get("cwd")
+        if isinstance(cwd, str) and cwd.startswith("/") and not self._is_sandbox_path(cwd):
+            return cwd
+        return "unknown"
+
+    def _is_sandbox_path(self, path: str) -> bool:
+        if path == "/sessions" or path.startswith("/sessions/"):
+            return True
+        try:
+            Path(path).relative_to(self.root)
+        except ValueError:
+            return False
+        return True

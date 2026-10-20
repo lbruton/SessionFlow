@@ -16,6 +16,7 @@ import re
 
 LEGAL_PROVIDERS = frozenset({
     "claude_code_cli",
+    "claude_cowork_legacy",
     "codex",
     "opencode",
     "antigravity_cli",
@@ -24,6 +25,7 @@ LEGAL_PROVIDERS = frozenset({
 
 LEGAL_SOURCE_KINDS = frozenset({
     "claude_code_jsonl",
+    "claude_cowork_legacy_jsonl",
     "codex_rollout_jsonl",
     "opencode_storage",
     "antigravity_cli_transcript_jsonl",

@@ -14,7 +14,7 @@ import transcript_parser
 from backfill_manager import BackfillJob, BackfillManager
 from embedding_control import get_embedding_budget
 from provider_antigravity import AntigravityAdapter
-from provider_claude import ClaudeCodeCliAdapter
+from provider_claude import ClaudeCodeCliAdapter, ClaudeCoworkLegacyAdapter
 from provider_codex import CodexAdapter
 from provider_opencode import OpenCodeAdapter
 
@@ -25,6 +25,7 @@ def default_provider_adapters() -> Dict[str, object]:
     antigravity_desktop = AntigravityAdapter(source_kind="desktop")
     return {
         "claude_code_cli": ClaudeCodeCliAdapter(),
+        "claude_cowork_legacy": ClaudeCoworkLegacyAdapter(),
         "codex": CodexAdapter(),
         "opencode": OpenCodeAdapter(),
         antigravity_cli.provider: antigravity_cli,
