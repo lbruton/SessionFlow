@@ -31,7 +31,10 @@ _watcher_config = {
     'debounce_seconds': float(os.getenv('SESSIONFLOW_WATCH_DEBOUNCE', '2.0')),
 }
 
-_CLAUDE_PROJECTS = Path.home() / ".claude" / "projects"
+# Resolved once: ~/.claude/projects is often a symlink, and FSEvents reports the
+# real path. Offsets in index_state.json are keyed by path, so every transcript
+# path is normalised with os.path.realpath or one file is parsed once per alias.
+_CLAUDE_PROJECTS = Path(os.path.realpath(Path.home() / ".claude" / "projects"))
 _SLUG_MAP_PATH = Path.home() / ".sessionflow" / "slug_map.json"
 
 
@@ -76,18 +79,16 @@ def _slug_from_transcript_path(transcript_path: str) -> Optional[str]:
 
     Transcript paths are like:
       ~/.claude/projects/{slug}/{session_id}.jsonl
+      ~/.claude/projects/{slug}/archived-sessions/{session_id}.jsonl
+    Both sides are realpath-resolved, so a symlinked projects root still matches.
     """
     try:
-        path = Path(transcript_path)
-        projects_str = str(_CLAUDE_PROJECTS)
-        path_str = str(path.parent)
-        if path_str.startswith(projects_str):
-            relative = path_str[len(projects_str):].strip("/")
-            # The slug is the first path component
-            return relative.split("/")[0] if relative else None
-    except Exception:
-        pass
-    return None
+        projects = Path(os.path.realpath(_CLAUDE_PROJECTS))
+        relative = Path(os.path.realpath(transcript_path)).parent.relative_to(projects)
+        # The slug is the first path component
+        return relative.parts[0] if relative.parts else None
+    except (ValueError, OSError):
+        return None
 
 
 def register_project(project_root: str):
@@ -151,6 +152,7 @@ class TranscriptChangeHandler(FileSystemEventHandler):
         return path.endswith('.jsonl')
 
     def _enqueue(self, path: str):
+        path = os.path.realpath(path)
         try:
             self.loop.call_soon_threadsafe(
                 self.change_queue.put_nowait, path
@@ -365,7 +367,7 @@ class GlobalTranscriptWatcher:
 
         needs_indexing = []
         for t in transcripts:
-            path = str(t)
+            path = os.path.realpath(t)
             offset = transcript_parser.get_transcript_offset(state, path)
             try:
                 file_size = t.stat().st_size
