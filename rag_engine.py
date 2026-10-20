@@ -333,6 +333,36 @@ def _needs_input_remap() -> bool:
     return "gemma" in _MODEL_NAME
 
 
+def _key_padding_mask(attention_mask):
+    """Turn a (B, L) 0/1 tokenizer mask into a (B, 1, L, L) boolean SDPA mask.
+
+    True marks a real key token. mx.fast.scaled_dot_product_attention treats a
+    float mask as additive, so the raw 0/1 mask that mlx-embeddings passes
+    through only nudges padded keys down by 1 logit (SESF-57).
+    """
+    import mlx.core as mx
+
+    keys = attention_mask.astype(mx.bool_)[:, None, None, :]
+    length = attention_mask.shape[-1]
+    return mx.broadcast_to(keys, (keys.shape[0], 1, length, length))
+
+
+def _embed_gemma(model, input_ids, attention_mask):
+    """Masked bidirectional forward for gemma3_text, mirroring Model.__call__.
+
+    Same layers, dense projection, mean pooling and normalization as
+    mlx-embeddings, but padded keys are excluded from attention, so a
+    document's vector no longer depends on the other texts in its batch.
+    A batch of one has an all-True mask and matches the library output.
+    """
+    from mlx_embeddings.models.base import mean_pooling, normalize_embeddings
+
+    out = model.model(input_ids, _key_padding_mask(attention_mask))
+    for dense in model.dense:
+        out = dense(out)
+    return normalize_embeddings(mean_pooling(out, attention_mask))
+
+
 def embed_texts(texts: List[str], is_query: bool = False) -> List[List[float]]:
     """Embed texts using the configured model. Adds model-specific prefix."""
     model, tokenizer = get_model()
@@ -346,12 +376,15 @@ def embed_texts(texts: List[str], is_query: bool = False) -> List[List[float]]:
             prefixed, return_tensors="mlx", padding=True,
             truncation=True, max_length=_MODEL_CFG["max_tokens"],
         )
-        output = model(encoded["input_ids"], attention_mask=encoded.get("attention_mask"))
+        attention_mask = encoded.get("attention_mask")
+        if attention_mask is None:
+            attention_mask = mx.ones(encoded["input_ids"].shape)
+        text_embeds = _embed_gemma(model, encoded["input_ids"], attention_mask)
     else:
-        output = mlx_generate(model, tokenizer, texts=prefixed,
-                              max_length=_MODEL_CFG["max_tokens"])
+        text_embeds = mlx_generate(model, tokenizer, texts=prefixed,
+                                   max_length=_MODEL_CFG["max_tokens"]).text_embeds
 
-    embeddings = output.text_embeds.tolist()
+    embeddings = text_embeds.tolist()
     mx.clear_cache()
     return embeddings
 
