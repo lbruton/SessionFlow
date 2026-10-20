@@ -12,12 +12,15 @@ Usage:
     cleanup.py delete      --branch <name>                   # Delete all turns for a branch
     cleanup.py reset                                         # Drop everything and start fresh
     cleanup.py stats       [--project <root>]                # Show index statistics
+    cleanup.py reembed     {plan|run|drive|status|verify}    # SESF-57 in-place re-embed
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib import error, request
 
@@ -465,6 +468,106 @@ def _print_sanitize_report(report) -> None:
         print(f"\nAudit log: {report.audit_path}")
 
 
+def cmd_reembed(args) -> int:
+    """Drive the SESF-57 in-place re-embed (see :mod:`reembed`).
+
+    ``plan`` is read-only and ``status`` prints the checkpoint. ``run`` processes
+    one chunk in this process, and ``drive`` spawns one ``run`` subprocess per chunk
+    with idle gaps, so no process outlives the MLX Metal crash window and this
+    parent never loads MLX itself. ``run`` and ``drive`` refuse without ``--yes``,
+    before any read or write. ``verify`` compares stored vectors with fresh
+    single-text embeddings and writes nothing.
+
+    Args:
+        args: Parsed argparse namespace for the ``reembed`` subcommand.
+
+    Returns:
+        A process exit code: ``0`` on success, ``1`` on refusal, error, or a
+        failed verify.
+    """
+    import reembed
+
+    action = args.action
+    if action in ("run", "drive") and not args.yes:
+        print(f"Refusing to {action}: confirmation required. Re-run with --yes.",
+              file=sys.stderr)
+        return 1
+
+    if action == "status":
+        print(json.dumps(reembed.status(), indent=2))
+        return 0
+
+    if action == "plan":
+        _print_reembed_report(reembed.plan(db_path=get_db_path()))
+        return 0
+
+    if action == "run":
+        report = reembed.run(
+            confirmed=True,
+            max_minutes=args.max_minutes,
+            max_turns=args.max_turns,
+            restart=args.restart,
+            db_path=get_db_path(),
+        )
+        _print_reembed_report(report)
+        return 0 if report.status in ("done", "paused") else 1
+
+    if action == "verify":
+        result = reembed.verify(sample=args.sample, threshold=args.threshold,
+                                db_path=get_db_path())
+        print(f"Checked:   {result.checked}")
+        print(f"Passed:    {result.passed} (cos >= {result.threshold})")
+        print(f"Min cos:   {result.min_cos:.6f}")
+        print(f"Mean cos:  {result.mean_cos:.6f}")
+        return 0 if result.checked and result.passed == result.checked else 1
+
+    # drive
+    cmd_base = [sys.executable, str(Path(__file__).resolve()), "reembed", "run", "--yes",
+                "--max-minutes", str(float(args.chunk_minutes))]
+    failures = 0
+    first = True
+    while True:
+        cmd = list(cmd_base)
+        if first and args.restart:
+            cmd.append("--restart")
+        first = False
+        print(f"[reembed drive] starting chunk: {' '.join(cmd[2:])}", flush=True)
+        result = subprocess.run(cmd, check=False)
+        state_status = reembed.status().get("status")
+        if result.returncode == 0:
+            failures = 0
+            if state_status == "done":
+                print("[reembed drive] complete.")
+                return 0
+        else:
+            failures += 1
+            print(f"[reembed drive] chunk exited with {result.returncode} "
+                  f"({failures}/{args.max_failures} consecutive failures)", file=sys.stderr)
+            if failures >= args.max_failures:
+                print("[reembed drive] giving up; resume later with the same command.",
+                      file=sys.stderr)
+                return 1
+        gap = float(args.gap_minutes) * 60
+        print(f"[reembed drive] idling {gap:.0f}s before the next chunk", flush=True)
+        time.sleep(gap)
+
+
+def _print_reembed_report(report) -> None:
+    """Print a re-embed report's counters."""
+    print(f"Status:    {report.status}")
+    print(f"Total:     {report.total}")
+    print(f"Done:      {report.done}")
+    print(f"Missing:   {report.missing}")
+    print(f"Errors:    {report.errors}")
+    print(f"Cursor:    {report.cursor}")
+    if report.status == "dry-run":
+        print(f"Estimate:  {report.estimated_seconds / 3600:.1f} h of compute")
+    if report.backup_path:
+        print(f"Backup:    {report.backup_path}")
+    if report.message:
+        print(f"Note:      {report.message}")
+
+
 def build_parser():
     """Build the argparse parser for the cleanup CLI subcommands."""
     parser = argparse.ArgumentParser(
@@ -562,6 +665,41 @@ def build_parser():
         help="Comma-separated provider list (default: all enabled providers).",
     )
 
+    # reembed (SESF-57)
+    p_reembed = subparsers.add_parser(
+        "reembed",
+        help="Re-embed every stored vector in place after the SESF-57 padding fix",
+    )
+    reembed_sub = p_reembed.add_subparsers(dest="action", required=True)
+    reembed_sub.add_parser("plan", help="Show what a run would do (read-only)")
+    reembed_sub.add_parser("status", help="Print the re-embed checkpoint")
+    p_rrun = reembed_sub.add_parser("run", help="Re-embed one chunk in this process")
+    p_rrun.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
+    p_rrun.add_argument("--max-minutes", type=float, default=None,
+                        help="Stop this chunk after N minutes")
+    p_rrun.add_argument("--max-turns", type=int, default=None,
+                        help="Stop this chunk after N turns")
+    p_rrun.add_argument("--restart", action="store_true",
+                        help="Discard the checkpoint and take a fresh snapshot")
+    p_rdrive = reembed_sub.add_parser(
+        "drive", help="Run chunks in fresh processes with idle gaps until done",
+    )
+    p_rdrive.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
+    p_rdrive.add_argument("--chunk-minutes", type=float, default=35.0,
+                          help="Wall-time cap per chunk process (default 35)")
+    p_rdrive.add_argument("--gap-minutes", type=float, default=10.0,
+                          help="Idle time between chunks (default 10)")
+    p_rdrive.add_argument("--max-failures", type=int, default=3,
+                          help="Consecutive chunk crashes before giving up (default 3)")
+    p_rdrive.add_argument("--restart", action="store_true",
+                          help="Discard the checkpoint on the first chunk")
+    p_rverify = reembed_sub.add_parser(
+        "verify", help="Compare stored vectors with fresh single-text embeddings",
+    )
+    p_rverify.add_argument("--sample", type=int, default=200, help="Rows to check")
+    p_rverify.add_argument("--threshold", type=float, default=0.9999,
+                           help="Minimum cosine to pass")
+
     return parser
 
 
@@ -581,6 +719,7 @@ def main():
         "sanitize": cmd_sanitize,
         "status": cmd_status,
         "backfill": cmd_backfill,
+        "reembed": cmd_reembed,
     }
     return_code = commands[args.command](args)
     if return_code is not None:
