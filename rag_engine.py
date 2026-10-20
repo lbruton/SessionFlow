@@ -2172,6 +2172,55 @@ def upsert_document(doc_id: str, *, new_document: str,
     return UpsertResult(milvus_ok, fts_ok)
 
 
+def get_rows_by_ids(ids: List[int], db_path: Optional[str] = None) -> List[dict]:
+    """Fetch full Milvus rows (every field, vector included) for a batch of primary keys.
+
+    Used by the SESF-57 re-embed to read a batch of rows just in time. Rows that
+    no longer exist are simply absent from the result, so callers compare lengths
+    to count missing rows. The integer-only ``id in [...]`` filter needs no escaping.
+
+    Args:
+        ids: Integer primary keys to fetch.
+        db_path: Optional Milvus DB path.
+
+    Returns:
+        The matching rows as plain dicts, in whatever order Milvus returns them.
+    """
+    if not ids:
+        return []
+    with milvus_client(db_path) as client:
+        if not client.has_collection(COLLECTION_NAME):
+            return []
+        rows = client.query(
+            collection_name=COLLECTION_NAME,
+            filter=f"id in [{', '.join(str(int(i)) for i in ids)}]",
+            output_fields=["*"],
+        )
+        return [dict(r) for r in rows]
+
+
+def upsert_rows(rows: List[dict], db_path: Optional[str] = None) -> int:
+    """Upsert complete Milvus rows by primary key in one call, leaving FTS alone.
+
+    The SESF-57 re-embed only replaces ``vector``; ``document`` and every FTS
+    column are unchanged, so unlike ``upsert_document`` there is no FTS rewrite.
+    Each row is replaced atomically by PK, so concurrent searches see it either
+    fully old or fully new.
+
+    Args:
+        rows: Full rows as returned by ``get_rows_by_ids`` (every schema field).
+        db_path: Optional Milvus DB path.
+
+    Returns:
+        The number of rows sent.
+    """
+    if not rows:
+        return 0
+    with milvus_client(db_path) as client:
+        client.upsert(collection_name=COLLECTION_NAME, data=rows)
+    return len(rows)
+
+
 def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> DeleteResult:
     """Delete a single turn from both Milvus (by PK) and FTS (by doc_id).
 
