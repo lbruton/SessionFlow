@@ -98,6 +98,7 @@ sources are preferred; terminal/log fallbacks are not used in this release.
 | Provider | Status | Source kind | Notes |
 |----------|--------|-------------|-------|
 | `claude_code_cli` | Searchable | `claude_code_jsonl` (`~/.claude/projects/**/*.jsonl`) | Original SessionFlow source. Watcher + backfill both supported. Also covers Claude Desktop Code-tab sessions. |
+| `claude_cowork_legacy` | Searchable (one-time) | `claude_cowork_legacy_jsonl` (`~/Library/Application Support/Claude/local-agent-mode-sessions/*/*/local_*/.claude/projects/**/*.jsonl`) | Legacy Cowork agent-mode sessions. Backfill only, enqueued explicitly. |
 | `codex` | Searchable | `codex_rollout_jsonl` | Native rollout JSONL; provider-tagged. |
 | `opencode` | Searchable | `opencode_storage` | Native storage; provider-tagged. |
 | `antigravity_cli` | Searchable | `antigravity_cli_transcript_jsonl` (`brain/<id>/.system_generated/logs/transcript.jsonl`) | Authoritative source per discovery. Sibling `.pb` artifacts are NOT parsed in this release. |
@@ -125,8 +126,18 @@ files beside them hold only session metadata (title, `cliSessionId`), so there
 is no separate Desktop provider.
 
 Legacy Cowork agent-mode sessions under
-`~/Library/Application Support/Claude/local-agent-mode-sessions/` are not
-indexed yet.
+`~/Library/Application Support/Claude/local-agent-mode-sessions/` ran Claude
+Code with a sandboxed config dir. They are ingested by the
+`claude_cowork_legacy` provider, which tags each session with the first folder
+the user selected for it (from the sibling `local_<id>.json`), or `unknown`.
+It is not part of the startup backfill; run it once:
+
+```bash
+python cleanup.py backfill enqueue --provider claude_cowork_legacy --mode full
+```
+
+If Desktop has pruned or moved that folder, set
+`SESSIONFLOW_COWORK_LEGACY_ROOT` to a backup copy first.
 
 ## Local resource controls (embedding budget)
 

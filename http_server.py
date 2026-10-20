@@ -42,7 +42,7 @@ from provider_adapters import LEGAL_PROVIDERS, is_valid_issue_token
 from backfill_manager import BackfillManager
 from embedding_control import EmbeddingIdentity, get_embedding_budget
 from provider_antigravity import AntigravityAdapter
-from provider_claude import ClaudeCodeCliAdapter
+from provider_claude import ClaudeCodeCliAdapter, ClaudeCoworkLegacyAdapter
 from provider_codex import CodexAdapter
 from provider_opencode import OpenCodeAdapter
 from provider_ingestion import ProviderIngestionService, process_startup_provider_backfill
@@ -506,6 +506,7 @@ def _provider_health(deep: bool = False) -> dict:
         return _provider_health_cache
     providers = [
         ClaudeCodeCliAdapter(),
+        ClaudeCoworkLegacyAdapter(),
         CodexAdapter(),
         OpenCodeAdapter(),
         AntigravityAdapter(source_kind="cli"),

@@ -47,7 +47,7 @@ Semantic search over Claude Code session transcripts, expanded in SESF-6 to inge
 | OpenCode | `opencode_storage` | Native; session/message/part records reconstructed; settled-window gate |
 | Antigravity CLI | `antigravity_cli` | Native; JSONL transcripts (sibling `.pb`/`.db` flagged but not parsed) |
 | Antigravity Desktop | `antigravity_desktop` | Native; distinct provider tag from CLI variant |
-| Legacy Cowork agent mode | n/a | Not indexed yet (`local-agent-mode-sessions/`, SESF-60) |
+| Legacy Cowork agent mode | `claude_cowork_legacy_jsonl` | Native; one-time backfill of `local-agent-mode-sessions/` (SESF-60), project from `local_<id>.json` |
 | Legacy Gemini CLI | `legacy_gemini_history` | Reserved; out of scope (use Antigravity instead) |
 
 Hosted/OpenAI embeddings are **explicitly deferred**. Embedding stays local MLX (EmbeddingGemma) by policy.

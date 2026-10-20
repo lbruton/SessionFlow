@@ -9,7 +9,7 @@ from pathlib import Path
 
 import rag_engine
 from provider_antigravity import AntigravityAdapter
-from provider_claude import ClaudeCodeCliAdapter
+from provider_claude import ClaudeCodeCliAdapter, ClaudeCoworkLegacyAdapter
 from provider_codex import CodexAdapter
 from provider_opencode import OpenCodeAdapter
 
@@ -35,6 +35,7 @@ async def main() -> int:
 
     adapters = [
         ClaudeCodeCliAdapter(),
+        ClaudeCoworkLegacyAdapter(),
         CodexAdapter(),
         OpenCodeAdapter(),
         AntigravityAdapter(source_kind="cli"),

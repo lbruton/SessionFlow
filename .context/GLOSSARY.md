@@ -9,7 +9,7 @@ A single conversation message/exchange — the atomic record SessionFlow indexes
 _Avoid_: message, chunk
 
 **Provider**:
-A source harness whose transcripts are ingested: `claude_code_cli`, `codex`, `opencode`, `antigravity_cli`, `antigravity_desktop`.
+A source harness whose transcripts are ingested: `claude_code_cli`, `claude_cowork_legacy`, `codex`, `opencode`, `antigravity_cli`, `antigravity_desktop`.
 _Avoid_: harness (informal), tool
 
 **Source Kind**:
@@ -103,4 +103,4 @@ _Avoid_: save state
 ## Flagged Ambiguities
 
 - "session id" — ambiguous between the raw provider value and the normalized one. Use **Logical Session ID** for the normalized identifier and **Source ID** for the stable composite key.
-- "Claude Desktop" / "CoWork" — Desktop Code-tab sessions, former CoWork projects included, are searchable under **Provider** `claude_code_cli` (via linked `cliSessionId` JSONL). There is no distinct Desktop provider; the `claude_desktop_cowork` probe was retired in SESF-59. Legacy Cowork agent-mode transcripts (`local-agent-mode-sessions/`) are a separate, not-yet-indexed source (SESF-60).
+- "Claude Desktop" / "CoWork" — Desktop Code-tab sessions, former CoWork projects included, are searchable under **Provider** `claude_code_cli` (via linked `cliSessionId` JSONL). There is no distinct Desktop provider; the `claude_desktop_cowork` probe was retired in SESF-59. Legacy Cowork agent-mode transcripts (`local-agent-mode-sessions/`) are a separate **Provider**, `claude_cowork_legacy` (SESF-60).
