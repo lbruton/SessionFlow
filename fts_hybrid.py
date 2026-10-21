@@ -273,6 +273,14 @@ class FTSIndex:
         conn.execute(f"DELETE FROM {self.table_name} WHERE {where_clause}", params)
         conn.commit()
 
+    def select_where(self, conn: sqlite3.Connection, columns: List[str],
+                     where_clause: str, params: tuple) -> List[tuple]:
+        """Return ``columns`` for rows matching an arbitrary WHERE clause."""
+        cols = ", ".join(columns)
+        return conn.execute(
+            f"SELECT {cols} FROM {self.table_name} WHERE {where_clause}", params
+        ).fetchall()
+
     def search(self, query: str, n: int = 15,
                filters: Optional[Dict[str, str]] = None,
                db_path: Optional[str] = None) -> List[Dict]:

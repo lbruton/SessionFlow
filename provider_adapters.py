@@ -9,9 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 import hashlib
+import logging
+import os
 import re
+
+logger = logging.getLogger(__name__)
 
 
 LEGAL_PROVIDERS = frozenset({
@@ -125,6 +129,69 @@ def normalize_timestamp(value: Any) -> str:
         except (OverflowError, OSError, ValueError):
             return ""
     return str(value)
+
+
+PROJECT_PATH_MAP_ENV = "SESSIONFLOW_PROJECT_PATH_MAP"
+
+
+def parse_project_path_map(raw: Optional[str]) -> List[Tuple[str, str]]:
+    """Parse a ``SESSIONFLOW_PROJECT_PATH_MAP`` value into ``(old, new)`` prefixes (SESF-73).
+
+    The format is ``old=>new`` pairs separated by ``;``. Both sides must be
+    absolute paths; trailing slashes are dropped. Malformed entries are skipped
+    with a warning rather than raising, so a typo in the LaunchAgent env can't
+    stop ingestion.
+
+    Args:
+        raw: The env value, or None.
+
+    Returns:
+        The pairs, longest ``old`` prefix first so the most specific one wins.
+    """
+    pairs: List[Tuple[str, str]] = []
+    for entry in (raw or "").split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        old, sep, new = (part.strip() for part in entry.partition("=>"))
+        old, new = old.rstrip("/"), new.rstrip("/")
+        if not sep or not old.startswith("/") or not new.startswith("/"):
+            logger.warning("Ignoring malformed %s entry: %r", PROJECT_PATH_MAP_ENV, entry)
+            continue
+        pairs.append((old, new))
+    return sorted(pairs, key=lambda pair: len(pair[0]), reverse=True)
+
+
+def path_has_prefix(path: str, prefix: str) -> bool:
+    """Whether ``path`` is ``prefix`` or lies under it, on a path-component boundary.
+
+    ``/a/CoWork/x`` is under ``/a/CoWork``; ``/a/CoWorkX`` is not.
+    """
+    prefix = prefix.rstrip("/")
+    path = path.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
+def remap_project_root(path: str, mapping: Optional[List[Tuple[str, str]]] = None) -> str:
+    """Rewrite a project root that moved, using the longest matching prefix (SESF-73).
+
+    Args:
+        path: The project root as recorded by the provider.
+        mapping: ``(old, new)`` pairs from :func:`parse_project_path_map`. When
+            None, ``SESSIONFLOW_PROJECT_PATH_MAP`` is read.
+
+    Returns:
+        The remapped path, or ``path`` unchanged when no prefix matches. Empty
+        and ``unknown`` roots are never remapped.
+    """
+    if not path or path == "unknown":
+        return path
+    if mapping is None:
+        mapping = parse_project_path_map(os.environ.get(PROJECT_PATH_MAP_ENV))
+    for old, new in mapping:
+        if path_has_prefix(path, old):
+            return new + path.rstrip("/")[len(old):]
+    return path
 
 
 def default_provider_metadata() -> Dict[str, str]:
