@@ -23,6 +23,7 @@ Semantic search over agent session transcripts. Independent project, originally 
 ## Operational Gotchas
 
 - **MLX Metal SIGSEGV under sustained load** — EmbeddingGemma crashes GPU driver after ~50min continuous compute. Backfill throttle is 200ms between inserts. Do not reduce below 100ms.
+- **One MLX thread (SESF-72)** — MLX's Metal command encoder is not thread-safe, and two threads evaluating at once SIGSEGV the server. In server mode `rag_engine.embed_texts` routes every caller to the `mlx-embed` executor, and `_mlx_eval_lock` covers inline callers. Async code must use `search_async` / `add_turns_async`, never the blocking `search()` / `add_turns()`, on the event loop.
 - **Milvus Lite gRPC keepalive** — only applies when `SESSIONFLOW_MILVUS_URI` is unset (Lite fallback). Standalone doesn't need the workaround.
 - **Backfill checkpoints every 100 files** — `index_state.json` saves progress. Restart picks up from last checkpoint.
 - **`project_root` for `-/` transcripts** — generic bucket sessions have `cwd="/"`. No project tagging possible.

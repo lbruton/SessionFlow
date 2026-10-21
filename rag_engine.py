@@ -294,6 +294,10 @@ _mlx_core = None
 # The HTTP server preloads the model on a background thread (SESF-70), so a
 # tool call during startup can reach get_model() at the same time.
 _model_load_lock = threading.Lock()
+# MLX's Metal command encoder is not thread-safe. Server mode routes every
+# embed to the mlx-embed thread; this lock also covers inline callers (before
+# init_server_mode, or outside the server), so two evals can never overlap.
+_mlx_eval_lock = threading.Lock()
 
 
 def _load_mlx_runtime():
@@ -373,28 +377,43 @@ def _embed_gemma(model, input_ids, attention_mask):
 
 
 def embed_texts(texts: List[str], is_query: bool = False) -> List[List[float]]:
-    """Embed texts using the configured model. Adds model-specific prefix."""
+    """Embed texts using the configured model. Adds model-specific prefix.
+
+    In server mode the MLX work always runs on the single ``mlx-embed``
+    executor thread, whatever thread calls this. MLX's Metal command encoder is
+    not thread-safe, and two threads evaluating at once SIGSEGV the server
+    (SESF-72). A caller already on that thread, or any caller before
+    ``init_server_mode``, runs inline.
+    """
+    executor = _embed_executor
+    if executor is not None and not threading.current_thread().name.startswith("mlx-embed"):
+        return executor.submit(_embed_texts_local, texts, is_query).result()
+    return _embed_texts_local(texts, is_query)
+
+
+def _embed_texts_local(texts: List[str], is_query: bool = False) -> List[List[float]]:
     model, tokenizer = get_model()
     _, mlx_generate, mx = _load_mlx_runtime()
     prefix = _SEARCH_PREFIX if is_query else _DOCUMENT_PREFIX
     prefixed = [prefix + t for t in texts]
 
-    if _needs_input_remap():
-        # gemma3_text models expect (inputs, attention_mask) not (input_ids, ...)
-        encoded = tokenizer.batch_encode_plus(
-            prefixed, return_tensors="mlx", padding=True,
-            truncation=True, max_length=_MODEL_CFG["max_tokens"],
-        )
-        attention_mask = encoded.get("attention_mask")
-        if attention_mask is None:
-            attention_mask = mx.ones(encoded["input_ids"].shape)
-        text_embeds = _embed_gemma(model, encoded["input_ids"], attention_mask)
-    else:
-        text_embeds = mlx_generate(model, tokenizer, texts=prefixed,
-                                   max_length=_MODEL_CFG["max_tokens"]).text_embeds
+    with _mlx_eval_lock:
+        if _needs_input_remap():
+            # gemma3_text models expect (inputs, attention_mask) not (input_ids, ...)
+            encoded = tokenizer.batch_encode_plus(
+                prefixed, return_tensors="mlx", padding=True,
+                truncation=True, max_length=_MODEL_CFG["max_tokens"],
+            )
+            attention_mask = encoded.get("attention_mask")
+            if attention_mask is None:
+                attention_mask = mx.ones(encoded["input_ids"].shape)
+            text_embeds = _embed_gemma(model, encoded["input_ids"], attention_mask)
+        else:
+            text_embeds = mlx_generate(model, tokenizer, texts=prefixed,
+                                       max_length=_MODEL_CFG["max_tokens"]).text_embeds
 
-    embeddings = text_embeds.tolist()
-    mx.clear_cache()
+        embeddings = text_embeds.tolist()
+        mx.clear_cache()
     return embeddings
 
 
@@ -2555,9 +2574,11 @@ def list_sessions(project_root: Optional[str] = None,
 async def search_async(query: str, n: int = 5, session_id: Optional[str] = None,
                        git_branch: Optional[str] = None, project_root: Optional[str] = None,
                        sort_by: str = "hybrid",
+                       date_from: Optional[str] = None, date_to: Optional[str] = None,
                        provider: Optional[str] = None, source_kind: Optional[str] = None,
+                       issue_id: Optional[str] = None,
                        db_path: Optional[str] = None) -> List[Dict]:
-    """Async search with embed semaphore."""
+    """Async search with embed semaphore; takes the same filters as ``search``."""
     loop = asyncio.get_event_loop()
     # Snapshot globals at function entry (before any await) to close the TOCTOU
     # window: close_server_mode can clear _embed_executor between the semaphore
@@ -2565,20 +2586,23 @@ async def search_async(query: str, n: int = 5, session_id: Optional[str] = None,
     executor = _embed_executor
     semaphore = _embed_semaphore
 
-    if semaphore is None or executor is None:
-        raise RuntimeError(
-            "MLX embed executor not initialized — call init_server_mode() before "
-            "using search_async(). Running embeddings on the default executor can "
-            "hop OS threads and trigger Metal SIGSEGV (see SESF-8)."
+    def run():
+        return search(
+            query, n, session_id=session_id, git_branch=git_branch,
+            project_root=project_root, sort_by=sort_by,
+            date_from=date_from, date_to=date_to,
+            provider=provider, source_kind=source_kind,
+            issue_id=issue_id, db_path=db_path,
         )
+
+    if semaphore is None or executor is None:
+        # Before init_server_mode (server still starting, or no server): keep the
+        # event loop free. _mlx_eval_lock still serializes any MLX work (SESF-72).
+        return await asyncio.to_thread(run)
     async with semaphore:
         return await loop.run_in_executor(
             executor,
-            lambda: search(
-                query, n, session_id=session_id, git_branch=git_branch,
-                project_root=project_root, sort_by=sort_by,
-                provider=provider, source_kind=source_kind, db_path=db_path,
-            ),
+            run,
         )
 
 
