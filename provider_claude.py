@@ -13,8 +13,11 @@ from provider_adapters import (
     ProviderParseResult,
     ProviderSource,
     ProviderWatchRoot,
+    PROJECT_PATH_MAP_ENV,
     build_source_id,
     canonicalize_path,
+    parse_project_path_map,
+    remap_project_root,
 )
 
 
@@ -131,7 +134,8 @@ class ClaudeCoworkLegacyAdapter(ClaudeCodeCliAdapter):
     (``/sessions/<name>``), so ``project_root`` comes from the sibling
     ``local_<id>.json`` metadata instead. Only ``userSelectedFolders`` and
     ``cwd`` are read from it; the rest (system prompt, account details) is
-    never touched.
+    never touched. A folder that has moved since is rewritten through
+    ``SESSIONFLOW_PROJECT_PATH_MAP`` (SESF-73).
     """
 
     provider = "claude_cowork_legacy"
@@ -157,12 +161,16 @@ class ClaudeCoworkLegacyAdapter(ClaudeCodeCliAdapter):
         """Enumerate session transcripts, including subagent ones, skipping ``audit.jsonl``."""
         if not self.root.exists():
             return []
+        # The selected folder may have moved since the session ran (SESF-73).
+        path_map = parse_project_path_map(os.environ.get(PROJECT_PATH_MAP_ENV))
         project_roots: Dict[Path, str] = {}
         sources = []
         for path in sorted(self.root.glob("*/*/local_*/.claude/projects/**/*.jsonl")):
             session_dir = self._session_dir(path)
             if session_dir not in project_roots:
-                project_roots[session_dir] = self._project_root_from_metadata(session_dir)
+                project_roots[session_dir] = remap_project_root(
+                    self._project_root_from_metadata(session_dir), path_map,
+                )
             logical_session_id = path.stem
             canonical_path = canonicalize_path(path)
             sources.append(ProviderSource(

@@ -13,6 +13,8 @@ Usage:
     cleanup.py reset                                         # Drop everything and start fresh
     cleanup.py stats       [--project <root>]                # Show index statistics
     cleanup.py reembed     {plan|run|drive|status|verify}    # SESF-57 in-place re-embed
+    cleanup.py retag-project --from <old> --to <new> [--provider P] [--apply --yes]
+                                                             # SESF-73 move a project root
 """
 
 import argparse
@@ -468,6 +470,77 @@ def _print_sanitize_report(report) -> None:
         print(f"\nAudit log: {report.audit_path}")
 
 
+def cmd_retag_project(args) -> int:
+    """Move indexed turns from an old project root to a new one, without re-embedding (SESF-73).
+
+    Finds every turn whose ``project_root`` is ``--from`` or lies under it
+    (in Milvus and the FTS sidecar), and rewrites it to the same relative path
+    under ``--to`` via ``rag_engine.update_row_metadata``. Dry run by default:
+    it prints the counts and writes nothing. ``--apply`` refuses without
+    ``--yes`` before touching either store. Re-running is safe: moved turns no
+    longer match, and a turn whose FTS rewrite failed is found again.
+
+    Args:
+        args: Parsed argparse namespace with ``from_root``, ``to_root``,
+            ``provider``, ``apply`` and ``yes``.
+
+    Returns:
+        ``0`` on success, ``1`` when the confirmation gate refuses or any turn
+        failed to rewrite, ``2`` for invalid paths.
+    """
+    from provider_adapters import path_has_prefix
+
+    old, new = args.from_root.rstrip("/"), args.to_root.rstrip("/")
+    if not old.startswith("/") or not new.startswith("/"):
+        print("--from and --to must be absolute paths.", file=sys.stderr)
+        return 2
+    if path_has_prefix(new, old):
+        print("--to must not be --from or lie under it.", file=sys.stderr)
+        return 2
+
+    if args.apply and not args.yes:
+        print(
+            "Refusing to apply: confirmation required. Re-run with --yes to "
+            "rewrite the affected turns.",
+            file=sys.stderr,
+        )
+        return 1
+
+    db_path = get_db_path()
+    found = rag_engine.find_doc_ids_by_project_root(
+        old, provider=args.provider, db_path=db_path,
+    )
+    by_root: dict = {}
+    for root in found.values():
+        by_root[root] = by_root.get(root, 0) + 1
+
+    scope = f" (provider {args.provider})" if args.provider else ""
+    print(f"{len(found)} turns under {old}{scope}:")
+    for root, count in sorted(by_root.items()):
+        print(f"  {count:>7}  {root}  ->  {new + root[len(old):]}")
+
+    if not args.apply:
+        print("\nDry run: nothing written. Re-run with --apply --yes to retag.")
+        return 0
+
+    milvus_failed = fts_failed = 0
+    for doc_id, root in found.items():
+        result = rag_engine.update_row_metadata(
+            doc_id, db_path=db_path, project_root=new + root[len(old):],
+        )
+        if not result.milvus_ok:
+            milvus_failed += 1
+        elif not result.fts_ok:
+            fts_failed += 1
+
+    print(f"\nRetagged: {len(found) - milvus_failed - fts_failed}")
+    if milvus_failed or fts_failed:
+        print(f"Milvus failures:     {milvus_failed}")
+        print(f"FTS-only failures:   {fts_failed} (re-run to converge)")
+        return 1
+    return 0
+
+
 def cmd_reembed(args) -> int:
     """Drive the SESF-57 in-place re-embed (see :mod:`reembed`).
 
@@ -637,6 +710,20 @@ def build_parser():
     p_sanitize.add_argument("--session", help="Restrict to a session id")
     p_sanitize.add_argument("--since", help="Restrict to turns at/after an ISO date")
 
+    # retag-project
+    p_retag = subparsers.add_parser(
+        "retag-project",
+        help="Move turns from an old project root to a new one (dry-run by default)",
+    )
+    p_retag.add_argument("--from", dest="from_root", required=True,
+                         help="Old project root; turns under it move too")
+    p_retag.add_argument("--to", dest="to_root", required=True, help="New project root")
+    p_retag.add_argument("--provider", help="Restrict to a provider")
+    p_retag.add_argument("--apply", action="store_true",
+                         help="Rewrite the turns; requires --yes")
+    p_retag.add_argument("--yes", "-y", action="store_true",
+                         help="Confirm an --apply run (required; no interactive prompt)")
+
     # status
     p_status = subparsers.add_parser("status", help="Show provider/backfill/embedding status")
     p_status.add_argument("--project", help="Filter to a specific project root")
@@ -717,6 +804,7 @@ def main():
         "stats": cmd_stats,
         "migrate-schema": cmd_migrate_schema,
         "sanitize": cmd_sanitize,
+        "retag-project": cmd_retag_project,
         "status": cmd_status,
         "backfill": cmd_backfill,
         "reembed": cmd_reembed,

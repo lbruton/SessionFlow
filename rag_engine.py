@@ -51,6 +51,7 @@ from provider_adapters import (
     LEGAL_SOURCE_KINDS,
     default_provider_metadata,
     is_valid_issue_token,
+    path_has_prefix,
 )
 import secret_redaction
 
@@ -2153,51 +2154,168 @@ def upsert_document(doc_id: str, *, new_document: str,
         logger.warning("Milvus upsert failed for doc_id: %s", _scrub_exception(e))
         return UpsertResult(False, False)
 
-    # FTS rewrite: delete-then-insert (insert dedups by doc_id, so the stale
-    # row must go first). FTS failure is surfaced, never swallowed. The record is
-    # built from the already-fetched row so every metadata column the normal
-    # ingest FTS record carries is preserved — content is the redacted document.
-    fts_ok = False
+    return UpsertResult(milvus_ok, _rewrite_fts_row(doc_id, row, db_path))
+
+
+def _rewrite_fts_row(doc_id: str, row: dict, db_path: Optional[str]) -> bool:
+    """Replace one FTS row with a record built from the Milvus ``row``; True on success.
+
+    Delete-then-insert (insert dedups by doc_id, so the stale row must go
+    first). Failure is surfaced, never swallowed. The record is built from the
+    already-fetched row so every metadata column the normal ingest FTS record
+    carries is preserved. Without a ``db_path`` there is no sidecar, so it
+    reports success.
+    """
+    if not db_path:
+        return True
+    conn = None
+    try:
+        conn = _fts.connection(db_path)
+        _fts.delete(conn, "doc_id", doc_id)
+        _fts.insert(conn, [{
+            "doc_id": doc_id,
+            # Use the UTF-8-truncated text stored in Milvus (row["document"]),
+            # not the caller's text — a redacted payload can expand past the
+            # 65535 cap, and the two stores must index identical content (SESF-42).
+            "content": row["document"],
+            "session_id": row.get("session_id", ""),
+            "logical_session_id": row.get(
+                "logical_session_id", row.get("session_id", "")),
+            "provider": row.get("provider", ""),
+            "source_kind": row.get("source_kind", ""),
+            "source_class": row.get("source_class", ""),
+            "source_id": row.get("source_id", ""),
+            "source_path": row.get("source_path", ""),
+            "git_branch": row.get("git_branch", ""),
+            "turn_index": row.get("turn_index", 0),
+            "timestamp": row.get("timestamp", ""),
+            "chunk_type": row.get("chunk_type", "turn"),
+            "project_root": row.get("project_root", ""),
+            "issue_ids": row.get("issue_ids", ""),
+        }])
+        return True
+    except Exception as e:
+        logger.warning("FTS rewrite failed for doc_id: %s", _scrub_exception(e))
+        return False
+    finally:
+        # Always release the ephemeral connection, even when the rewrite
+        # raised partway through — otherwise a failed run leaks a SQLite
+        # handle per affected row.
+        if conn is not None:
+            _fts.close_ephemeral(conn)
+
+
+# Metadata a caller may rewrite in place without re-embedding (SESF-73, SESF-67).
+RETAGGABLE_FIELDS = frozenset({"project_root", "issue_ids"})
+
+
+def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
+                        **fields: str) -> UpsertResult:
+    """Rewrite metadata fields on one turn in place, keeping its document and vector.
+
+    Reads the Milvus row by primary key, sets ``fields``, upserts it (atomic by
+    primary key) and then rewrites the FTS row the same way ``upsert_document``
+    does. Nothing is embedded. An FTS failure is reported as ``fts_ok=False``;
+    :func:`find_doc_ids_by_project_root` also reads FTS, so a re-run picks the
+    turn up again.
+
+    Args:
+        doc_id: Stable document id of the turn to rewrite.
+        db_path: Optional Milvus DB path; also derives the FTS sidecar path.
+        **fields: New string values, keyed by names in ``RETAGGABLE_FIELDS``.
+
+    Returns:
+        UpsertResult: ``(False, False)`` when the row is missing or the Milvus
+        upsert failed; otherwise ``milvus_ok`` is True and ``fts_ok`` reports
+        the sidecar rewrite.
+
+    Raises:
+        ValueError: ``fields`` is empty, names a field outside
+            ``RETAGGABLE_FIELDS``, or holds a non-string value.
+    """
+    if not fields:
+        raise ValueError("update_row_metadata needs at least one field")
+    unknown = set(fields) - RETAGGABLE_FIELDS
+    if unknown:
+        raise ValueError(f"Fields not retaggable: {', '.join(sorted(unknown))}")
+    if not all(isinstance(value, str) for value in fields.values()):
+        raise ValueError("Retagged field values must be strings")
+
+    try:
+        with milvus_client(db_path) as client:
+            if not client.has_collection(COLLECTION_NAME):
+                return UpsertResult(False, False)
+            rows = client.query(
+                collection_name=COLLECTION_NAME,
+                filter=f"id == {_pk_from_doc_id(doc_id)}",
+                output_fields=["*"],
+            )
+            if not rows:
+                return UpsertResult(False, False)
+            row = dict(rows[0])
+            row.update(fields)
+            client.upsert(collection_name=COLLECTION_NAME, data=[row])
+    except Exception as e:
+        logger.warning("Milvus metadata upsert failed for doc_id: %s", _scrub_exception(e))
+        return UpsertResult(False, False)
+
+    return UpsertResult(True, _rewrite_fts_row(doc_id, row, db_path))
+
+
+def find_doc_ids_by_project_root(prefix: str, *, provider: Optional[str] = None,
+                                 db_path: Optional[str] = None) -> Dict[str, str]:
+    """Find turns whose ``project_root`` is ``prefix`` or lies under it (SESF-73).
+
+    Matches on a path-component boundary (``/a/CoWork`` and ``/a/CoWork/x``,
+    never ``/a/CoWorkX``). Milvus is streamed with a LIKE prefilter and each hit
+    is re-checked exactly, since LIKE treats ``%`` and ``_`` as wildcards. The
+    FTS sidecar is read too, so a turn whose Milvus row was already rewritten
+    but whose FTS rewrite failed is still found. An FTS read failure is logged
+    and the Milvus results are returned.
+
+    Args:
+        prefix: Absolute project root to look under.
+        provider: Optional provider to restrict to.
+        db_path: Optional Milvus DB path; also derives the FTS sidecar path.
+
+    Returns:
+        ``{doc_id: project_root}`` with the root each turn currently has under
+        ``prefix`` (the FTS value for a turn only FTS still has there).
+    """
+    prefix = prefix.rstrip("/")
+    escaped = _escape_filter_scalar(prefix)
+    filter_expr = f'(project_root == "{escaped}" or project_root like "{escaped}/%")'
+    if provider:
+        filter_expr += f' and provider == "{_escape_filter_scalar(provider)}"'
+
+    found: Dict[str, str] = {}
+    for batch in _query_batches(["doc_id", "project_root", "provider"],
+                                filter_expr=filter_expr, db_path=db_path):
+        for row in batch:
+            root = row.get("project_root") or ""
+            if path_has_prefix(root, prefix) and (
+                    not provider or row.get("provider") == provider):
+                found[row["doc_id"]] = root
+
     if db_path:
         conn = None
         try:
             conn = _fts.connection(db_path)
-            _fts.delete(conn, "doc_id", doc_id)
-            _fts.insert(conn, [{
-                "doc_id": doc_id,
-                # Use the UTF-8-truncated text stored in Milvus (row["document"]),
-                # not new_document — a redacted payload can expand past the 65535
-                # cap, and the two stores must index identical content (SESF-42).
-                "content": row["document"],
-                "session_id": row.get("session_id", ""),
-                "logical_session_id": row.get(
-                    "logical_session_id", row.get("session_id", "")),
-                "provider": row.get("provider", ""),
-                "source_kind": row.get("source_kind", ""),
-                "source_class": row.get("source_class", ""),
-                "source_id": row.get("source_id", ""),
-                "source_path": row.get("source_path", ""),
-                "git_branch": row.get("git_branch", ""),
-                "turn_index": row.get("turn_index", 0),
-                "timestamp": row.get("timestamp", ""),
-                "chunk_type": row.get("chunk_type", "turn"),
-                "project_root": row.get("project_root", ""),
-                "issue_ids": row.get("issue_ids", ""),
-            }])
-            fts_ok = True
+            where = "(project_root = ? OR substr(project_root, 1, ?) = ?)"
+            params: tuple = (prefix, len(prefix) + 1, prefix + "/")
+            if provider:
+                where += " AND provider = ?"
+                params += (provider,)
+            for doc_id, root in _fts.select_where(
+                    conn, ["doc_id", "project_root"], where, params):
+                found.setdefault(doc_id, root)
         except Exception as e:
-            logger.warning("FTS rewrite failed for doc_id: %s", _scrub_exception(e))
-            fts_ok = False
+            logger.warning("FTS project_root lookup failed: %s", _scrub_exception(e))
         finally:
-            # Always release the ephemeral connection, even when the rewrite
-            # raised partway through — otherwise a failed sanitize leaks a
-            # SQLite handle per affected row.
             if conn is not None:
                 _fts.close_ephemeral(conn)
-    else:
-        fts_ok = True
 
-    return UpsertResult(milvus_ok, fts_ok)
+    return dict(sorted(found.items()))
 
 
 def get_rows_by_ids(ids: List[int], db_path: Optional[str] = None) -> List[dict]:
