@@ -291,6 +291,9 @@ _mlx_tokenizer = None
 _mlx_load = None
 _mlx_generate = None
 _mlx_core = None
+# The HTTP server preloads the model on a background thread (SESF-70), so a
+# tool call during startup can reach get_model() at the same time.
+_model_load_lock = threading.Lock()
 
 
 def _load_mlx_runtime():
@@ -311,17 +314,23 @@ def get_model():
     if _mlx_model is not None:
         return _mlx_model, _mlx_tokenizer
 
-    if not _MODEL_CACHE.exists():
-        raise RuntimeError(
-            f"Embedding model not cached at {_MODEL_CACHE}. "
-            f"Run ./setup.sh or ./download-model.sh to download it."
-        )
+    with _model_load_lock:
+        if _mlx_model is not None:
+            return _mlx_model, _mlx_tokenizer
 
-    print(f"Loading {_MODEL_ID} via mlx-embeddings...", file=sys.stderr)
-    mlx_load, _, _ = _load_mlx_runtime()
-    _mlx_model, _mlx_tokenizer = mlx_load(_MODEL_ID)
-    print(f"{_MODEL_ID} ready ({_EMBED_DIM} dims, {_MODEL_CFG['max_tokens']} token context)", file=sys.stderr)
-    return _mlx_model, _mlx_tokenizer
+        if not _MODEL_CACHE.exists():
+            raise RuntimeError(
+                f"Embedding model not cached at {_MODEL_CACHE}. "
+                f"Run ./setup.sh or ./download-model.sh to download it."
+            )
+
+        print(f"Loading {_MODEL_ID} via mlx-embeddings...", file=sys.stderr)
+        mlx_load, _, _ = _load_mlx_runtime()
+        model, tokenizer = mlx_load(_MODEL_ID)
+        _mlx_tokenizer = tokenizer
+        _mlx_model = model
+        print(f"{_MODEL_ID} ready ({_EMBED_DIM} dims, {_MODEL_CFG['max_tokens']} token context)", file=sys.stderr)
+        return _mlx_model, _mlx_tokenizer
 
 
 def _needs_input_remap() -> bool:
