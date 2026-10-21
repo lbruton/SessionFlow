@@ -5,10 +5,6 @@ For upstream changes, see [UPSTREAM-README.md](UPSTREAM-README.md).
 
 ## [Unreleased]
 
-### Fixed
-
-- Claude Desktop no longer loses the SessionFlow connector after a reboot (SESF-70). The HTTP server now binds port 7102 at once and loads the embedding model, Milvus server mode, workers and watcher in the background; `/health` answers 503 `status: "starting"` until that finishes. `rag_engine.get_model()` is now guarded by a lock so a tool call during startup cannot load the model twice. New `mcp-remote-wait.sh` waits for the port before it runs `npx mcp-remote`, so a client launched at login no longer exits on the first refused connection.
-
 ### Added
 
 - Retroactive secret sanitizer for already-indexed data (SESF-42). New `cleanup.py sanitize` CLI subcommand and `sanitize_index` MCP tool remove secrets already persisted in the Milvus `document` field, the FTS5 `content` column, and the embedding vector. Default `--dry-run` reports per-rule counts + affected turns and writes a value-free `0600` audit JSONL (`~/.sessionflow/audit/`) without touching any store; `--apply --yes` redacts in place and re-embeds the redacted text (throttled through the embedding budget, checkpointed/resumable); `--apply --yes --drop` deletes affected turns instead. New primitives: `secret_redaction.scan_spans` (per-occurrence, value-free audit spans, reusing the SESF-41 detector), `rag_engine.upsert_document` (Milvus upsert-by-PK + FTS metadata-preserving rewrite) and `delete_by_doc_id`. Both surfaces refuse to apply without explicit confirmation and never emit a secret value. **Redaction is irreversible and is not a substitute for rotation — rotate any key that was ever indexed.**
@@ -25,6 +21,7 @@ For upstream changes, see [UPSTREAM-README.md](UPSTREAM-README.md).
 - `.claude/project.json` for project onboarding
 
 ### Fixed
+- Claude Desktop no longer loses the SessionFlow connector after a reboot (SESF-70). The HTTP server now binds port 7102 at once and loads the embedding model, Milvus server mode, workers and watcher in the background; `/health` answers 503 `status: "starting"` until that finishes. `rag_engine.get_model()` is now guarded by a lock so a tool call during startup cannot load the model twice. New `mcp-remote-wait.sh` waits for the port before it runs `npx mcp-remote`, so a client launched at login no longer exits on the first refused connection.
 - Backfill silently dying after Milvus-lite gRPC `GOAWAY` / `too_many_pings` under heavy insert load (SR-1)
 - `project_root` empty on 99%+ of indexed rows — slug map wasn't populated during initial bulk index, and unregistered slugs defaulted to `""` (SR-2)
 - Bare `-` slug incorrectly mapping to `/` as project root (SR-2)
