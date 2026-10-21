@@ -3,7 +3,7 @@
 # Starts the server if not running, verifies health.
 # Safe to call multiple times (idempotent).
 #
-# Usage: ./sessionflow-server.sh [start|stop|status|restart|install-agent|uninstall-agent|agent-status]
+# Usage: ./sessionflow-server.sh [start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-mcp-bridge|mcp-bridge-status]
 #
 # Optional macOS LaunchAgent (install-agent / uninstall-agent / agent-status)
 # autostarts SessionFlow at login before any harness hooks run. The LaunchAgent
@@ -54,6 +54,11 @@ BACKFILL_AGENT_PLIST="$LAUNCH_AGENT_DIR/${BACKFILL_AGENT_LABEL}.plist"
 BACKFILL_AGENT_STDOUT="$SERVER_DIR/backfill-agent.out.log"
 BACKFILL_AGENT_STDERR="$SERVER_DIR/backfill-agent.err.log"
 BACKFILL_INTERVAL_SECONDS="${SESSIONFLOW_BACKFILL_INTERVAL_SECONDS:-3600}"
+
+# SESF-71: Claude Desktop's stdio bridge. Installed as a copy on the internal
+# disk because Desktop's MCP child cannot read the external volume (TCC).
+MCP_BRIDGE_SOURCE="$SCRIPT_DIR/mcp-remote-wait.sh"
+MCP_BRIDGE_PATH="$HOME/.local/bin/sessionflow-mcp-remote"
 
 mkdir -p "$SERVER_DIR"
 
@@ -615,6 +620,27 @@ do_agent_status() {
     fi
 }
 
+do_install_mcp_bridge() {
+    install -d "$(dirname "$MCP_BRIDGE_PATH")"
+    install -m 755 "$MCP_BRIDGE_SOURCE" "$MCP_BRIDGE_PATH"
+    echo "[sessionflow] MCP bridge installed at $MCP_BRIDGE_PATH" >&2
+    echo "[sessionflow] Claude Desktop config: \"sessionflow\": { \"command\": \"$MCP_BRIDGE_PATH\" }" >&2
+    echo "[sessionflow] Re-run after every change to mcp-remote-wait.sh." >&2
+}
+
+do_mcp_bridge_status() {
+    if [ ! -x "$MCP_BRIDGE_PATH" ]; then
+        echo "[sessionflow] MCP bridge: $MCP_BRIDGE_PATH (missing; run install-mcp-bridge)" >&2
+        exit 1
+    fi
+    if cmp -s "$MCP_BRIDGE_SOURCE" "$MCP_BRIDGE_PATH"; then
+        echo "[sessionflow] MCP bridge: $MCP_BRIDGE_PATH (current)" >&2
+    else
+        echo "[sessionflow] MCP bridge: $MCP_BRIDGE_PATH (differs from $MCP_BRIDGE_SOURCE; run install-mcp-bridge)" >&2
+        exit 1
+    fi
+}
+
 case "${1:-start}" in
     start)  do_start ;;
     stop)   do_stop ;;
@@ -629,8 +655,10 @@ case "${1:-start}" in
     install-backfill-agent)   do_install_backfill_agent ;;
     uninstall-backfill-agent) do_uninstall_backfill_agent ;;
     backfill-agent-status)    do_backfill_agent_status ;;
+    install-mcp-bridge)       do_install_mcp_bridge ;;
+    mcp-bridge-status)        do_mcp_bridge_status ;;
     *)
-        echo "Usage: $0 {start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-backfill-agent|uninstall-backfill-agent|backfill-agent-status}" >&2
+        echo "Usage: $0 {start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-backfill-agent|uninstall-backfill-agent|backfill-agent-status|install-mcp-bridge|mcp-bridge-status}" >&2
         exit 1
         ;;
 esac
