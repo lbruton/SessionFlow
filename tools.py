@@ -531,7 +531,9 @@ def register_tools(server: Server):
                     return [types.TextContent(
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
-                results = rag_engine.search(
+                # search_async runs on the mlx-embed thread; a blocking search()
+                # here would run MLX on the event loop and race backfill (SESF-72).
+                results = await rag_engine.search_async(
                     arguments.get("query") or "",
                     arguments.get("n", 5),
                     session_id=session_id,
@@ -569,7 +571,7 @@ def register_tools(server: Server):
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
 
-                results = rag_engine.search(
+                results = await rag_engine.search_async(
                     arguments.get("query") or "",
                     arguments.get("n", 10),
                     git_branch=arguments.get("git_branch"),
