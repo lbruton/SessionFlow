@@ -21,6 +21,7 @@ For upstream changes, see [UPSTREAM-README.md](UPSTREAM-README.md).
 - `.claude/project.json` for project onboarding
 
 ### Fixed
+- Claude Desktop no longer loses the SessionFlow connector after a reboot (SESF-70). The HTTP server now binds port 7102 at once and loads the embedding model, Milvus server mode, workers and watcher in the background; `/health` answers 503 `status: "starting"` until that finishes. `rag_engine.get_model()` is now guarded by a lock so a tool call during startup cannot load the model twice. New `mcp-remote-wait.sh` waits for the port before it runs `npx mcp-remote`, so a client launched at login no longer exits on the first refused connection.
 - Backfill silently dying after Milvus-lite gRPC `GOAWAY` / `too_many_pings` under heavy insert load (SR-1)
 - `project_root` empty on 99%+ of indexed rows — slug map wasn't populated during initial bulk index, and unregistered slugs defaulted to `""` (SR-2)
 - Bare `-` slug incorrectly mapping to `/` as project root (SR-2)

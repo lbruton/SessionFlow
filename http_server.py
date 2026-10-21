@@ -312,6 +312,10 @@ class ProjectMiddleware:
 
 _model_loaded = False
 _server_mode_ready = False
+# SESF-70: "starting" until _background_startup finishes, then "ready". The
+# port binds before the model and Milvus are up, and /health answers 503
+# while this is "starting".
+_startup_state = "starting"
 _BACKFILL_STATE = _SERVER_DIR / "backfill_state.json"
 _backfill_manager = BackfillManager(_BACKFILL_STATE)
 _backfill_drain_event: asyncio.Event | None = None
@@ -589,15 +593,24 @@ def _fts_lag_payload() -> dict:
 
 
 async def health(request: Request) -> JSONResponse:
-    """Return server health JSON; ``?deep=1`` bypasses the provider-status cache."""
+    """Return server health JSON; ``?deep=1`` bypasses the provider-status cache.
+
+    While background startup is still running (SESF-70) this answers 503 with
+    ``status: "starting"`` and skips the FTS-lag scan, which needs Milvus.
+    """
     deep = request is not None and request.query_params.get("deep") == "1"
     watchers = file_watcher.get_watcher_status()
-    # _fts_lag_payload does synchronous Milvus/SQLite I/O on a cache miss; offload
-    # it to the loop's default executor so the scan never blocks the event loop.
-    loop = asyncio.get_running_loop()
-    fts_payload = await loop.run_in_executor(None, _fts_lag_payload)
+    starting = _startup_state != "ready"
+    if starting:
+        fts_payload = {"status": "pending"}
+    else:
+        # _fts_lag_payload does synchronous Milvus/SQLite I/O on a cache miss; offload
+        # it to the loop's default executor so the scan never blocks the event loop.
+        loop = asyncio.get_running_loop()
+        fts_payload = await loop.run_in_executor(None, _fts_lag_payload)
     return JSONResponse({
-        "status": "ok",
+        "status": "starting" if starting else "ok",
+        "startup": _startup_state,
         "server": "sessionflow",
         "port": PORT,
         "model_name": rag_engine.get_model_name(),
@@ -609,7 +622,7 @@ async def health(request: Request) -> JSONResponse:
         "backfill": _backfill_status_payload(),
         "embedding": _embedding_status_payload(),
         "fts": fts_payload,
-    })
+    }, status_code=503 if starting else 200)
 
 
 async def backfill_control_endpoint(request: Request) -> JSONResponse:
@@ -910,24 +923,9 @@ async def timeline_endpoint(request: Request) -> JSONResponse:
 
 # --- Lifespan ---
 
-@contextlib.asynccontextmanager
-async def lifespan(app: Starlette):
-    """
-    Manage server startup and shutdown tasks for the Starlette application.
-    
-    On startup: ensure the server directory exists, write the PID file, attempt to preload the embedding model and initialize server mode for the shared Milvus backend, start a periodic heartbeat thread, schedule a background full-text-search backfill, and start the global file watcher (which may schedule its own backfill). The context yields control while the server is running.
-    
-    On shutdown: stop the heartbeat thread and remove the heartbeat file only if it was written by this process, stop the global file watcher, close server mode, remove the PID file, and perform any remaining cleanup.
-    """
-    _SERVER_DIR.mkdir(parents=True, exist_ok=True)
-
-    PID_FILE.write_text(str(os.getpid()))
-    print(f"[HTTP] PID {os.getpid()} written to {PID_FILE}", file=sys.stderr)
-
-    global _model_loaded, _server_mode_ready, _backfill_drain_event, _backfill_drain_lock
-    global _fts_heal_event, _fts_heal_state, _fts_heal_executor
-
-    # Pre-load embedding model
+def _blocking_startup(db_path: str) -> None:
+    """Load the embedding model and init server mode; runs off the event loop."""
+    global _model_loaded, _server_mode_ready
     try:
         model_name = rag_engine.get_model_name()
         print(f"[HTTP] Pre-loading {model_name} model...", file=sys.stderr)
@@ -937,26 +935,37 @@ async def lifespan(app: Starlette):
     except Exception as e:
         print(f"[HTTP] Warning: Could not pre-load model: {e}", file=sys.stderr)
 
-    db_path = MILVUS_URI
     try:
         rag_engine.init_server_mode(db_path=db_path)
         _server_mode_ready = True
     except Exception as e:
         print(f"[HTTP] Warning: Could not init server mode: {e}", file=sys.stderr)
 
-    heartbeat = HeartbeatThread(HEARTBEAT_FILE)
-    heartbeat.start()
-    print(f"[HTTP] Heartbeat thread started ({HEARTBEAT_FILE})", file=sys.stderr)
+
+async def _background_startup(
+    db_path: str,
+    executor: concurrent.futures.Executor,
+    tasks: dict[str, asyncio.Task],
+) -> None:
+    """Run the slow startup work after the port is bound (SESF-70).
+
+    Loads the model and Milvus on ``executor``, then starts the backfill-drain
+    and FTS-heal workers and the global watcher. Each worker task is recorded in
+    ``tasks`` so ``lifespan`` can cancel whatever started before shutdown.
+    """
+    global _startup_state
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(executor, _blocking_startup, db_path)
 
     _ensure_backfill_drain_primitives()
-    backfill_drain_task = asyncio.create_task(_backfill_drain_worker())
+    tasks["backfill_drain"] = asyncio.create_task(_backfill_drain_worker())
 
     # Recurring FTS heal worker (SESF-38) — replaces the old one-shot
     # _fts_backfill. The first tick runs the startup catch-up backfill
     # unconditionally; later ticks heal only when the sentinel reports drift.
-    # Runs on a dedicated executor so it never blocks HTTP server binding.
+    # Runs on a dedicated executor so it never blocks the event loop.
     _ensure_fts_heal_primitives()
-    fts_heal_task = asyncio.create_task(_fts_heal_worker())
+    tasks["fts_heal"] = asyncio.create_task(_fts_heal_worker())
 
     # Start global file watcher on ~/.claude/projects/
     try:
@@ -970,35 +979,87 @@ async def lifespan(app: Starlette):
                 "antigravity_desktop",
             ]
             mode = get_embedding_budget().mode
-            # Delay lets HTTP server finish binding before bounded provider work starts.
-            asyncio.create_task(_process_startup_provider_backfill_locked(
-                db_path,
-                enabled_providers=enabled_providers,
-                mode=mode,
-                startup_delay=3,
-            ))
+            tasks["provider_backfill"] = asyncio.create_task(
+                _process_startup_provider_backfill_locked(
+                    db_path,
+                    enabled_providers=enabled_providers,
+                    mode=mode,
+                    startup_delay=3,
+                )
+            )
     except Exception as e:
         print(f"[HTTP] Warning: Global watcher start failed: {e}", file=sys.stderr)
 
+    _startup_state = "ready"
+    print("[HTTP] Startup complete.", file=sys.stderr)
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: Starlette):
+    """
+    Manage server startup and shutdown tasks for the Starlette application.
+
+    On startup: ensure the server directory exists, write the PID file, start the heartbeat thread, and schedule ``_background_startup`` (model preload, Milvus server mode, backfill-drain and FTS-heal workers, global file watcher). The context yields right away so uvicorn binds the port before the slow work finishes (SESF-70); ``/health`` answers 503 until it does.
+
+    On shutdown: cancel background startup and any workers it started, stop the heartbeat thread and remove the heartbeat file only if it was written by this process, stop the global file watcher, close server mode, remove the PID file, and perform any remaining cleanup.
+    """
+    _SERVER_DIR.mkdir(parents=True, exist_ok=True)
+
+    PID_FILE.write_text(str(os.getpid()))
+    print(f"[HTTP] PID {os.getpid()} written to {PID_FILE}", file=sys.stderr)
+
+    global _backfill_drain_event, _backfill_drain_lock, _startup_state
+    global _fts_heal_event, _fts_heal_state, _fts_heal_executor
+
+    _startup_state = "starting"
+    heartbeat = HeartbeatThread(HEARTBEAT_FILE)
+    heartbeat.start()
+    print(f"[HTTP] Heartbeat thread started ({HEARTBEAT_FILE})", file=sys.stderr)
+
+    # Own executor, not the loop default: shutdown must not wait on a model
+    # load that is still running when the server is stopped mid-startup.
+    startup_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="startup"
+    )
+    worker_tasks: dict[str, asyncio.Task] = {}
+    startup_task = asyncio.create_task(
+        _background_startup(MILVUS_URI, startup_executor, worker_tasks)
+    )
+
     async with session_manager.run():
-        print(f"[HTTP] Server ready on http://{HOST}:{PORT}", file=sys.stderr)
+        print(f"[HTTP] Listening on http://{HOST}:{PORT} (startup continues in background)", file=sys.stderr)
         try:
             yield
         finally:
             pass
 
-    heartbeat.stop()
-    backfill_drain_task.cancel()
+    startup_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
-        await backfill_drain_task
+        await startup_task
+    startup_executor.shutdown(wait=False, cancel_futures=True)
+
+    heartbeat.stop()
+    provider_backfill_task = worker_tasks.get("provider_backfill")
+    if provider_backfill_task is not None:
+        provider_backfill_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await provider_backfill_task
+
+    backfill_drain_task = worker_tasks.get("backfill_drain")
+    if backfill_drain_task is not None:
+        backfill_drain_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await backfill_drain_task
     _backfill_drain_event = None
     _backfill_drain_lock = None
 
     # Tear down the FTS heal worker: cancel the loop, await any in-flight heal
     # with a bounded timeout, then shut down the dedicated executor.
-    fts_heal_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-        await asyncio.wait_for(fts_heal_task, timeout=BACKFILL_DRAIN_INTERVAL)
+    fts_heal_task = worker_tasks.get("fts_heal")
+    if fts_heal_task is not None:
+        fts_heal_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+            await asyncio.wait_for(fts_heal_task, timeout=BACKFILL_DRAIN_INTERVAL)
     if _fts_heal_executor is not None:
         _fts_heal_executor.shutdown(wait=False)
     _fts_heal_event = None
