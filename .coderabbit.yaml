@@ -68,13 +68,14 @@ reviews:
     - path: "**/*.py"
       instructions: |
         - Check for proper exception handling (no bare except).
-        - Verify type hints on public function signatures.
-        - Flag missing docstrings on public modules, classes, functions, and methods per the steering Documentation Standards (private symbols with a leading underscore are exempt unless the name is unclear).
+        - Verify type hints on public function signatures. Test files under tests/ are exempt (see the tests/** instructions).
+        - Flag missing docstrings on public modules, classes, functions, and methods per the steering Documentation Standards (private symbols with a leading underscore are exempt unless the name is unclear). Test files under tests/ are exempt; ruff.toml turns the D rules off for tests/**.
         - Flag MLX / Metal calls that may cross thread boundaries (see CLAUDE.md MLX gotcha).
     - path: "tests/**"
       instructions: |
         - Verify meaningful assertions (not just "it runs without error").
         - Check for proper cleanup/teardown.
+        - Do not flag missing docstrings or type hints on test functions or fixtures. The suite leaves them unannotated by convention, and ruff.toml exempts tests/** from the docstring rules.
 
   # Finishing touches
   finishing_touches:
