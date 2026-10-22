@@ -293,7 +293,8 @@ class FTSIndex:
             db_path: Milvus DB path (used to derive FTS path)
 
         Returns:
-            List of result dicts with content, doc_id, metadata columns, and distance=0.0
+            List of result dicts with content, doc_id, metadata columns, and
+            distance=None (BM25 has no vector distance; SESF-77).
         """
         if not db_path:
             return []
@@ -345,7 +346,7 @@ class FTSIndex:
         all_cols = ["doc_id", "content"] + self.metadata_columns
         results = []
         for row in rows:
-            result = {"distance": 0.0}
+            result = {"distance": None}
             for i, col in enumerate(all_cols):
                 result[col] = row[i]
             results.append(result)
@@ -379,15 +380,31 @@ class FTSIndex:
 
 
 def rrf_merge(vector_results: List[Dict], fts_results: List[Dict],
-              n: int, k: int = 60) -> List[Dict]:
+              n: int, k: int = 60, fts_weight: float = 1.0) -> List[Dict]:
     """Reciprocal Rank Fusion: merge two ranked result lists.
 
-    score(doc) = sum(1 / (k + rank)) across both lists.
-    k=60 is the standard constant from the original RRF paper.
-    Results are keyed by doc_id (falls back to enumeration index).
+    score(doc) = sum(w / (k + rank)) across both lists, where w is 1.0 for the
+    vector list and ``fts_weight`` for the FTS list. k=60 is the standard
+    constant from the original RRF paper. Results are keyed by doc_id (falls
+    back to enumeration index).
+
+    Args:
+        vector_results: Vector hits, best first.
+        fts_results: FTS hits, best first.
+        n: Number of merged rows to return.
+        k: RRF rank constant.
+        fts_weight: Multiplier on FTS contributions. ``search`` raises it for
+            identifier-shaped queries, where only FTS finds exact matches
+            (SESF-77).
+
+    Returns:
+        Merged rows, best first, each with ``_rrf_score``. Rows found by FTS
+        also carry ``keyword_rank`` (1-based FTS position). A row in both lists
+        keeps the vector row's fields, including its ``distance``.
     """
     scores: Dict[str, float] = {}
     docs: Dict[str, Dict] = {}
+    keyword_ranks: Dict[str, int] = {}
 
     for rank, r in enumerate(vector_results):
         key = r.get("doc_id", str(rank))
@@ -397,7 +414,8 @@ def rrf_merge(vector_results: List[Dict], fts_results: List[Dict],
 
     for rank, r in enumerate(fts_results):
         key = r.get("doc_id", str(rank))
-        scores[key] = scores.get(key, 0) + 1.0 / (k + rank + 1)
+        scores[key] = scores.get(key, 0) + fts_weight / (k + rank + 1)
+        keyword_ranks.setdefault(key, rank + 1)
         if key not in docs:
             docs[key] = r
 
@@ -407,6 +425,8 @@ def rrf_merge(vector_results: List[Dict], fts_results: List[Dict],
     for key, score in ranked[:n]:
         result = docs[key].copy()
         result["_rrf_score"] = score
+        if key in keyword_ranks:
+            result["keyword_rank"] = keyword_ranks[key]
         merged.append(result)
 
     return merged

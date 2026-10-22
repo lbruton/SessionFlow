@@ -59,6 +59,11 @@ RECENCY_WEIGHT_DEFAULT = 0.3
 RECENCY_DECAY_DAYS_DEFAULT = 7
 MISSING_TIMESTAMP_RECENCY = 0.5
 _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_score")
+# FTS weight in RRF for identifier-shaped queries (SESF-77). Rare identifiers
+# are absent from the vector top-k, so at equal weight unrelated vector hits
+# tie with exact keyword hits. 2.0 put every exact match in the SESF-65 query
+# set on top.
+IDENTIFIER_FTS_WEIGHT = 2.0
 
 logger = logging.getLogger("sessionflow.milvus")
 
@@ -1126,6 +1131,14 @@ def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
     return " && ".join(filters) if filters else None
 
 
+def _is_identifier_query(query: Optional[str]) -> bool:
+    """True for a single token with a digit or ``_-.``: hostnames, ticket IDs, symbols."""
+    q = (query or "").strip()
+    if not q or any(c.isspace() for c in q):
+        return False
+    return any(c.isdigit() or c in "_-." for c in q)
+
+
 def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
            git_branch: Optional[str] = None, project_root: Optional[str] = None,
            sort_by: str = "hybrid",
@@ -1251,7 +1264,8 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     # natively and is rank-order-preserving) so each row carries `_rrf_score` —
     # the only relevance signal that spans both vector and FTS-only rows. The
     # `_rrf_score` is kept alive until after scoring (see _rank_results).
-    merged = rrf_merge(vector_results, fts_results, n=fetch_n)
+    fts_weight = IDENTIFIER_FTS_WEIGHT if _is_identifier_query(query) else 1.0
+    merged = rrf_merge(vector_results, fts_results, n=fetch_n, fts_weight=fts_weight)
 
     if not merged:
         return []
