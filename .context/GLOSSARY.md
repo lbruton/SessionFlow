@@ -57,7 +57,7 @@ _Avoid_: record type
 ## Search & Retrieval
 
 **RRF (Reciprocal Rank Fusion)**:
-The merge algorithm combining vector and FTS result sets (k=60) into one ranking.
+The merge algorithm combining vector and FTS result sets (k=60) into one ranking. FTS ranks count double for identifier-shaped queries (SESF-77).
 _Avoid_: fusion, merge
 
 **Hybrid Search**:

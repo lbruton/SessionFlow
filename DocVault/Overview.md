@@ -80,6 +80,10 @@ Hosted/OpenAI embeddings are **explicitly deferred**. Embedding stays local MLX 
 
 Both search tools also accept an optional `sort_by` (SESF-24): `relevance` (pure RRF), `recency` (timestamp-desc re-rank of the candidate pool), or `hybrid` (blended semantic + recency). Omitting it defaults to `hybrid` — this changed `search_all_sessions`' prior pure-relevance default. Tune the blend via `SESSIONFLOW_RECENCY_WEIGHT` / `SESSIONFLOW_RECENCY_DECAY_DAYS`.
 
+Identifier queries (SESF-77): when the query is a single token with a digit or one of `_-.` (hostnames, ticket IDs, symbols), RRF weights FTS ranks ×2 (`IDENTIFIER_FTS_WEIGHT`). Rare identifiers never reach the vector top-k, so at equal weight unrelated vector hits tied with exact keyword hits. Plain-word and multi-word queries keep equal weights.
+
+Each result names the signals that ranked it (SESF-68, SESF-77): `Semantic: 0.44 · Keyword: #2` (in both lists), `Semantic: 0.53` (vector only), `Keyword: #1` (FTS only), or `Listing` (query-less listing). FTS rows carry `distance=None` plus `keyword_rank`; the old single `Relevance:` number is gone.
+
 ### Issue-ID search & timeline (SESF-25 / SESF-26)
 
 Turn text is scanned at ingestion for tracker issue tokens (`[A-Z][A-Z0-9]+-\d+`, boundary-anchored, with a technical-standard prefix denylist) and the deduplicated, uppercased set is stored in a structured `issue_ids` field — Milvus `VARCHAR(4096)` plus an FTS5 `issue_ids` metadata column.
