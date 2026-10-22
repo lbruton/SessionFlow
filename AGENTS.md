@@ -59,6 +59,7 @@ Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) o
 - `main` is the default branch
 - Branch protections: signed commits + PR required
 - Worktree branches for all changes
+- **Request a CodeRabbit review on every code PR.** The repo has fewer than 10 stars, so CodeRabbit does not review automatically. Right after opening a PR that touches code (`.py`, shell scripts, tests, or config the server reads), post a PR comment containing only `@coderabbitai review`. Skip it for chore PRs that only change instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.agents/`, skills) or docs. Copilot and Codex reviews may run too; request CodeRabbit anyway.
 
 ## Project-Local Agent Assets
 
