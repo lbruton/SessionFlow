@@ -45,11 +45,12 @@ def test_listing_output_has_no_relevance(monkeypatch):
 
 def test_scored_search_row_still_shows_relevance():
     rendered = tools.format_results([_result(distance=0.1)])
-    assert "*Turn: 7 | Type: turn | Relevance: 0.90*" in rendered
+    # SESF-77 renamed the scored-row label from "Relevance" to "Semantic".
+    assert "*Turn: 7 | Type: turn | Semantic: 0.90*" in rendered
     assert "Listing" not in rendered
 
 
 def test_mixed_rows_render_independently():
     rendered = tools.format_results([_result(distance=0.25), _result(distance=None)])
-    assert rendered.count("Relevance: 0.75") == 1
+    assert rendered.count("Semantic: 0.75") == 1
     assert rendered.count("| Listing*") == 1

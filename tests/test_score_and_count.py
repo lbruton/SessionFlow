@@ -50,7 +50,8 @@ def test_search_converts_milvus_cosine_similarity_to_distance(monkeypatch):
 
     tools = importlib.import_module("tools")
     rendered = tools.format_results(results)
-    assert "Relevance: 0.91" in rendered
+    # SESF-77 renamed the scored-row label from "Relevance" to "Semantic".
+    assert "Semantic: 0.91" in rendered
 
 
 def test_count_milvus_turns_does_not_pass_limit(monkeypatch):

@@ -58,6 +58,23 @@ def _validate_enum_arg(name: str, value, legal_values) -> "types.TextContent | N
 
 # --- Formatting helpers ---
 
+def _format_signals(r: dict) -> str:
+    """Name the signals that ranked a row (SESF-77).
+
+    ``distance`` is the vector distance (None when the vector search did not
+    return the row); ``keyword_rank`` is the 1-based FTS position. A row with
+    neither comes from a query-less listing (SESF-68).
+    """
+    distance = r.get("distance")
+    keyword_rank = r.get("keyword_rank")
+    parts = []
+    if distance is not None:
+        parts.append(f"Semantic: {1 - distance:.2f}")
+    if keyword_rank is not None:
+        parts.append(f"Keyword: #{keyword_rank}")
+    return " · ".join(parts) if parts else "Listing"
+
+
 def format_results(results: list[dict]) -> str:
     """Format search results as markdown."""
     if not results:
@@ -70,9 +87,7 @@ def format_results(results: list[dict]) -> str:
         branch = r.get("git_branch", "")
         ts = r.get("timestamp", "")[:19]  # trim to readable
         chunk_type = r.get("chunk_type", "turn")
-        # Listing rows carry distance=None: there is no query to score against.
-        distance = r.get("distance", 0)
-        score = "Listing" if distance is None else f"Relevance: {1 - distance:.2f}"
+        score = _format_signals(r)
 
         turn_index = r.get("turn_index", 0)
 
