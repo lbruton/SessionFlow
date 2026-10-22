@@ -23,7 +23,7 @@ PYTHON="$SCRIPT_DIR/venv/bin/python"
 # Interpreter for stdlib-only probes (heartbeat freshness). Falls back to an
 # activated venv ($VIRTUAL_ENV) or system python3 so status/watchdog checks work
 # from a git worktree, which has no local venv/ (it lives in the main checkout).
-# The server itself still requires $PYTHON above — see SESF-39.
+# The server itself still requires $PYTHON above.
 if [ -x "$PYTHON" ]; then
     PROBE_PYTHON="$PYTHON"
 elif [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
@@ -47,7 +47,7 @@ LAUNCH_AGENT_STDOUT="$SERVER_DIR/launchagent.out.log"
 LAUNCH_AGENT_STDERR="$SERVER_DIR/launchagent.err.log"
 LAUNCHER_SCRIPT="$SERVER_DIR/sessionflow-launcher.sh"
 
-# SESF-7: hourly backfill agent — independent of the persistent server agent.
+# Hourly backfill agent — independent of the persistent server agent.
 # Decouples indexing throughput from MCP session lifecycle.
 BACKFILL_AGENT_LABEL="cc.lbruton.sessionflow-backfill"
 BACKFILL_AGENT_PLIST="$LAUNCH_AGENT_DIR/${BACKFILL_AGENT_LABEL}.plist"
@@ -55,7 +55,7 @@ BACKFILL_AGENT_STDOUT="$SERVER_DIR/backfill-agent.out.log"
 BACKFILL_AGENT_STDERR="$SERVER_DIR/backfill-agent.err.log"
 BACKFILL_INTERVAL_SECONDS="${SESSIONFLOW_BACKFILL_INTERVAL_SECONDS:-3600}"
 
-# SESF-71: Claude Desktop's stdio bridge. Installed as a copy on the internal
+# Claude Desktop's stdio bridge. Installed as a copy on the internal
 # disk because Desktop's MCP child cannot read the external volume (TCC).
 MCP_BRIDGE_SOURCE="$SCRIPT_DIR/mcp-remote-wait.sh"
 MCP_BRIDGE_PATH="$HOME/.local/bin/sessionflow-mcp-remote"
@@ -450,7 +450,7 @@ launch_agent_target() {
 do_install_agent() {
     # The generated launcher hardcodes $REPO_DIR/venv/bin/python, so installing
     # from a worktree (no local venv/) would write a LaunchAgent that fails at
-    # login. Refuse with a clear instruction instead. See SESF-39.
+    # login. Refuse with a clear instruction instead.
     if [ ! -x "$SCRIPT_DIR/venv/bin/python" ]; then
         echo "[sessionflow] ERROR: no project venv interpreter at $SCRIPT_DIR/venv/bin/python" >&2
         echo "[sessionflow] install-agent requires the project venv. Run from the main" >&2

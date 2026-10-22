@@ -12,9 +12,9 @@ Usage:
     cleanup.py delete      --branch <name>                   # Delete all turns for a branch
     cleanup.py reset                                         # Drop everything and start fresh
     cleanup.py stats       [--project <root>]                # Show index statistics
-    cleanup.py reembed     {plan|run|drive|status|verify}    # SESF-57 in-place re-embed
+    cleanup.py reembed     {plan|run|drive|status|verify}    # Re-embed every stored vector in place
     cleanup.py retag-project --from <old> --to <new> [--provider P] [--apply --yes]
-                                                             # SESF-73 move a project root
+                                                             # Move turns to a new project root
 """
 
 import argparse
@@ -189,8 +189,8 @@ def cmd_stats(args):
 def cmd_migrate_schema(args):
     """Drop and recreate the Milvus sessions collection to match current code.
 
-    SESF-11: explicit recovery path for the silent-DataNotMatchException class
-    of failures when fields are added to `_expected_schema_fields()`.
+    Use it when `_expected_schema_fields()` gains a field: inserts into the old
+    collection fail with DataNotMatchException. All turns are lost.
     """
     db = get_db_path()
 
@@ -360,7 +360,7 @@ def cmd_backfill(args) -> int:
                     get_manager().enqueue_provider_backfill(provider=provider, mode=mode)
                 except ValueError as exc:
                     print(f"Skipping {provider}: {exc}", file=sys.stderr)
-            # SESF-8: add_turns_async requires the dedicated MLX executor.
+            # add_turns_async requires the dedicated MLX executor.
             # Init for the duration of the drain, then tear down so we don't
             # leave Metal contexts hanging in a short-lived CLI process.
             rag_engine.init_server_mode(db_path=db)
@@ -389,7 +389,7 @@ def cmd_backfill(args) -> int:
 def cmd_sanitize(args) -> int:
     """Retroactively scan or remove secrets already persisted in the index.
 
-    Thin CLI adapter over :mod:`sanitize` (SESF-42 Component 4). Default posture
+    Thin CLI adapter over :mod:`sanitize`. Default posture
     is **dry-run**: report per-rule counts, the affected-turn count, and the audit
     path, writing nothing. ``--apply`` rewrites (redact + re-embed) or, with
     ``--drop``, deletes the affected turns — but only after an explicit ``--yes``.
@@ -471,7 +471,7 @@ def _print_sanitize_report(report) -> None:
 
 
 def cmd_retag_project(args) -> int:
-    """Move indexed turns from an old project root to a new one, without re-embedding (SESF-73).
+    """Move indexed turns from an old project root to a new one, without re-embedding.
 
     Finds every turn whose ``project_root`` is ``--from`` or lies under it
     (in Milvus and the FTS sidecar), and rewrites it to the same relative path
@@ -542,7 +542,7 @@ def cmd_retag_project(args) -> int:
 
 
 def cmd_reembed(args) -> int:
-    """Drive the SESF-57 in-place re-embed (see :mod:`reembed`).
+    """Drive the in-place re-embed (see :mod:`reembed`).
 
     ``plan`` is read-only and ``status`` prints the checkpoint. ``run`` processes
     one chunk in this process, and ``drive`` spawns one ``run`` subprocess per chunk
@@ -752,10 +752,10 @@ def build_parser():
         help="Comma-separated provider list (default: all enabled providers).",
     )
 
-    # reembed (SESF-57)
+    # reembed
     p_reembed = subparsers.add_parser(
         "reembed",
-        help="Re-embed every stored vector in place after the SESF-57 padding fix",
+        help="Re-embed every stored vector in place with the current padding mask",
     )
     reembed_sub = p_reembed.add_subparsers(dest="action", required=True)
     reembed_sub.add_parser("plan", help="Show what a run would do (read-only)")

@@ -2,11 +2,11 @@
 
 SessionFlow writes raw Turn text into three durable sinks (the embedding vector,
 the Milvus ``document`` field, and the FTS Sidecar ``content`` column). This module
-is the prevention guard (SESF-41): a single pure function, :func:`redact`, that
+is the prevention guard: a single pure function, :func:`redact`, that
 detects secrets in a string and replaces each with a typed placeholder of the form
 ``[REDACTED:<RULE_NAME>]``.
 
-Design invariants (see the SESF-41 sketch ``approach.md``):
+Design invariants:
 
 * **Pure** — no filesystem or network I/O. The operator allowlist is loaded by the
   caller and injected via the ``allowlist`` argument (AC-16). This module imports no
@@ -58,7 +58,7 @@ _PLUGINS = [
     {"name": "JwtTokenDetector"},
 ]
 
-# detect-secrets ``secret_type`` → canonical SESF-41 rule name (Tier 1).
+# detect-secrets ``secret_type`` → canonical rule name (Tier 1).
 # GitHub / GitLab are handled by custom regexes below: detect-secrets reports a
 # truncated prefix (e.g. "ghp") as the secret_value, which the value-replacement
 # masker cannot use. The custom regexes capture the full token.
@@ -101,10 +101,10 @@ _PEM_RE = re.compile(
 # Tier-2 contextual assignment: a secret-bearing key, then ':'/'=', then a value
 # (optionally quoted). Covers the MCP-config-dump leak class (AC-6).
 _SECRET_KEYWORD = (  # nosec B105 — detection regex of keyword NAMES, not a credential
-    # SESF-44: bare `auth` was dropped — it substring-matched the `author*` /
+    # Bare `auth` is excluded because it substring-matches the `author*` /
     # `authority` / co-author git-metadata family (the dominant Tier-2 false
-    # positive). The auth family is now a left-anchored segment (negative
-    # lookbehind `(?<![A-Za-z])`) so `oauth` no longer matches inside `coauthor` /
+    # positive). The auth family is a left-anchored segment (negative
+    # lookbehind `(?<![A-Za-z])`) so `oauth` does not match inside `coauthor` /
     # `coAuthoredBy`; `auth_token` also still matches via the bare `token` keyword.
     r"api[_-]?key|secret|token|password|passwd|pwd"  # noqa: S105 — keyword NAMES, not a credential
     r"|(?<![A-Za-z])(?:oauth|authorization|auth[_-]?token)"
@@ -117,7 +117,7 @@ _ASSIGN_RE = re.compile(
 )
 _KEYWORD_RE = re.compile(r"(?i)(?:" + _SECRET_KEYWORD + r")")
 
-# SESF-44: env-interpolation spans ``${…}`` carry no literal secret. A Tier-2
+# Env-interpolation spans ``${…}`` carry no literal secret. A Tier-2
 # match whose key/value falls inside such a span (e.g. ``${FOO_PASSWORD:-default}``)
 # is a non-literal and is dropped. Non-greedy/no-nesting by design (``[^}]*``);
 # nested ``${a${b}}`` is a rare edge that is intentionally not matched.
@@ -159,7 +159,7 @@ class Hit(NamedTuple):
 
 
 class Span(NamedTuple):
-    """A single detected secret occurrence with value-free audit metadata (SESF-42).
+    """A single detected secret occurrence with value-free audit metadata.
 
     Unlike :class:`Hit` (which dedups by value), one ``Span`` is emitted per
     *occurrence*: the same secret appearing twice yields two spans. The offsets
@@ -189,7 +189,7 @@ class Span(NamedTuple):
     masked_snippet: str
 
 
-# Half-width of the value-free context window stored on each Span (SESF-42). The
+# Half-width of the value-free context window stored on each Span. The
 # window is ``text[start - _SNIPPET_PAD : end + _SNIPPET_PAD]``, then masked.
 _SNIPPET_PAD = 24
 
@@ -213,7 +213,7 @@ def _is_placeholder_value(value: str) -> bool:
 
 
 def _is_nonliteral_assignment(line: str, match: "re.Match[str]") -> bool:
-    """Return True if a Tier-2 assignment is a shell/env non-literal, not a secret (SESF-44).
+    """Return True if a Tier-2 assignment is a shell/env non-literal, not a secret.
 
     Two shapes carry no literal credential and are dropped before a Tier-2
     ASSIGNMENT candidate is recorded:
@@ -373,7 +373,7 @@ def _collect_candidates(text: str) -> list[tuple[str, str, int, bool]]:
                 value = match.group("value")
                 if _is_placeholder_value(value):
                     continue
-                # SESF-44: drop command-substitution / env-interpolation matches.
+                # Drop command-substitution / env-interpolation matches.
                 if _is_nonliteral_assignment(line, match):
                     continue
                 candidates.append((value, "ASSIGNMENT", 2, True))
@@ -392,8 +392,7 @@ def _aggregate_maskable_candidates(
     one value is matched by several tiers (e.g. a structured token the entropy
     scanner also flags) the lowest tier wins and ``force`` is OR-ed across the
     occurrences. This is the single source of truth shared by :func:`redact` (live
-    redaction, SESF-41) and :func:`_maskable_values` (retroactive span scanning,
-    SESF-42), so the two paths can never drift in which values they mask.
+    redaction) and :func:`_maskable_values` (retroactive span scanning), so the two paths can never drift in which values they mask.
 
     Args:
         text: The text to scan.
@@ -504,7 +503,7 @@ def _maskable_values(
 
 
 def _collect_spans(text: str, allowlist: list[Pattern[str]]) -> list[Span]:
-    """Collect per-occurrence :class:`Span` metadata for ``text`` (SESF-42).
+    """Collect per-occurrence :class:`Span` metadata for ``text``.
 
     Locates every occurrence of each maskable value in the *original* ``text``,
     skipping occurrences inside an existing ``[REDACTED:…]`` placeholder (AC-15)
@@ -541,7 +540,7 @@ def _collect_spans(text: str, allowlist: list[Pattern[str]]) -> list[Span]:
 
     # Build each snippet deterministically by masking EVERY detected occurrence in
     # ``raw`` that intersects the window — the target plus any reported neighbour —
-    # rather than re-running ``redact()`` on a truncated window (SESF-42). The old
+    # rather than re-running ``redact()`` on a truncated window. The old
     # window-redact path re-detected against the slice, so a forced Tier-3 entropy
     # token whose forcing keyword fell outside the ±_SNIPPET_PAD window was
     # re-evaluated as un-forced and left RAW. Masking by offset guarantees every
@@ -584,7 +583,7 @@ def scan_spans(
     mode: str,
     allowlist: Optional[list[Pattern[str]]] = None,
 ) -> tuple[str, list[Span]]:
-    """Detect secrets in ``text`` and return per-occurrence, value-free spans (SESF-42).
+    """Detect secrets in ``text`` and return per-occurrence, value-free spans.
 
     Companion to :func:`redact` for retroactive auditing: where ``redact`` returns
     one :class:`Hit` per distinct value, this returns one :class:`Span` per

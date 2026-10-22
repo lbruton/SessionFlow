@@ -59,36 +59,33 @@ RECENCY_WEIGHT_DEFAULT = 0.3
 RECENCY_DECAY_DAYS_DEFAULT = 7
 MISSING_TIMESTAMP_RECENCY = 0.5
 _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_score")
-# FTS weight in RRF for identifier-shaped queries (SESF-77). Rare identifiers
+# FTS weight in RRF for identifier-shaped queries. Rare identifiers
 # are absent from the vector top-k, so at equal weight unrelated vector hits
-# tie with exact keyword hits. 2.0 put every exact match in the SESF-65 query
-# set on top.
+# tie with exact keyword hits. 2.0 ranks exact identifier matches first.
 IDENTIFIER_FTS_WEIGHT = 2.0
 
 logger = logging.getLogger("sessionflow.milvus")
 
-# Issue-ID extraction (SESF-25): technical-standard prefixes that match the
+# Issue-ID extraction: technical-standard prefixes that match the
 # issue-token regex but are never issue references. Dropped during extraction.
 _ISSUE_ID_PREFIX_DENYLIST = frozenset(
     {"UTF", "SHA", "HTTP", "HTTPS", "ISO", "RFC", "IPV", "MD", "BASE"}
 )
 # Milvus VARCHAR field length the extracted ids are stored in.
 _ISSUE_ID_FIELD_MAX = 4096
-# Default number of timeline entries returned by get_issue_timeline (SESF-25/26).
+# Default number of timeline entries returned by get_issue_timeline.
 DEFAULT_TIMELINE_LIMIT = 50
 # Generous FTS fetch window for the timeline fallback so the chronological slice
 # isn't biased by BM25 rank (the older matching turn may be outside the top-N).
 _TIMELINE_FTS_FETCH_CAP = 500
 # Observability threshold: warn when one issue matches an unexpectedly large
-# structured set. Memory is bounded (SESF-34: rows stream through `_OldestN`
-# rather than draining into a list), so this is now a scan-cost heads-up — narrow
-# with date_from/date_to to shrink the iterator window. A server-side cap is still
-# impossible: Milvus query_iterator order is undefined and it can't sort by a
-# scalar, so any first-N truncation would drop arbitrary (not newest) rows.
+# structured set. Rows stream through `_OldestN`, so this flags scan cost, not
+# memory. No server-side cap is possible: Milvus query_iterator order is undefined
+# and cannot sort by a scalar, so a first-N cut would drop arbitrary rows.
 _TIMELINE_ROWS_WARN = 50000
 
 # Shared Milvus output_fields for vector search and recency listing. Includes
-# ``issue_ids`` so SESF-25 issue tags propagate through ``_row_to_result``.
+# ``issue_ids`` so issue tags propagate through ``_row_to_result``.
 _SEARCH_OUTPUT_FIELDS = [
     "document", "doc_id", "session_id", "transcript_file",
     "turn_index", "timestamp", "git_branch", "chunk_type",
@@ -99,7 +96,7 @@ _SEARCH_OUTPUT_FIELDS = [
 
 
 class FtsBackfillTransientError(Exception):
-    """Raised by backfill_fts on a transient Milvus / schema-drift failure (SESF-38).
+    """Raised by backfill_fts on a transient Milvus / schema-drift failure.
 
     Signals the FTS heal worker to retry on a later cadence tick rather than treat the
     failure as terminal. The originating exception is preserved as __cause__.
@@ -297,7 +294,7 @@ _mlx_tokenizer = None
 _mlx_load = None
 _mlx_generate = None
 _mlx_core = None
-# The HTTP server preloads the model on a background thread (SESF-70), so a
+# The HTTP server preloads the model on a background thread, so a
 # tool call during startup can reach get_model() at the same time.
 _model_load_lock = threading.Lock()
 # MLX's Metal command encoder is not thread-safe. Server mode routes every
@@ -357,7 +354,7 @@ def _key_padding_mask(attention_mask):
 
     True marks a real key token. mx.fast.scaled_dot_product_attention treats a
     float mask as additive, so the raw 0/1 mask that mlx-embeddings passes
-    through only nudges padded keys down by 1 logit (SESF-57).
+    through only nudges padded keys down by 1 logit.
     """
     import mlx.core as mx
 
@@ -387,8 +384,8 @@ def embed_texts(texts: List[str], is_query: bool = False) -> List[List[float]]:
 
     In server mode the MLX work always runs on the single ``mlx-embed``
     executor thread, whatever thread calls this. MLX's Metal command encoder is
-    not thread-safe, and two threads evaluating at once SIGSEGV the server
-    (SESF-72). A caller already on that thread, or any caller before
+    not thread-safe, and two threads evaluating at once SIGSEGV the server.
+    A caller already on that thread, or any caller before
     ``init_server_mode``, runs inline.
     """
     executor = _embed_executor
@@ -435,8 +432,8 @@ _write_lock: Optional[asyncio.Lock] = None
 _embed_semaphore: Optional[asyncio.Semaphore] = None
 # Dedicated single-worker executor so every MLX/Metal call runs on the same OS
 # thread. The asyncio semaphore already serializes calls in time, but the
-# default executor can rotate workers between calls — and MLX command-buffer
-# state is not safe to migrate across threads. See SESF-8.
+# default executor can rotate workers between calls, and MLX command-buffer
+# state is not safe to migrate across threads.
 _embed_executor: Optional[ThreadPoolExecutor] = None
 _server_mode = False
 
@@ -591,28 +588,18 @@ def migrate_schema(client: MilvusClient, db_path: str = "") -> None:
         )
         client.drop_collection(COLLECTION_NAME)
     _create_collection(client, db_path)
-    # SESF-40: drop_collection already clears the data-path schema cache, so
-    # this is a no-op today. It funnels the one place schema mutates through the
-    # canonical invalidation hook so a future in-place add_collection_field path
-    # can't leave a warm persistent client raising code=65535 "field not exist".
+    # drop_collection already clears the schema cache. Every schema mutation
+    # still goes through _invalidate_schema_cache.
     _invalidate_schema_cache(client)
 
 
 def _invalidate_schema_cache(client: MilvusClient) -> None:
     """Invalidate pymilvus's process-global data-path schema cache for the collection.
 
-    SESF-40: pymilvus 2.6 caches collection schemas in a class-level LRU
-    (``GlobalCache.schema``, keyed by endpoint/db/collection and consumed by
-    insert/upsert/search/hybrid_search via ``_get_schema``). It is invalidated on
-    ``drop_collection`` but NOT on ``add_collection_field``, so an in-place field
-    add can leave a long-lived persistent client raising ``code=65535 "field not
-    exist"`` until LRU eviction or process restart — a fresh ``MilvusClient`` does
-    not clear it (the cache is a singleton). Any schema-mutating op must funnel
-    through here.
-
-    No public schema-cache refresh API exists, so this reaches into pymilvus
-    internals; every step is guarded and degrades to a logged no-op on a pymilvus
-    upgrade rather than breaking a real migration.
+    pymilvus keeps a process-wide schema cache that ``add_collection_field`` does
+    not clear, so a live client raises ``code=65535 "field not exist"`` after a
+    field add. Call this after every schema change. It uses pymilvus internals and
+    degrades to a logged no-op if they move.
     """
     try:
         from pymilvus.client.cache import GlobalCache
@@ -630,14 +617,10 @@ def _invalidate_schema_cache(client: MilvusClient) -> None:
 def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     """Create the sessions collection if missing; refuse to start on schema drift.
 
-    SESF-11: previously this was create-if-missing only, so adding a field to
-    `_expected_schema_fields()` silently broke every insert with
-    DataNotMatchException against the pre-existing Milvus collection. Now:
-      - missing collection → create
-      - present + no drift → no-op
-      - present + drift → if SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 drop+recreate,
-        else raise RuntimeError telling the operator to run
-        `python cleanup.py migrate-schema`.
+    A collection that lacks a field from `_expected_schema_fields()` rejects every
+    insert, so drift must stop startup. With SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 it
+    drops and recreates the collection; otherwise it raises RuntimeError that
+    names `python cleanup.py migrate-schema`.
     """
     if not client.has_collection(COLLECTION_NAME):
         _create_collection(client, db_path)
@@ -647,7 +630,7 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     if not drift:
         return
 
-    # SESF-38 AC-3: re-describe once (cache-free) before gating either branch.
+    # Re-describe once (cache-free) before gating either branch.
     # detect_schema_drift issues a fresh describe_collection, so a stale/cached
     # first read that clears on the second describe must NOT raise or migrate.
     # This re-verify gates BOTH the auto-migrate and the raise branches.
@@ -713,9 +696,9 @@ def _create_collection(client: MilvusClient, db_path: str = "") -> None:
 def milvus_client_for_migration(db_path: Optional[str] = None):
     """Open a Milvus client WITHOUT _ensure_collection.
 
-    SESF-11: needed because _ensure_collection refuses to start on schema
-    drift — but the whole point of `cleanup.py migrate-schema` is to repair
-    that drift. This bypass MUST NOT be used outside migration code paths.
+    `_ensure_collection` refuses to open a drifted collection, and
+    `cleanup.py migrate-schema` must open it to repair the drift. Use this only
+    in migration code.
     """
     path = _resolve_db_path(db_path)
     if not _is_remote_uri(path):
@@ -747,7 +730,7 @@ def milvus_client(db_path: Optional[str] = None):
             client.close()
 
 
-# --- Secret redaction guard (SESF-41) ---
+# --- Secret redaction guard ---
 
 # Truthy values for the SESSIONFLOW_REDACT on/off flag (boolean idiom, rag_engine
 # precedent at the SESSIONFLOW_AUTO_MIGRATE_SCHEMA read).
@@ -817,7 +800,7 @@ def load_allowlist(path: Optional[str]) -> List[re.Pattern]:
 
 
 def _apply_redaction(turns: List[Dict]) -> None:
-    """Redact secrets in ``turns`` in place before embed/store (SESF-41 hook).
+    """Redact secrets in ``turns`` in place before embed/store.
 
     Runs once over the already-deduped turns so all three durable sinks and the
     async wrapper are covered with no per-Provider change (AC-1/2/3), and before
@@ -907,7 +890,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
     if not new_turns:
         return 0
 
-    # SESF-41: ingestion-time secret redaction guard. One hook over the deduped
+    # Ingestion-time secret redaction guard. One hook over the deduped
     # turns rewrites turn["text"] in place, covering all three durable sinks
     # (embedding, Milvus document, FTS content) and add_turns_async with no
     # per-Provider change, and runs before _extract_issue_ids so issue IDs survive.
@@ -938,7 +921,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             embeddings = embed_texts(texts, is_query=False)
         except Exception as e:
             budget.after_batch(time.monotonic() - started, 0, error=e)
-            # SESF-41 AC-17: scrub the exception's string args before the bare
+            # Scrub the exception's string args before the bare
             # re-raise so every upstream site that later stringifies it is already
             # clean, while preserving any structured status-code args.
             _scrub_exception_args(e)
@@ -1006,7 +989,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             _fts.insert(fts_conn, fts_records)
             _fts.close_ephemeral(fts_conn)
     except Exception as e:
-        # SESF-41 AC-17: the FTS payload holds Turn content, so scrub the exception
+        # The FTS payload holds Turn content, so scrub the exception
         # text before logging so no secret fragment can echo through the warning.
         logger.warning("FTS insert failed (non-fatal): %s", _scrub_exception(e))
 
@@ -1014,26 +997,11 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
 
 
 def _escape_filter_scalar(value: str) -> str:
-    """Escape a string value for use in a Milvus boolean-expression filter literal.
+    """Escape ``value`` for a double-quoted Milvus filter literal; reject NUL bytes.
 
-    Milvus filter literals are C-style double-quoted strings (e.g. field ==
-    "value"). Per the Milvus expression grammar (Plan.g4), an embedded
-    double-quote is written as backslash-quote and a literal backslash as a
-    doubled backslash; Milvus does NOT honor ""-doubling.
-
-    Rules:
-      - NUL bytes are never valid in identifiers or scalar values; reject them
-        outright so a malformed input cannot truncate the filter expression.
-      - Each backslash is doubled, then each double-quote becomes backslash-quote.
-        Order matters: backslashes are escaped first, otherwise the backslash
-        introduced when escaping a quote would itself be doubled. This also stops
-        a trailing backslash from escaping the literal's closing quote and
-        consuming the rest of the filter expression (SESF-33).
-      - A literal newline or carriage return is not a valid character inside a
-        Milvus string literal (the grammar's DoubleSChar excludes them), so each
-        is rewritten to its escape form (backslash-n / backslash-r); tabs are
-        likewise escaped for consistency. These run after the backslash doubling
-        so the escape backslash they introduce is not itself re-doubled.
+    Milvus accepts backslash escapes only (no ``""`` doubling) and no raw newlines.
+    Double backslashes first, then escape quotes, newlines and tabs, so no added
+    escape is doubled and a trailing backslash cannot swallow the closing quote.
     """
     if "\x00" in value:
         raise ValueError("Filter scalar value must not contain NUL bytes")
@@ -1053,7 +1021,7 @@ def _issue_id_containment_token(issue_id: str) -> str:
     legitimate input. NUL bytes are rejected outright (mirroring
     ``_escape_filter_scalar``) since the FTS path consumes this token without
     going through that guard. Shared by the Milvus filter and the FTS filter so
-    both halves of hybrid search stay in lockstep (SESF-32).
+    both halves of hybrid search stay in lockstep.
     """
     if "\x00" in issue_id:
         raise ValueError("issue_id must not contain NUL bytes")
@@ -1069,7 +1037,7 @@ def _row_to_result(entity: Dict, defaults: Dict, distance: Optional[float] = Non
 
     ``distance`` is the COSINE distance from the query vector. Query-less
     listings have no query vector, so they keep the default ``None`` (no score)
-    and ``tools.format_results`` labels them ``Listing`` (SESF-68).
+    and ``tools.format_results`` labels them ``Listing``.
     """
     return {
         "content": entity.get("document", ""),
@@ -1182,7 +1150,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
             f"Invalid source_kind: {source_kind!r}; expected one of: {allowed}"
         )
 
-    # Query-less recency listing (SESF-16): with no query there is no vector to
+    # Query-less recency listing: with no query there is no vector to
     # match and nothing for FTS, so fall back to a filter-only chronological
     # listing regardless of sort_by. Branches before embed_texts so an empty
     # string never produces a degenerate query vector.
@@ -1224,7 +1192,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     if results and results[0]:
         for hit in results[0]:
             # Milvus COSINE reports similarity (higher = closer) in "distance";
-            # convert so the result's distance is a true distance (SESF-55).
+            # convert so the result's distance is a true distance.
             vector_results.append(
                 _row_to_result(
                     hit["entity"], provider_defaults,
@@ -1252,9 +1220,8 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         # or a full datetime).
         fts_filters["timestamp_lte"] = ("<=", date_to.split("T")[0] + "T23:59:59")
     if issue_id:
-        # SESF-32 — apply the same comma-delimited containment match the Milvus
-        # half uses (issue_ids is an FTS metadata column as of SESF-25), so the
-        # hybrid FTS results can't leak turns that aren't tagged with the issue.
+        # Use the same comma-delimited containment match as the Milvus half, so
+        # FTS results cannot include turns without the issue tag.
         token = _issue_id_containment_token(issue_id)
         fts_filters["issue_ids"] = ("like", f"%,{token},%")
     fts_results = _fts.search(query, n=fetch_n, filters=fts_filters or None, db_path=db_path)
@@ -1306,13 +1273,13 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
                     issue_id: Optional[str] = None,
                     db_path: Optional[str] = None) -> List[Dict]:
     """Query-less chronological listing: filter-only streamed scan ranked by
-    timestamp descending (SESF-16).
+    timestamp descending.
 
     Milvus ``query()`` has no ORDER BY, and a single capped ``query()`` call
     materializes every filter-matching row server-side — broad filters (e.g.
     ``provider="codex"`` across all projects) overflow Milvus's per-query
     result-size buffer and raise ``code=65535: query results exceed the limit
-    size`` (SESF-36). Rows therefore stream through ``_query_batches`` into a
+    size``. Rows therefore stream through ``_query_batches`` into a
     ``_NewestN`` bounded heap: memory stays O(n) and the kept set is the true
     global newest-``n`` regardless of collection size.
     """
@@ -1337,7 +1304,7 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
 
     defaults = default_provider_metadata()
     # distance=None: no query vector exists for recency listings, so there is
-    # no score to report (SESF-68; the old 1.0 placeholder printed as 0.00).
+    # no score to report.
     mapped = [_row_to_result(row, defaults, distance=None) for row in rows]
 
     return _rank_results(mapped, "recency", n)
@@ -1387,7 +1354,7 @@ class _ReverseKey:
 class _OldestN:
     """Bounded collector that retains the globally-oldest ``limit`` entries.
 
-    Replaces draining every structured match into a list (SESF-34): rows stream
+    Replaces draining every structured match into a list: rows stream
     in via :meth:`add` and at most ``limit`` are ever held, so memory is O(limit)
     no matter how many turns reference an issue. Correctness is preserved because
     the newest-kept entry is evicted only when a strictly-older candidate arrives,
@@ -1397,7 +1364,7 @@ class _OldestN:
     Entries are keyed by ``(parsed-UTC timestamp, doc_id)`` — timestamps go
     through ``_parse_timestamp_utc`` (the same ordering ``_rank_results`` uses)
     because the index mixes ``Z``/``+00:00``/naive ISO forms, which do not sort
-    reliably as strings (SESF-43; mirrors the ``_NewestN`` fix from SESF-36).
+    reliably as strings.
     Unparseable/empty timestamps fall back to ``datetime.min`` (oldest, kept
     first). Entries are deduplicated by ``doc_id``
     (first writer wins, so the structured source — streamed before the FTS
@@ -1451,7 +1418,7 @@ class _NewestN:
     """Bounded collector that retains the globally-newest ``limit`` rows.
 
     The newest-first mirror of :class:`_OldestN`, used by the query-less
-    recency listing (SESF-36): rows stream in via :meth:`add` and at most
+    recency listing: rows stream in via :meth:`add` and at most
     ``limit`` are ever held, so memory is O(limit) no matter how many rows
     match the filter. A plain ``heapq`` min-heap suffices — ``heap[0]`` is the
     oldest-kept row, evicted only when a strictly-newer candidate arrives, so
@@ -1519,7 +1486,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     on the issue token) so any un-tagged turn remains visible (Req 6.1). Both
     sources are normalized to the same shape and routed through an ``_OldestN``
     collector that bounds memory to O(``limit``) while retaining the true oldest
-    matches (SESF-34): it deduplicates by ``doc_id`` (Req 4.2/6.2, structured
+    matches: it deduplicates by ``doc_id`` (Req 4.2/6.2, structured
     wins) and yields entries sorted oldest-first by ``(timestamp asc, doc_id asc)``
     (Req 4.1), capped at ``limit`` (Req 4.5). Each row is filtered to an optional
     ``providers`` subset (Req 4.4) and ``date_from``/``date_to`` bounds (Req 4.3)
@@ -1575,7 +1542,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
                 or _references_issue(entry.get("text", ""), canonical))
 
     # Structured source: stream Milvus matches batch by batch into a memory-bounded
-    # oldest-N collector rather than draining them into a list (SESF-34). The
+    # oldest-N collector rather than draining them into a list. The
     # collector retains only the true oldest ``limit``, so memory is O(limit) no
     # matter how many turns reference the issue — and a server-side cap stays
     # impossible (Milvus query_iterator order is undefined; it can't sort by a
@@ -1829,7 +1796,7 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
     """Get index statistics. Optionally filter to a specific project."""
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
-            # SESF-41 AC-10: keep the redaction surface on every return path so
+            # Keep the redaction surface on every return path so
             # get_stats()["redaction"] never KeyErrors before the collection exists.
             return {
                 "total_turns": 0,
@@ -1867,7 +1834,7 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
         "providers": providers,
     }
 
-    # Additive, project-scoped FTS lag keys (SESF-38 AC-6). Pass the Milvus total
+    # Additive, project-scoped FTS lag keys. Pass the Milvus total
     # we just computed so fts_lag_status does not re-enter get_stats.
     lag = fts_lag_status(
         db_path=db_path, project_root=project_root, milvus_turn_count=total
@@ -1876,13 +1843,13 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
     stats["fts_lag"] = lag["fts_lag"]
     stats["fts_backfill_required"] = lag["fts_backfill_required"]
 
-    # SESF-41: operator-facing redaction status + durable per-rule counts (AC-10).
+    # Operator-facing redaction status + durable per-rule counts (AC-10).
     stats["redaction"] = _redaction_status()
     return stats
 
 
 def _count_milvus_turns(db_path=None, project_root=None) -> int:
-    """Count Milvus turn rows through the DRIFT-TOLERANT migration client (SESF-38 D-6).
+    """Count Milvus turn rows through the DRIFT-TOLERANT migration client.
 
     ``fts_lag_status`` cannot route this count through ``get_stats`` (which opens
     the drift-GUARDED ``milvus_client`` and RAISES under persistent schema drift):
@@ -1919,7 +1886,7 @@ def fts_lag_status(
     project_root: Optional[str] = None,
     milvus_turn_count: Optional[int] = None,
 ) -> Dict[str, object]:
-    """Return static FTS-vs-Milvus lag data for observability (SESF-38 AC-6).
+    """Return static FTS-vs-Milvus lag data for observability.
 
     Computes the difference between the Milvus turn count and the FTS row count,
     both scoped to ``project_root`` when provided. The lag is static — no worker
@@ -1943,7 +1910,7 @@ def fts_lag_status(
             db_path=db_path, project_root=project_root
         )
 
-    # FTS count on the calling thread (SESF-13 thread affinity): open an
+    # FTS count on the calling thread: open an
     # ephemeral connection, count, and close it.
     conn = _fts.connection(db_path)
     try:
@@ -1969,9 +1936,8 @@ def _query_batches(output_fields: list, batch_size: int = 1000,
     """Yield Milvus query_iterator results one batch at a time.
 
     Uses pymilvus's server-side iterator instead of offset pagination so the
-    full collection is drained regardless of size. The previous implementation
-    hard-capped at 16,384 rows, silently truncating any collection larger than
-    that — see SESF-4.
+    full collection is drained regardless of size. Offset pagination stops at
+    16,384 rows.
     """
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
@@ -2041,7 +2007,7 @@ def _pk_from_doc_id(doc_id: str) -> int:
 
 
 class UpsertResult(NamedTuple):
-    """Outcome of an in-place document overwrite across both stores (SESF-42).
+    """Outcome of an in-place document overwrite across both stores.
 
     Attributes:
         milvus_ok: True when the Milvus upsert (atomic by primary key) succeeded.
@@ -2058,7 +2024,7 @@ class UpsertResult(NamedTuple):
 
 
 class DeleteResult(NamedTuple):
-    """Outcome of a doc-id-scoped dual delete across both stores (SESF-42).
+    """Outcome of a doc-id-scoped dual delete across both stores.
 
     Attributes:
         deleted: Number of Milvus rows deleted (0 or 1).
@@ -2077,7 +2043,7 @@ def get_row_by_doc_id(doc_id: str,
                       db_path: Optional[str] = None) -> Optional[dict]:
     """Fetch a single Milvus row by ``doc_id``, or ``None`` when absent.
 
-    Used by the SESF-42 sanitizer to read an affected row's full payload
+    Used by the sanitizer to read an affected row's full payload
     (document + metadata) just-in-time at apply time, so a large scan never has
     to cache every row's text in memory. Looks the row up by its integer primary
     key (``_pk_from_doc_id``) for an O(1) point lookup rather than a VARCHAR scan;
@@ -2189,7 +2155,7 @@ def _rewrite_fts_row(doc_id: str, row: dict, db_path: Optional[str]) -> bool:
             "doc_id": doc_id,
             # Use the UTF-8-truncated text stored in Milvus (row["document"]),
             # not the caller's text — a redacted payload can expand past the
-            # 65535 cap, and the two stores must index identical content (SESF-42).
+            # 65535 cap, and the two stores must index identical content.
             "content": row["document"],
             "session_id": row.get("session_id", ""),
             "logical_session_id": row.get(
@@ -2218,7 +2184,7 @@ def _rewrite_fts_row(doc_id: str, row: dict, db_path: Optional[str]) -> bool:
             _fts.close_ephemeral(conn)
 
 
-# Metadata a caller may rewrite in place without re-embedding (SESF-73, SESF-67).
+# Metadata a caller may rewrite in place without re-embedding.
 RETAGGABLE_FIELDS = frozenset({"project_root", "issue_ids"})
 
 
@@ -2277,7 +2243,7 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
 
 def find_doc_ids_by_project_root(prefix: str, *, provider: Optional[str] = None,
                                  db_path: Optional[str] = None) -> Dict[str, str]:
-    """Find turns whose ``project_root`` is ``prefix`` or lies under it (SESF-73).
+    """Find turns whose ``project_root`` is ``prefix`` or lies under it.
 
     Matches on a path-component boundary (``/a/CoWork`` and ``/a/CoWork/x``,
     never ``/a/CoWorkX``). Milvus is streamed with a LIKE prefilter and each hit
@@ -2334,7 +2300,7 @@ def find_doc_ids_by_project_root(prefix: str, *, provider: Optional[str] = None,
 def get_rows_by_ids(ids: List[int], db_path: Optional[str] = None) -> List[dict]:
     """Fetch full Milvus rows (every field, vector included) for a batch of primary keys.
 
-    Used by the SESF-57 re-embed to read a batch of rows just in time. Rows that
+    Used by the re-embed to read a batch of rows just in time. Rows that
     no longer exist are simply absent from the result, so callers compare lengths
     to count missing rows. The integer-only ``id in [...]`` filter needs no escaping.
 
@@ -2361,7 +2327,7 @@ def get_rows_by_ids(ids: List[int], db_path: Optional[str] = None) -> List[dict]
 def upsert_rows(rows: List[dict], db_path: Optional[str] = None) -> int:
     """Upsert complete Milvus rows by primary key in one call, leaving FTS alone.
 
-    The SESF-57 re-embed only replaces ``vector``; ``document`` and every FTS
+    The re-embed only replaces ``vector``; ``document`` and every FTS
     column are unchanged, so unlike ``upsert_document`` there is no FTS rewrite.
     Each row is replaced atomically by PK, so concurrent searches see it either
     fully old or fully new.
@@ -2513,15 +2479,14 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
       1. Fetch doc_id only (~100 bytes/row) to identify what's in Milvus.
       2. Diff against FTS via batched IN-clause to find missing doc_ids.
       3. Fetch full documents only for missing doc_ids, in chunks of 100.
-    The original single-pass that pulled the wide `document` field on all
-    rows crossed the 64MB ceiling once a segment accumulated enough text
-    and corrupted Woodpecker WAL state. See SESF-2.
+    A single pass that pulls the wide `document` field on all rows can cross
+    the 64MB message ceiling and corrupt Woodpecker WAL state.
     """
     if not db_path:
         return 0
 
     # Serialize heal runs: if another backfill is already in flight (e.g. an
-    # overlapping cadence tick) skip rather than double-hydrate (SESF-38 D-3).
+    # overlapping cadence tick) skip rather than double-hydrate.
     if not _fts_backfill_lock.acquire(blocking=False):
         logger.debug("FTS backfill already running; skipping overlapping heal")
         return 0
@@ -2531,21 +2496,21 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
         try:
             # Pass 2: hydrate missing rows in small batches and stream into FTS
             # one batch at a time so peak memory stays at O(BATCH_FETCH) regardless
-            # of how many rows are missing — see SESF-5.
+            # of how many rows are missing.
             # Reuse the shared search field list so backfill and vector search
-            # stay in sync — a drifted copy is how transcript_file went missing.
+            # return the same fields.
             output_fields = _SEARCH_OUTPUT_FIELDS
             backfill_defaults = default_provider_metadata()
             BATCH_FETCH = 100
             inserted = 0
             # Truth row count streamed from Milvus during the diff pass; the
-            # sentinel clear is gated on the FTS count reaching this (SESF-38 D-5).
+            # sentinel clear is gated on the FTS count reaching this.
             milvus_count = 0
 
             # Convert transient Milvus / schema-drift faults (a RuntimeError at
             # context-manager open from the drift guard, or a MilvusException from
             # a query) into the typed transient error so the heal worker retries
-            # on a later tick instead of treating them as terminal (SESF-38 D-4).
+            # on a later tick instead of treating them as terminal.
             try:
                 with milvus_client(db_path) as client:
                     def hydrate_and_insert(doc_ids: list) -> None:
@@ -2617,7 +2582,7 @@ def backfill_fts(db_path: Optional[str] = None) -> int:
             logger.info("FTS backfill: inserted %d records", inserted)
             # Only clear the sentinel once FTS has caught up to the Milvus truth
             # count; a still-degraded keyword index keeps the warning live so a
-            # later heal tick retries (SESF-38 D-5). If the count can't be read
+            # later heal tick retries. If the count can't be read
             # we err toward the legacy clear-on-completion behavior rather than
             # leaving a healthy index flagged forever.
             should_clear = True
@@ -2728,7 +2693,7 @@ async def search_async(query: str, n: int = 5, session_id: Optional[str] = None,
 
     if semaphore is None or executor is None:
         # Before init_server_mode (server still starting, or no server): keep the
-        # event loop free. _mlx_eval_lock still serializes any MLX work (SESF-72).
+        # event loop free. _mlx_eval_lock still serializes any MLX work.
         return await asyncio.to_thread(run)
     async with semaphore:
         return await loop.run_in_executor(
@@ -2751,7 +2716,7 @@ async def add_turns_async(turns: List[Dict], db_path: Optional[str] = None) -> i
         raise RuntimeError(
             "MLX embed executor not initialized — call init_server_mode() before "
             "using add_turns_async(). Running embeddings on the default executor can "
-            "hop OS threads and trigger Metal SIGSEGV (see SESF-8)."
+            "hop OS threads and trigger Metal SIGSEGV."
         )
     async with semaphore:
         async with write_lock:

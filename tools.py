@@ -59,11 +59,11 @@ def _validate_enum_arg(name: str, value, legal_values) -> "types.TextContent | N
 # --- Formatting helpers ---
 
 def _format_signals(r: dict) -> str:
-    """Name the signals that ranked a row (SESF-77).
+    """Name the signals that ranked a row.
 
     ``distance`` is the vector distance (None when the vector search did not
     return the row); ``keyword_rank`` is the 1-based FTS position. A row with
-    neither comes from a query-less listing (SESF-68).
+    neither comes from a query-less listing.
     """
     distance = r.get("distance")
     keyword_rank = r.get("keyword_rank")
@@ -549,7 +549,7 @@ def register_tools(server: Server):
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
                 # search_async runs on the mlx-embed thread; a blocking search()
-                # here would run MLX on the event loop and race backfill (SESF-72).
+                # here would run MLX on the event loop and race backfill.
                 results = await rag_engine.search_async(
                     arguments.get("query") or "",
                     arguments.get("n", 5),

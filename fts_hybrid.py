@@ -64,7 +64,7 @@ class FTSIndex:
         self.table_name = table_name
         self.metadata_columns = metadata_columns
         self._indexed_metadata = indexed_metadata or set()
-        # SESF-13: sqlite3 connections are bound to the thread that opened them.
+        # sqlite3 connections are bound to the thread that opened them.
         # Server-mode persistent caching MUST be per-thread; otherwise the
         # request thread crashes trying to close a connection created by the
         # MLX embed executor (or vice versa) and we leak the file handle.
@@ -242,7 +242,7 @@ class FTSIndex:
         conn.commit()
 
     def count_rows(self, conn: sqlite3.Connection, project_root: Optional[str] = None) -> int:
-        """Return the number of rows in the FTS table (SESF-38 AC-6).
+        """Return the number of rows in the FTS table.
 
         Runs `SELECT count(*) FROM {self.table_name}`, adding a
         `WHERE project_root = ?` filter when `project_root` is supplied (the
@@ -250,7 +250,7 @@ class FTSIndex:
         global row count or a single project's count.
 
         Args:
-            conn: the per-thread sqlite connection for this FTS index (SESF-13 thread affinity).
+            conn: the per-thread sqlite connection for this FTS index.
             project_root: when provided, count only rows whose project_root matches.
 
         Returns:
@@ -294,7 +294,7 @@ class FTSIndex:
 
         Returns:
             List of result dicts with content, doc_id, metadata columns, and
-            distance=None (BM25 has no vector distance; SESF-77).
+            distance=None (BM25 has no vector distance).
         """
         if not db_path:
             return []
@@ -394,8 +394,7 @@ def rrf_merge(vector_results: List[Dict], fts_results: List[Dict],
         n: Number of merged rows to return.
         k: RRF rank constant.
         fts_weight: Multiplier on FTS contributions. ``search`` raises it for
-            identifier-shaped queries, where only FTS finds exact matches
-            (SESF-77).
+            identifier-shaped queries, where only FTS finds exact matches.
 
     Returns:
         Merged rows, best first, each with ``_rrf_score``. Rows found by FTS

@@ -4,9 +4,9 @@
 # Waits until the SessionFlow server answers on its port, then execs
 # `npx -y mcp-remote <url>`. Without the wait, a client launched at login can
 # start mcp-remote before the server listens; mcp-remote exits on the first
-# ECONNREFUSED and the client does not retry (SESF-70).
+# ECONNREFUSED and the client does not retry.
 #
-# There is no wait cap: the bridge never gives up on its own (SESF-71). If the
+# There is no wait cap: the bridge never gives up on its own. If the
 # client's initialize timeout fires first, the client kills it and launches a
 # fresh one, which keeps waiting. Progress goes to stderr only (the client's
 # MCP log), rate-limited, so nothing reaches the user.
@@ -23,8 +23,7 @@
 # Claude Desktop spawns MCP servers through Claude.app/Contents/Helpers/disclaimer,
 # which makes the child its own TCC-responsible process; /bin/bash then cannot
 # read anything on an external volume (/Volumes/DATA) and fails with
-# "Operation not permitted" before the first line runs (SESF-71, same as
-# DEVS-105 for mcp-launch). For the same reason this script must not touch the
+# "Operation not permitted" before the first line runs. For the same reason this script must not touch the
 # repo at runtime. Re-run the install after every change to this file.
 #
 # Claude Desktop config:

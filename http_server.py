@@ -79,7 +79,7 @@ BACKFILL_DRAIN_INTERVAL = _parse_backfill_drain_interval()
 if BACKFILL_DRAIN_INTERVAL <= 0:
     raise ValueError("SESSIONFLOW_BACKFILL_DRAIN_INTERVAL_SECONDS must be > 0")
 
-# Upper bound on the FTS heal exponential backoff (SESF-38 AC-2). The schedule
+# Upper bound on the FTS heal exponential backoff. The schedule
 # escalates as ``BACKFILL_DRAIN_INTERVAL * 2**(n-1)`` per consecutive failure and
 # is held at this cap so the heal loop retries forever without runaway delays.
 FTS_HEAL_BACKOFF_CAP = 300.0
@@ -184,7 +184,7 @@ class HeartbeatThread:
 
 @dataclass
 class FtsHealState:
-    """Worker-owned backoff + log-once state for the FTS heal loop (SESF-38 AC-2/AC-5).
+    """Worker-owned backoff + log-once state for the FTS heal loop.
 
     Implements the bounded-backoff schedule (``BACKFILL_DRAIN_INTERVAL * 2**(n-1)``
     capped at ``FTS_HEAL_BACKOFF_CAP``) and the log-once latch (signature =
@@ -312,7 +312,7 @@ class ProjectMiddleware:
 
 _model_loaded = False
 _server_mode_ready = False
-# SESF-70: "starting" until _background_startup finishes, then "ready". The
+# "starting" until _background_startup finishes, then "ready". The
 # port binds before the model and Milvus are up, and /health answers 503
 # while this is "starting".
 _startup_state = "starting"
@@ -321,7 +321,7 @@ _backfill_manager = BackfillManager(_BACKFILL_STATE)
 _backfill_drain_event: asyncio.Event | None = None
 _backfill_drain_lock: asyncio.Lock | None = None
 
-# FTS heal worker primitives (SESF-38). The heal loop reuses the drain cadence
+# FTS heal worker primitives. The heal loop reuses the drain cadence
 # but owns a dedicated single-thread executor so a long blocking backfill never
 # competes with MLX embedding work on rag_engine's _embed_executor.
 _fts_heal_event: asyncio.Event | None = None
@@ -399,7 +399,7 @@ def _ensure_fts_heal_primitives() -> None:
     Mirrors ``_ensure_backfill_drain_primitives`` so the loop-bound ``asyncio``
     primitive and the heal worker's single-thread ThreadPoolExecutor are built
     inside the running event loop on first use. The executor is kept SEPARATE
-    from rag_engine's MLX ``_embed_executor`` (SESF-38 D-8) so a blocking FTS
+    from rag_engine's MLX ``_embed_executor`` so a blocking FTS
     backfill never contends with embedding work.
     """
     global _fts_heal_event, _fts_heal_state, _fts_heal_executor
@@ -554,7 +554,7 @@ def _embedding_status_payload() -> dict:
 
 
 def _fts_lag_payload() -> dict:
-    """Return the FTS-vs-Milvus lag block for ``/health`` (SESF-38 AC-6).
+    """Return the FTS-vs-Milvus lag block for ``/health``.
 
     Combines the static, server-wide lag from ``rag_engine.fts_lag_status`` with
     the heal worker's standing-failure state (``consecutive_failures`` and the
@@ -595,7 +595,7 @@ def _fts_lag_payload() -> dict:
 async def health(request: Request) -> JSONResponse:
     """Return server health JSON; ``?deep=1`` bypasses the provider-status cache.
 
-    While background startup is still running (SESF-70) this answers 503 with
+    While background startup is still running this answers 503 with
     ``status: "starting"`` and skips the FTS-lag scan, which needs Milvus.
     """
     deep = request is not None and request.query_params.get("deep") == "1"
@@ -947,7 +947,7 @@ async def _background_startup(
     executor: concurrent.futures.Executor,
     tasks: dict[str, asyncio.Task],
 ) -> None:
-    """Run the slow startup work after the port is bound (SESF-70).
+    """Run the slow startup work after the port is bound.
 
     Loads the model and Milvus on ``executor``, then starts the backfill-drain
     and FTS-heal workers and the global watcher. Each worker task is recorded in
@@ -960,8 +960,7 @@ async def _background_startup(
     _ensure_backfill_drain_primitives()
     tasks["backfill_drain"] = asyncio.create_task(_backfill_drain_worker())
 
-    # Recurring FTS heal worker (SESF-38) — replaces the old one-shot
-    # _fts_backfill. The first tick runs the startup catch-up backfill
+    # Recurring FTS heal worker. The first tick runs the startup catch-up backfill
     # unconditionally; later ticks heal only when the sentinel reports drift.
     # Runs on a dedicated executor so it never blocks the event loop.
     _ensure_fts_heal_primitives()
@@ -999,7 +998,7 @@ async def lifespan(app: Starlette):
     """
     Manage server startup and shutdown tasks for the Starlette application.
 
-    On startup: ensure the server directory exists, write the PID file, start the heartbeat thread, and schedule ``_background_startup`` (model preload, Milvus server mode, backfill-drain and FTS-heal workers, global file watcher). The context yields right away so uvicorn binds the port before the slow work finishes (SESF-70); ``/health`` answers 503 until it does.
+    On startup: ensure the server directory exists, write the PID file, start the heartbeat thread, and schedule ``_background_startup`` (model preload, Milvus server mode, backfill-drain and FTS-heal workers, global file watcher). The context yields right away so uvicorn binds the port before the slow work finishes; ``/health`` answers 503 until it does.
 
     On shutdown: cancel background startup and any workers it started, stop the heartbeat thread and remove the heartbeat file only if it was written by this process, stop the global file watcher, close server mode, remove the PID file, and perform any remaining cleanup.
     """

@@ -1,9 +1,8 @@
-"""In-place re-embed of the existing index after the SESF-57 padding-mask fix.
+"""In-place re-embed of the existing index with the current embedding code.
 
-Before SESF-57, document vectors embedded as a batch depended on the other texts
-in that batch, because padding leaked into attention. The fix makes new vectors
-correct, but rows that are already stored keep the drifted vectors until they are
-re-embedded. This module recomputes every stored vector from the row's stored
+A vector embedded without the padding mask depends on the other texts in its
+batch, because padding leaks into attention. Such a stored row keeps its drifted
+vector until it is re-embedded. This module recomputes every stored vector from the row's stored
 ``document`` and writes it back **in place**: the same primary key, every
 metadata field kept, FTS untouched. Search keeps working throughout, since each
 row is atomically either old or new.

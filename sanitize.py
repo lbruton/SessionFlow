@@ -1,9 +1,9 @@
-"""Retroactive secret sanitizer orchestration for SESF-42.
+"""Retroactive secret sanitizer orchestration.
 
 This module drives the dry-run/apply flow that retroactively removes secrets
 already embedded into the SessionFlow stores. It holds *policy only*: detection
 routes through :func:`secret_redaction.scan_spans`, and every store mutation goes
-through the two SESF-42 :mod:`rag_engine` primitives
+through the two :mod:`rag_engine` primitives
 (:func:`rag_engine.upsert_document` / :func:`rag_engine.delete_by_doc_id`).
 
 The flow has two entry points:
@@ -156,7 +156,7 @@ def _ensure_private_dir(path: Path) -> Path:
 
     ``mkdir(mode=...)`` is masked by the process umask and is a no-op on an
     already-existing directory, so an explicit ``chmod`` is what actually
-    guarantees the operator-private mode required by SESF-42 (Req 5.1) — audit
+    guarantees the operator-private mode: audit
     and checkpoint state may enumerate which turns held secrets.
     """
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
