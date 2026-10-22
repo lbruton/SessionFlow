@@ -47,6 +47,8 @@ Semantic search over Claude Code session transcripts. Independent project, origi
 
 ## Code Style
 
+Prose voice: [`.context/voice.md`](.context/voice.md) sets the dials for `.claude/rules/prose-core.md` (MCP tool descriptions, docstrings, comments, README).
+
 Docstring policy (enforced by `ruff`; config in `ruff.toml`, `D1` rules, Google convention, public API only):
 
 - Module docstring on every file.

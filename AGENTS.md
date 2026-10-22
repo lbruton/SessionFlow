@@ -46,7 +46,7 @@ Semantic search over agent session transcripts. Independent project, originally 
 
 ## Code Style
 
-See CLAUDE.md "Code Style" for the docstring policy and the pre-PR `ruff` gate (`ruff.toml`).
+See CLAUDE.md "Code Style" for the docstring policy and the pre-PR `ruff` gate (`ruff.toml`). Prose voice: `.context/voice.md`.
 
 ## Issue Tracking
 

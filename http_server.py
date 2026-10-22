@@ -1084,17 +1084,13 @@ async def lifespan(app: Starlette):
 mcp_server = Server(
     "sessionflow",
     instructions=(
-        "SessionFlow provides semantic search over conversation history across all "
-        "harnesses (Claude Code, Codex, OpenCode, Antigravity). To recall recent context "
-        "for the project you are working in, use search_all_sessions — when project "
-        "context is available (the client's X-Project-Root header) it scopes to that "
-        "project by default; pass project_root='*' to search every project. Omit "
-        "'query' to list the most recent turns chronologically. Results are 'hybrid'-"
-        "ranked (semantic relevance blended with recency) by default; pass sort_by="
-        "'relevance' or 'recency' to change that. To expand a specific hit, call get_turns "
-        "with the session_id and turn_index from a result. There is no automatic 'current "
-        "session' filter — MCP clients do not expose the live session ID to the server — "
-        "so pass session_id (from a prior result) only when you want to pin one conversation."
+        "SessionFlow searches past conversation turns from Claude Code, Codex, OpenCode "
+        "and Antigravity. To recall recent context, call search_all_sessions without "
+        "'query'; it lists the newest turns of the current project first. Pass "
+        "project_root='*' to search every project. Results blend relevance and recency "
+        "by default; pass sort_by='relevance' or 'recency' to change that. To read a hit "
+        "in context, call get_turns with its session_id and turn_index. The server cannot "
+        "see the live session ID, so pass session_id only to pin a session from a prior result."
     ),
 )
 register_tools(mcp_server)

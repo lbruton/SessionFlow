@@ -269,46 +269,46 @@ def build_search_all_sessions_schema() -> dict:
         "properties": {
             "query": {
                 "type": "string",
-                "description": "Natural language search query. Omit (or pass empty) to list the most recent turns chronologically, newest first.",
+                "description": "Natural language search query. Omit it or pass an empty string to list the most recent turns, newest first.",
             },
             "n": {
                 "type": "integer",
-                "description": "Number of results to return (default: 10)",
+                "description": "Number of turns to return (default: 10).",
                 "default": 10,
             },
             "git_branch": {
                 "type": "string",
-                "description": "Filter by git branch name (e.g., 'develop', 'feature/my-feature')",
+                "description": "Return only turns from this git branch, for example 'develop'.",
             },
             "project_root": {
                 "type": "string",
-                "description": "Filter to a specific project path, or '*' for all projects. Default: current project.",
+                "description": "Project path to search, or '*' for every project. Default: the current project.",
             },
             "provider": {
                 "type": "string",
-                "description": "Optional provider filter (e.g., codex, opencode, antigravity_cli)",
+                "description": "Return only turns from this provider, for example 'codex', 'opencode' or 'antigravity_cli'.",
             },
             "source_kind": {
                 "type": "string",
-                "description": "Optional provider source-kind filter (e.g., codex_rollout_jsonl)",
+                "description": "Return only turns from this source kind, for example 'codex_rollout_jsonl'.",
             },
             "sort_by": {
                 "type": "string",
                 "enum": sorted(LEGAL_SORT_BY),
-                "description": "Ranking strategy: 'relevance' (pure RRF relevance), 'recency' (newest first), or 'hybrid' (blended, default).",
+                "description": "Ranking: 'hybrid' blends relevance and recency (default), 'relevance' ranks by match only, 'recency' lists newest first.",
                 "default": "hybrid",
             },
             "date_from": {
                 "type": "string",
-                "description": "ISO date lower bound, inclusive (e.g., '2026-04-02'). Only returns turns on or after this date.",
+                "description": "Earliest date to include, as an ISO date, for example '2026-04-02'.",
             },
             "date_to": {
                 "type": "string",
-                "description": "ISO date upper bound, inclusive (e.g., '2026-04-02'). Only returns turns on or before this date.",
+                "description": "Latest date to include, as an ISO date, for example '2026-04-02'.",
             },
             "issue_id": {
                 "type": "string",
-                "description": "Optional issue id filter (e.g., 'SESF-25'). Restricts results to turns tagged with that issue; case-insensitive.",
+                "description": "Return only turns tagged with this issue ID, for example 'SESF-25'. Case-insensitive.",
             },
         },
         "required": [],
@@ -323,40 +323,36 @@ def register_tools(server: Server):
             types.Tool(
                 name="search_session",
                 description=(
-                    "Search conversation history for past discussions, decisions, code "
-                    "snippets, and error messages. Scoped to the current project when "
-                    "project context is available (sent by the client via the "
-                    "X-Project-Root header); otherwise searches across all sessions. Omit "
-                    "'query' to list the most recent turns chronologically (newest "
-                    "first). Ranked by 'hybrid' (blended semantic relevance + recency) by "
-                    "default; pass sort_by to choose 'relevance' or 'recency'. Use "
-                    "search_all_sessions to target a specific project or all projects."
+                    "Return past turns (discussions, decisions, code, errors) that match "
+                    "'query', from the current project. Without project context, search "
+                    "every project. Omit 'query' to list the most recent turns, newest "
+                    "first. Call search_all_sessions to search another project or every project."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "Natural language search query (e.g., 'approval workflow decision', 'error in deploy script'). Omit (or pass empty) to list the most recent turns chronologically, newest first.",
+                            "description": "Natural language search query, for example 'error in deploy script'. Omit it or pass an empty string to list the most recent turns, newest first.",
                         },
                         "n": {
                             "type": "integer",
-                            "description": "Number of results to return (default: 5)",
+                            "description": "Number of turns to return (default: 5).",
                             "default": 5,
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Optional drill-down: a session ID taken from a prior search result, to narrow the search to that single conversation. Omit to search the current project (or all sessions when no project context is available). (There is no automatic 'current session' — MCP clients do not expose the live session ID to the server; use get_turns with the session_id and turn_index from a result to expand one conversation.)",
+                            "description": "Session ID from a prior search result. Restricts the search to that one session. The server cannot see the live session ID, so there is no 'current session' value.",
                         },
                         "sort_by": {
                             "type": "string",
                             "enum": ["relevance", "recency", "hybrid"],
-                            "description": "Ranking strategy: 'relevance' (pure semantic), 'recency' (newest first), or 'hybrid' (blended, default).",
+                            "description": "Ranking: 'hybrid' blends relevance and recency (default), 'relevance' ranks by match only, 'recency' lists newest first.",
                             "default": "hybrid",
                         },
                         "issue_id": {
                             "type": "string",
-                            "description": "Optional issue id filter (e.g., 'SESF-25'). Restricts results to turns tagged with that issue; case-insensitive.",
+                            "description": "Return only turns tagged with this issue ID, for example 'SESF-25'. Case-insensitive.",
                         },
                     },
                     "required": [],
@@ -365,38 +361,36 @@ def register_tools(server: Server):
             types.Tool(
                 name="search_all_sessions",
                 description=(
-                    "Search past conversation sessions. When project context is "
-                    "available (sent by the client via the X-Project-Root header), "
-                    "scopes to that project by default; pass project_root='*' to search "
-                    "every project, or a path to target a specific one. Omit 'query' to "
-                    "list the most recent turns chronologically (newest first) — the best "
-                    "way to recall recent context. Ranked by 'hybrid' (blended semantic "
-                    "relevance + recency) by default; pass sort_by to choose 'relevance' "
-                    "or 'recency'. Optionally filter by git branch, provider, or date range."
+                    "Return past turns that match 'query', filtered by project, git "
+                    "branch, provider, date range or issue ID. The default scope is the "
+                    "current project; pass project_root='*' to search every project. Omit "
+                    "'query' to list the most recent turns, newest first, to recall recent "
+                    "context. Call get_turns with a result's session_id and turn_index to "
+                    "read a hit in context."
                 ),
                 inputSchema=build_search_all_sessions_schema(),
             ),
             types.Tool(
                 name="get_turns",
                 description=(
-                    "Retrieve conversation turns surrounding a specific turn index within a session. "
-                    "Use this after search_session or search_all_sessions to see the full context "
-                    "around a search hit."
+                    "Return the turns before and after one turn of a session. Requires "
+                    "'session_id' and 'turn_index', both from a search result. Call it after "
+                    "search_session or search_all_sessions to read a hit in context."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "The session ID (from a search result)",
+                            "description": "Session ID from a search result.",
                         },
                         "turn_index": {
                             "type": "integer",
-                            "description": "The turn index to center on (from a search result)",
+                            "description": "Turn index from a search result. The window is centered on this turn.",
                         },
                         "context": {
                             "type": "integer",
-                            "description": "Number of turns before and after to include (default: 2)",
+                            "description": "Number of turns to include before and after the center turn (default: 2).",
                             "default": 2,
                         },
                     },
@@ -405,7 +399,10 @@ def register_tools(server: Server):
             ),
             types.Tool(
                 name="get_session_stats",
-                description="Get session index statistics (turn count, session count, branches)",
+                description=(
+                    "Return turn, session, branch and provider counts for the current "
+                    "project, and the index location. Takes no arguments."
+                ),
                 inputSchema={
                     "type": "object",
                     "properties": {},
@@ -415,18 +412,18 @@ def register_tools(server: Server):
             types.Tool(
                 name="get_issue_timeline",
                 description=(
-                    "Return a deduplicated, chronological (oldest-first) cross-harness "
-                    "feed of every conversation turn that references a tracker issue "
-                    "(e.g. 'SESF-25'). Unions the structured issue_ids field with an FTS "
-                    "keyword fallback so un-tagged turns remain visible. Optionally filter "
-                    "by provider and date range, and cap the feed length with limit."
+                    "Return every turn that mentions an issue ID, oldest first, across all "
+                    "providers and without duplicates. Requires 'issue_id', for example "
+                    "'SESF-25'. Turns match on their issue tag or on a keyword search, so "
+                    "untagged mentions appear too. Pass 'limit', 'provider' or a date range "
+                    "to narrow the feed."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "issue_id": {
                             "type": "string",
-                            "description": "Tracker issue token to build the timeline for (e.g. 'SESF-25'); case-insensitive.",
+                            "description": "Issue ID to build the timeline for, for example 'SESF-25'. Case-insensitive.",
                         },
                         "limit": {
                             "type": "integer",
@@ -435,15 +432,15 @@ def register_tools(server: Server):
                         },
                         "provider": {
                             "type": "string",
-                            "description": "Optional provider filter (e.g. codex, opencode, antigravity_cli). Restricts the feed to that single provider.",
+                            "description": "Return only turns from this provider, for example 'codex', 'opencode' or 'antigravity_cli'.",
                         },
                         "date_from": {
                             "type": "string",
-                            "description": "ISO date lower bound, inclusive (e.g. '2026-04-02').",
+                            "description": "Earliest date to include, as an ISO date, for example '2026-04-02'.",
                         },
                         "date_to": {
                             "type": "string",
-                            "description": "ISO date upper bound, inclusive (e.g. '2026-04-30').",
+                            "description": "Latest date to include, as an ISO date, for example '2026-04-30'.",
                         },
                     },
                     "required": ["issue_id"],
@@ -452,27 +449,28 @@ def register_tools(server: Server):
             types.Tool(
                 name="cleanup_sessions",
                 description=(
-                    "Delete old session data from the index. "
-                    "Can delete by age (days), specific session ID, or git branch."
+                    "Delete turns from the index and return the number deleted. Pass at "
+                    "least one of 'max_age_days', 'session_id' or 'git_branch'. Deletion "
+                    "covers every project and cannot be undone."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "max_age_days": {
                             "type": "integer",
-                            "description": "Delete turns older than this many days",
+                            "description": "Delete turns older than this many days.",
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Delete all turns for this session ID",
+                            "description": "Delete every turn of this session.",
                         },
                         "git_branch": {
                             "type": "string",
-                            "description": "Delete all turns for this git branch",
+                            "description": "Delete every turn from this git branch, in every project.",
                         },
                         "project_root": {
                             "type": "string",
-                            "description": "Filter cleanup to a specific project path. Default: current project.",
+                            "description": "Accepted but not applied. Deletion is not scoped to a project.",
                         },
                     },
                     "required": [],
@@ -481,49 +479,46 @@ def register_tools(server: Server):
             types.Tool(
                 name="sanitize_index",
                 description=(
-                    "Retroactively find and remove secrets already indexed in the "
-                    "session store (Milvus document field, FTS keyword content, and the "
-                    "derived embedding). Defaults to a dry-run that reports per-rule "
-                    "counts, the number of affected turns, and an audit-file path "
-                    "WITHOUT writing. Pass apply=true together with confirm=true to "
-                    "redact-and-re-embed the affected turns (or drop=true to delete "
-                    "them); apply without confirm refuses and makes no changes. Never "
-                    "returns secret values — counts and offsets only. Redaction is not "
-                    "key rotation: rotate any exposed credential after an apply."
+                    "Return a dry-run report of secrets already in the index: per-rule "
+                    "counts, the number of affected turns and an audit-file path. The "
+                    "report holds counts and offsets, never secret values. Pass apply=true "
+                    "and confirm=true to redact and re-embed the affected turns, or add "
+                    "drop=true to delete them. Rotate every exposed credential after an "
+                    "apply, because redaction does not revoke it."
                 ),
                 inputSchema={
                     "type": "object",
                     "properties": {
                         "apply": {
                             "type": "boolean",
-                            "description": "Perform the destructive pass. Default false (dry-run report only).",
+                            "description": "Change the index. Default false: report only.",
                             "default": False,
                         },
                         "drop": {
                             "type": "boolean",
-                            "description": "When applying, delete affected turns instead of redacting them. Default false.",
+                            "description": "With apply, delete the affected turns instead of redacting them. Default false.",
                             "default": False,
                         },
                         "confirm": {
                             "type": "boolean",
-                            "description": "Required confirmation token for apply. Without it, apply refuses and makes no changes.",
+                            "description": "Required with apply. Without it, apply refuses and changes nothing.",
                             "default": False,
                         },
                         "project_root": {
                             "type": "string",
-                            "description": "Restrict the scope to a single project path.",
+                            "description": "Scan only this project path.",
                         },
                         "provider": {
                             "type": "string",
-                            "description": "Restrict the scope to a single harness provider (e.g. claude_code_cli, codex).",
+                            "description": "Scan only this provider, for example 'claude_code_cli' or 'codex'.",
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Restrict the scope to a single session id.",
+                            "description": "Scan only this session.",
                         },
                         "since": {
                             "type": "string",
-                            "description": "ISO date/timestamp lower bound (e.g. '2026-04-02'); only turns at or after this are scanned.",
+                            "description": "Scan only turns at or after this ISO date or timestamp, for example '2026-04-02'.",
                         },
                     },
                     "required": [],
