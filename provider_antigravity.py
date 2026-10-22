@@ -89,7 +89,7 @@ def _walk_length_delimited(data: bytes) -> Dict[str, str]:
     """Decode the Antigravity ``agyhub_summaries_proto.pb`` wire format.
 
     Schema-free varint / length-delimited walker (stdlib only, D-1). The file is
-    a sequence of **repeated top-level ``Field 1`` records** (SESF-29): the
+    a sequence of **repeated top-level ``Field 1`` records**: the
     conversation UUID and workspace submessage live one level *deeper*, inside
     each record, not flat at the top level. Each top-level ``Field 1`` payload is
     one conversation record decoded by ``_decode_record``; top-level ``Field 2``
@@ -256,7 +256,7 @@ class AntigravityAdapter:
         transcript_glob = "brain/*/.system_generated/logs/transcript.jsonl"
         history = self._load_history()
         # Desktop history.jsonl is empty; consult the summaries metadata as a
-        # second resolution layer (SESF-17). Gated to the desktop variant so the
+        # second resolution layer. Gated to the desktop variant so the
         # CLI path is provably untouched (AC-6). Parsed once per discovery pass,
         # mirroring _load_history(). The loader parses the summaries .pb, so a
         # desktop source's project_root resolves history -> summaries -> "unknown".
@@ -303,10 +303,8 @@ class AntigravityAdapter:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            # TODO(SESF-6+): step_index can collide across logical sessions if
-            # cursor provenance is shared (e.g. resumed conversation with a
-            # rewritten transcript). Revisit cursor scoping once we have
-            # ground-truth examples of multi-session step_index reuse.
+            # step_index can collide across logical sessions when they share cursor
+            # provenance, for example a resumed conversation with a rewritten transcript.
             raw_step = entry.get("step_index")
             raw_step_alt = entry.get("stepIndex")
             try:
@@ -385,10 +383,8 @@ class AntigravityAdapter:
         """Report adapter health for the active CLI or Desktop variant."""
         sources = self.discover_sources()
         if self.variant == "desktop":
-            # SESF-17 (AC-8 / D-7): root summaries metadata is now parsed and
-            # consulted for project_root resolution. The genuinely-opaque
-            # per-conversation brain/**/*.pb / *.db artifacts remain unparsed,
-            # so keep naming them — but do not claim full protobuf schema parsing.
+            # Root summaries metadata is parsed for project_root resolution. The
+            # per-conversation brain/**/*.pb and *.db artifacts are not parsed.
             limitations = [
                 "Root summaries metadata is parsed for project resolution; "
                 "per-conversation brain/**/*.pb (protobuf) and brain/**/*.db artifacts remain opaque in SESF-6."

@@ -12,9 +12,8 @@ from typing import Optional
 
 _LOG = logging.getLogger("sessionflow.embedding_budget")
 
-# Default chosen to be effectively non-blocking for a continuous server while
-# still bounding accidental runaway jobs. SESF-12 raised this from 200 (which
-# silently killed inserts after ~minutes of uptime).
+# High enough that a long-running server never hits it in normal use, yet still
+# bounds a runaway job. A low cap stops live inserts after minutes of uptime.
 DEFAULT_MAX_TURNS_PER_RUN = 100_000
 
 

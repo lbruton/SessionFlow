@@ -413,7 +413,7 @@ def load_index_state() -> Dict:
 
 
 def _canonicalize_transcript_keys(state: Dict):
-    """Re-key legacy ``transcripts`` entries by realpath (SESF-56).
+    """Re-key legacy ``transcripts`` entries by realpath.
 
     Older backfills keyed offsets by the ``~/.claude/projects`` symlink alias, while
     the watcher now looks them up by realpath. Without this, an alias-keyed entry
@@ -444,7 +444,7 @@ def _ensure_provider_cursor_state(state: Dict):
     """Ensure state has provider-scoped cursor storage plus legacy mirror.
 
     Existing Claude rows remain under ``transcripts`` for compatibility, while
-    SESF-6 provider-aware code can use ``providers.<provider>.<source_id>``.
+    provider-aware code uses ``providers.<provider>.<source_id>``.
     """
     state.setdefault("version", 2)
     state.setdefault("providers", {})

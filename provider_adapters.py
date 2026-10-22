@@ -135,7 +135,7 @@ PROJECT_PATH_MAP_ENV = "SESSIONFLOW_PROJECT_PATH_MAP"
 
 
 def parse_project_path_map(raw: Optional[str]) -> List[Tuple[str, str]]:
-    """Parse a ``SESSIONFLOW_PROJECT_PATH_MAP`` value into ``(old, new)`` prefixes (SESF-73).
+    """Parse a ``SESSIONFLOW_PROJECT_PATH_MAP`` value into ``(old, new)`` prefixes.
 
     The format is ``old=>new`` pairs separated by ``;``. Both sides must be
     absolute paths; trailing slashes are dropped. Malformed entries are skipped
@@ -173,7 +173,7 @@ def path_has_prefix(path: str, prefix: str) -> bool:
 
 
 def remap_project_root(path: str, mapping: Optional[List[Tuple[str, str]]] = None) -> str:
-    """Rewrite a project root that moved, using the longest matching prefix (SESF-73).
+    """Rewrite a project root that moved, using the longest matching prefix.
 
     Args:
         path: The project root as recorded by the provider.

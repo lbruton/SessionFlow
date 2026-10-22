@@ -124,7 +124,7 @@ class ClaudeCodeCliAdapter:
 
 
 class ClaudeCoworkLegacyAdapter(ClaudeCodeCliAdapter):
-    """Adapter for legacy Claude Cowork agent-mode transcripts (SESF-60).
+    """Adapter for legacy Claude Cowork agent-mode transcripts.
 
     Each agent-mode session ran Claude Code with a sandboxed config dir, so its
     transcripts are ordinary Claude Code JSONL under
@@ -135,7 +135,7 @@ class ClaudeCoworkLegacyAdapter(ClaudeCodeCliAdapter):
     ``local_<id>.json`` metadata instead. Only ``userSelectedFolders`` and
     ``cwd`` are read from it; the rest (system prompt, account details) is
     never touched. A folder that has moved since is rewritten through
-    ``SESSIONFLOW_PROJECT_PATH_MAP`` (SESF-73).
+    ``SESSIONFLOW_PROJECT_PATH_MAP``.
     """
 
     provider = "claude_cowork_legacy"
@@ -161,7 +161,7 @@ class ClaudeCoworkLegacyAdapter(ClaudeCodeCliAdapter):
         """Enumerate session transcripts, including subagent ones, skipping ``audit.jsonl``."""
         if not self.root.exists():
             return []
-        # The selected folder may have moved since the session ran (SESF-73).
+        # The selected folder may have moved since the session ran.
         path_map = parse_project_path_map(os.environ.get(PROJECT_PATH_MAP_ENV))
         project_roots: Dict[Path, str] = {}
         sources = []
