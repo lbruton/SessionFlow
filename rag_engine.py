@@ -1055,16 +1055,16 @@ def _issue_id_containment_token(issue_id: str) -> str:
     return issue_id.strip().upper().replace("%", "").replace("_", "")
 
 
-def _row_to_result(entity: Dict, defaults: Dict, distance: float = 1.0) -> Dict:
+def _row_to_result(entity: Dict, defaults: Dict, distance: Optional[float] = None) -> Dict:
     """Map a Milvus entity dict to the standard internal result format.
 
     Shared by ``search`` (vector hit entities) and ``_recent_listing`` (query
     result rows) so any new schema field added to the collection propagates to
     both code paths automatically.
 
-    ``distance`` is the COSINE distance from the query vector. Use the default
-    ``1.0`` sentinel for query-less listings where no similarity score exists
-    (1.0 distance → 0.0 similarity, which is the honest value).
+    ``distance`` is the COSINE distance from the query vector. Query-less
+    listings have no query vector, so they keep the default ``None`` (no score)
+    and ``tools.format_results`` labels them ``Listing`` (SESF-68).
     """
     return {
         "content": entity.get("document", ""),
@@ -1322,10 +1322,9 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
         return []
 
     defaults = default_provider_metadata()
-    # distance=1.0 sentinel: no query vector exists for recency listings, so
-    # 1.0 (maximum COSINE distance → 0 similarity) is the honest placeholder
-    # and prevents the 1 - None TypeError in format_results.
-    mapped = [_row_to_result(row, defaults, distance=1.0) for row in rows]
+    # distance=None: no query vector exists for recency listings, so there is
+    # no score to report (SESF-68; the old 1.0 placeholder printed as 0.00).
+    mapped = [_row_to_result(row, defaults, distance=None) for row in rows]
 
     return _rank_results(mapped, "recency", n)
 

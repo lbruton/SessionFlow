@@ -70,7 +70,9 @@ def format_results(results: list[dict]) -> str:
         branch = r.get("git_branch", "")
         ts = r.get("timestamp", "")[:19]  # trim to readable
         chunk_type = r.get("chunk_type", "turn")
-        similarity = 1 - r.get("distance", 0)
+        # Listing rows carry distance=None: there is no query to score against.
+        distance = r.get("distance", 0)
+        score = "Listing" if distance is None else f"Relevance: {1 - distance:.2f}"
 
         turn_index = r.get("turn_index", 0)
 
@@ -94,7 +96,7 @@ def format_results(results: list[dict]) -> str:
 
         output.append(" ".join(header_parts))
 
-        meta = f"*Turn: {turn_index} | Type: {chunk_type} | Relevance: {similarity:.2f}*"
+        meta = f"*Turn: {turn_index} | Type: {chunk_type} | {score}*"
         output.append(meta)
         output.append("")
         output.append(r.get("content", ""))
