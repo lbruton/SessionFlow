@@ -301,3 +301,47 @@ def test_memory_embed_queued_behind_a_transcript_batch_waits_on_the_mlx_thread(m
     assert slept == [_approx(0.2)]
     assert starts == [_approx(100.2)]
     assert throttle.remaining() == _approx(0.2)
+
+
+def test_throttle_batch_can_leave_the_stamp_to_the_caller():
+    import asyncio
+
+    from embedding_control import EmbedThrottle
+
+    clock = [5.0]
+    throttle = EmbedThrottle(cooldown_ms=200, clock=lambda: clock[0])
+
+    async def run():
+        async with throttle.batch(stamp=False):
+            pass
+
+    asyncio.run(run())
+    assert throttle.remaining() == 0.0
+
+
+def test_memory_embed_stamps_the_throttle_once_on_the_mlx_thread(monkeypatch):
+    # A second stamp from the event loop would move the deadline under a
+    # transcript batch that is already sleeping out the first one.
+    import asyncio
+    import threading
+
+    import embedding_control
+    import memory_index
+    import rag_engine
+
+    stamps = []
+
+    class _Counting(embedding_control.EmbedThrottle):
+        def done(self):
+            stamps.append(threading.current_thread().name)
+            super().done()
+
+    throttle = _Counting(cooldown_ms=200)
+    monkeypatch.setattr(embedding_control, "get_embed_throttle", lambda: throttle)
+    monkeypatch.setattr(rag_engine, "_embed_executor", None)
+    monkeypatch.setattr(rag_engine, "embed_texts", lambda texts: [[0.0] for _ in texts])
+
+    asyncio.run(memory_index.embed_for_index(["memory"]))
+
+    assert len(stamps) == 1
+    assert stamps[0] != threading.main_thread().name

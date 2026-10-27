@@ -140,11 +140,12 @@ class EmbedThrottle:
         )
 
     @asynccontextmanager
-    async def batch(self) -> AsyncIterator[None]:
+    async def batch(self, stamp: bool = True) -> AsyncIterator[None]:
         """Hold the throttle for one batch: wait out the cooldown, run, then stamp it.
 
         Concurrent batches on the same event loop run one at a time, so each
-        starts a full cooldown after the previous one finished.
+        starts a full cooldown after the previous one finished. Pass
+        ``stamp=False`` when the batch stamps the throttle itself.
         """
         loop = asyncio.get_running_loop()
         lock = self._locks.get(loop)
@@ -155,7 +156,8 @@ class EmbedThrottle:
             try:
                 yield
             finally:
-                self.done()
+                if stamp:
+                    self.done()
 
     def remaining(self) -> float:
         """Return the seconds left in the cooldown after the last finished batch."""

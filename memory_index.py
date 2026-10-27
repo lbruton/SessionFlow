@@ -66,7 +66,9 @@ async def embed_for_index(texts: List[str]) -> List[List[float]]:
     throttle = embedding_control.get_embed_throttle()
     batch = getattr(throttle, "batch", None)
     if batch is not None:
-        async with batch():
+        # _embed_after_cooldown stamps on mlx-embed; a second stamp here would
+        # push back a transcript batch already waiting out the first one.
+        async with batch(stamp=False):
             return await _embed_on_mlx_thread(texts)
     await throttle.wait()
     return await _embed_on_mlx_thread(texts)
