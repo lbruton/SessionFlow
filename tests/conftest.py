@@ -450,8 +450,17 @@ def stub_rag_engine(monkeypatch):
         get_model=lambda *args, **kwargs: object(),
         get_model_name=lambda *args, **kwargs: "embeddinggemma",
     )
+    before = set(sys.modules)
     monkeypatch.setitem(sys.modules, "rag_engine", module)
-    return module
+    yield module
+    # A project module first imported under the stub keeps a reference to it;
+    # evict it so later tests import it again against the real rag_engine.
+    root = str(Path(__file__).resolve().parent.parent)
+    tests_dir = str(Path(__file__).resolve().parent)
+    for name in set(sys.modules) - before:
+        path = getattr(sys.modules.get(name), "__file__", None) or ""
+        if path.startswith(root) and not path.startswith(tests_dir) and "/venv/" not in path:
+            sys.modules.pop(name, None)
 
 
 @pytest.fixture
