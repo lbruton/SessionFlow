@@ -39,8 +39,6 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent / "sql" / "memory"
 MAX_WRITE_RETRIES = 3
 
 DSN_ENV = "SESSIONFLOW_MEMORY_DSN"
-DSN_FILE_ENV = "SESSIONFLOW_MEMORY_DSN_FILE"
-DSN_FILE_DEFAULT = Path.home() / ".sessionflow" / "memory_dsn"
 
 DUMP_JOB = "pg-dump"
 DUMP_HOUR, DUMP_MINUTE = 2, 30
@@ -193,38 +191,17 @@ def content_hash(text: str) -> str:
 # --- DSN --------------------------------------------------------------------
 
 
-def dsn_file() -> Path:
-    """Return the DSN file path: ``SESSIONFLOW_MEMORY_DSN_FILE`` or ``~/.sessionflow/memory_dsn``."""
-    configured = os.environ.get(DSN_FILE_ENV)
-    return Path(configured).expanduser() if configured else DSN_FILE_DEFAULT
-
-
 def fetch_dsn() -> str:
-    """Return the memory store DSN the user configured, without ever logging it.
+    """Return the memory store DSN from ``SESSIONFLOW_MEMORY_DSN``, without ever logging it.
 
-    ``SESSIONFLOW_MEMORY_DSN`` in the environment wins; otherwise the DSN file
-    is read. How the value gets there (a secrets manager, a launcher, by hand)
-    is the user's choice. The file must not be readable by group or others.
+    How the value reaches the environment (a launcher, a secrets manager, by
+    hand) is the user's choice; SessionFlow reads nothing else.
     """
-    from_env = os.environ.get(DSN_ENV)
-    if from_env and from_env.strip():
-        return from_env.strip()
-    path = dsn_file()
-    try:
-        mode = path.stat().st_mode
-    except FileNotFoundError:
-        raise MemoryStoreError(
-            "dsn_unavailable",
-            f"memory store not configured: set {DSN_ENV} or write the DSN to {path} (mode 600)",
-        ) from None
-    if mode & 0o077:
-        raise MemoryStoreError(
-            "dsn_unavailable",
-            f"{path} is readable by other users; run chmod 600 on it",
-        )
-    value = path.read_text(encoding="utf-8").strip()
+    value = (os.environ.get(DSN_ENV) or "").strip()
     if not value:
-        raise MemoryStoreError("dsn_unavailable", f"{path} is empty")
+        raise MemoryStoreError(
+            "dsn_unavailable", f"memory store not configured: set {DSN_ENV}"
+        )
     return value
 
 

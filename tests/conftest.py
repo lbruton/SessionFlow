@@ -464,10 +464,9 @@ def stub_rag_engine(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_memory_dsn(monkeypatch, tmp_path):
-    """Keep a developer's real memory DSN (environment or file) out of every test."""
+def _no_ambient_memory_dsn(monkeypatch):
+    """Keep a developer's real memory DSN out of every test."""
     monkeypatch.delenv("SESSIONFLOW_MEMORY_DSN", raising=False)
-    monkeypatch.setenv("SESSIONFLOW_MEMORY_DSN_FILE", str(tmp_path / "no-memory-dsn"))
 
 
 @pytest.fixture
