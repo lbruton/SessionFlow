@@ -262,15 +262,20 @@ def test_memory_sync_reconcile_failure_still_ticks_and_stays_due():
             raise RuntimeError("milvus scan failed")
 
     index = _ReconcileBroken()
-    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0)
+    clock = [0.0]
+    state = http_server.MemorySyncState(index=index, clock=lambda: clock[0])
 
     asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
     assert index.calls == ["reconcile", "tick"]
     assert state.last_reconcile is None
     assert "milvus scan failed" in state.last_error
 
+    # Inside the retry delay the pass only ticks; after it, the reconcile runs again.
     asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
-    assert index.calls == ["reconcile", "tick", "reconcile", "tick"]
+    assert index.calls == ["reconcile", "tick", "tick"]
+    clock[0] += http_server.MEMORY_RECONCILE_RETRY_INTERVAL
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+    assert index.calls == ["reconcile", "tick", "tick", "reconcile", "tick"]
 
 
 def test_memory_sync_cancellation_propagates_from_reconcile():
@@ -318,6 +323,58 @@ def test_memory_sync_clears_the_timeout_error_after_a_good_tick():
     asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
 
     assert state.last_error is None
+
+
+def test_memory_sync_pauses_while_store_workers_are_still_busy(monkeypatch):
+    # A timed-out store call keeps its memory-db thread; the loop must not keep
+    # adding work until search has no worker left.
+    memory_store = importlib.import_module("memory_store")
+    index = _FakeMemoryIndex()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0)
+    monkeypatch.setattr(memory_store, "db_calls_in_flight",
+                        lambda: memory_store.DB_WORKERS - 1)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert index.calls == []
+    assert "paused" in state.last_error
+
+
+def test_memory_sync_runs_while_one_store_call_is_in_flight(monkeypatch):
+    memory_store = importlib.import_module("memory_store")
+    index = _FakeMemoryIndex()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, last_reconcile=0.0)
+    monkeypatch.setattr(memory_store, "db_calls_in_flight", lambda: 1)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert index.calls == ["tick"]
+    assert state.last_error is None
+
+
+def test_run_db_counts_calls_running_on_the_store_threads():
+    import threading
+
+    memory_store = importlib.import_module("memory_store")
+    release = threading.Event()
+    started = threading.Event()
+
+    def blocking():
+        started.set()
+        release.wait(5)
+        return "done"
+
+    async def run():
+        task = asyncio.ensure_future(memory_store.run_db(blocking))
+        await asyncio.get_running_loop().run_in_executor(None, started.wait, 5)
+        during = memory_store.db_calls_in_flight()
+        release.set()
+        result = await task
+        return during, result
+
+    during, result = asyncio.run(run())
+    assert during == 1 and result == "done"
+    assert memory_store.db_calls_in_flight() == 0
 
 
 def test_memory_sync_timeout_logs_where_the_tick_was_waiting(caplog):

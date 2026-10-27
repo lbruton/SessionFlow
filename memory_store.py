@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import os
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -210,18 +211,43 @@ def fetch_dsn() -> str:
 _db_executor: Optional[ThreadPoolExecutor] = None
 
 
+DB_WORKERS = 4
+_in_flight = 0
+_in_flight_lock = threading.Lock()
+
+
 def db_executor() -> ThreadPoolExecutor:
     """Return the executor that runs every blocking store call in the server."""
     global _db_executor
     if _db_executor is None:
-        _db_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="memory-db")
+        _db_executor = ThreadPoolExecutor(max_workers=DB_WORKERS, thread_name_prefix="memory-db")
     return _db_executor
+
+
+def db_calls_in_flight() -> int:
+    """Return how many store calls are running on memory-db threads now.
+
+    A cancelled ``run_db`` await does not stop its thread, so this counts calls
+    that outlived a timeout as well.
+    """
+    return _in_flight
+
+
+def _counted(fn: Callable[..., Any], args: tuple, kwargs: dict) -> Any:
+    global _in_flight
+    with _in_flight_lock:
+        _in_flight += 1
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        with _in_flight_lock:
+            _in_flight -= 1
 
 
 async def run_db(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Run a blocking store call on the memory-db executor."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(db_executor(), lambda: fn(*args, **kwargs))
+    return await loop.run_in_executor(db_executor(), _counted, fn, args, kwargs)
 
 
 # --- Nightly dump status ----------------------------------------------

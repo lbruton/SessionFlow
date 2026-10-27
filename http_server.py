@@ -491,6 +491,9 @@ MEMORY_SYNC_INTERVAL = float(os.getenv("SESSIONFLOW_MEMORY_SYNC_INTERVAL", "5"))
 # The full index-versus-Postgres reconcile runs on the first tick and then at
 # most this often.
 MEMORY_RECONCILE_INTERVAL = 6 * 3600
+# After a failed or timed-out reconcile, passes only tick until this many
+# seconds have passed, so a hanging reconcile cannot slow every pass.
+MEMORY_RECONCILE_RETRY_INTERVAL = 300
 # A tick or reconcile still running after this many seconds is cancelled and
 # reported. A full batch of 256 Milvus embeds fits well inside it.
 MEMORY_TICK_TIMEOUT = float(os.getenv("SESSIONFLOW_MEMORY_TICK_TIMEOUT", "600"))
@@ -506,7 +509,8 @@ class MemorySyncState:
     Attributes:
         index: The ``MemoryIndex`` (or any object with async ``tick`` and ``reconcile``).
         clock: Monotonic clock, injectable for tests.
-        last_reconcile: Clock value of the last full reconcile, or None.
+        last_reconcile: Clock value of the last successful reconcile, or None.
+        last_reconcile_attempt: Clock value of the last reconcile attempt, or None.
         last_error: Text of the last tick or reconcile failure, or None.
         tick_timeout: Seconds a tick or reconcile may run before it is cancelled.
     """
@@ -514,6 +518,7 @@ class MemorySyncState:
     index: object
     clock: object = field(default=time.monotonic)
     last_reconcile: float | None = None
+    last_reconcile_attempt: float | None = None
     last_error: str | None = None
     tick_timeout: float = MEMORY_TICK_TIMEOUT
 
@@ -596,15 +601,32 @@ def _scrub(exc: BaseException) -> str:
 async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> None:
     """Run one memory sync tick: the reconcile when due, then the pending-acknowledgement pass.
 
-    The tick runs even when the reconcile fails, and a failed reconcile stays
-    due for the next pass. Each step is bounded by ``state.tick_timeout``. A
-    failure or timeout is recorded on ``state`` and never ends the loop.
+    The tick runs even when the reconcile fails. A failed reconcile stays due
+    and runs again once ``MEMORY_RECONCILE_RETRY_INTERVAL`` has passed. Each
+    step is bounded by ``state.tick_timeout``. The pass is skipped while all
+    but one memory-db worker are busy, so calls left running by a timeout
+    cannot take the last worker from search. A failure, timeout or pause is
+    recorded on ``state`` and never ends the loop.
     """
+    busy = memory_store.db_calls_in_flight()
+    if busy >= memory_store.DB_WORKERS - 1:
+        message = (f"memory sync paused: {busy} of {memory_store.DB_WORKERS} store workers "
+                   "are busy, likely with calls left running by a timeout")
+        if state.last_error != message:
+            logger.warning("%s", message)
+        state.last_error = message
+        return
     now = state.clock()
     errors: list[str] = []
-    if first_tick or state.last_reconcile is None or (
+    retry_wait = (
+        not first_tick
+        and state.last_reconcile_attempt is not None
+        and state.last_reconcile_attempt != state.last_reconcile
+        and now - state.last_reconcile_attempt < MEMORY_RECONCILE_RETRY_INTERVAL
+    )
+    if not retry_wait and (first_tick or state.last_reconcile is None or (
         now - state.last_reconcile >= MEMORY_RECONCILE_INTERVAL
-    ):
+    )):
         try:
             reset = await _run_bounded(state.index.reconcile(), state.tick_timeout, "reconcile")
             state.last_reconcile = now
@@ -615,6 +637,8 @@ async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> 
         except Exception as exc:
             errors.append(_scrub(exc))
             logger.warning("Memory reconcile failed: %s", errors[-1])
+        finally:
+            state.last_reconcile_attempt = now
     try:
         await _run_bounded(state.index.tick(), state.tick_timeout, "tick")
     except asyncio.CancelledError:
