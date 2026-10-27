@@ -262,15 +262,20 @@ def test_memory_sync_reconcile_failure_still_ticks_and_stays_due():
             raise RuntimeError("milvus scan failed")
 
     index = _ReconcileBroken()
-    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0)
+    clock = [0.0]
+    state = http_server.MemorySyncState(index=index, clock=lambda: clock[0])
 
     asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
     assert index.calls == ["reconcile", "tick"]
     assert state.last_reconcile is None
     assert "milvus scan failed" in state.last_error
 
+    # Inside the retry delay the pass only ticks; after it, the reconcile runs again.
     asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
-    assert index.calls == ["reconcile", "tick", "reconcile", "tick"]
+    assert index.calls == ["reconcile", "tick", "tick"]
+    clock[0] += http_server.MEMORY_RECONCILE_RETRY_INTERVAL
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+    assert index.calls == ["reconcile", "tick", "tick", "reconcile", "tick"]
 
 
 def test_memory_sync_cancellation_propagates_from_reconcile():
@@ -281,3 +286,247 @@ def test_memory_sync_cancellation_propagates_from_reconcile():
     state = http_server.MemorySyncState(index=_Cancelled(), clock=lambda: 0.0)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+
+# ---------------------------------------------------------------------------
+# A tick or reconcile that never returns is bounded, reported in /health, and
+# leaves a log of where it was waiting. The loop goes on.
+# ---------------------------------------------------------------------------
+
+
+async def _waits_forever_inner():
+    await asyncio.Event().wait()
+
+
+class _StuckTick(_FakeMemoryIndex):
+    async def tick(self):
+        self.calls.append("tick")
+        await _waits_forever_inner()
+
+
+def test_memory_sync_tick_timeout_is_recorded_and_the_loop_goes_on():
+    index = _StuckTick()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, tick_timeout=0.05)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert "timed out" in state.last_error
+    assert "tick" in state.last_error
+
+
+def test_memory_sync_clears_the_timeout_error_after_a_good_tick():
+    index = _StuckTick()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, tick_timeout=0.05)
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+    state.index = _FakeMemoryIndex()
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert state.last_error is None
+
+
+def test_memory_sync_retry_delay_starts_when_a_slow_reconcile_ends():
+    clock = [0.0]
+
+    class _SlowBroken(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            clock[0] += http_server.MEMORY_RECONCILE_RETRY_INTERVAL + 1
+            raise RuntimeError("reconcile gave up")
+
+    index = _SlowBroken()
+    state = http_server.MemorySyncState(index=index, clock=lambda: clock[0])
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert index.calls == ["reconcile", "tick", "tick"]
+
+
+def test_memory_sync_success_marks_attempt_and_reconcile_together():
+    clock = [100.0]
+
+    class _Slow(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            clock[0] += 50
+            return 0
+
+    state = http_server.MemorySyncState(index=_Slow(), clock=lambda: clock[0])
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+    assert state.last_reconcile == state.last_reconcile_attempt == 150.0
+
+
+def test_memory_sync_pauses_while_store_workers_are_still_busy(monkeypatch):
+    # A timed-out store call keeps its memory-db thread; the loop must not keep
+    # adding work until search has no worker left.
+    memory_store = importlib.import_module("memory_store")
+    index = _FakeMemoryIndex()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0)
+    monkeypatch.setattr(memory_store, "db_calls_in_flight",
+                        lambda: memory_store.DB_WORKERS - 1)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert index.calls == []
+    assert "paused" in state.last_error
+
+
+def test_memory_sync_rechecks_store_workers_before_the_tick(monkeypatch):
+    memory_store = importlib.import_module("memory_store")
+    busy = [memory_store.DB_WORKERS - 2]
+
+    class _LeavesAWorkerBusy(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            busy[0] += 1  # a timed-out store call that keeps its thread
+            raise RuntimeError("reconcile timed out")
+
+    index = _LeavesAWorkerBusy()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0)
+    monkeypatch.setattr(memory_store, "db_calls_in_flight", lambda: busy[0])
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+    assert index.calls == ["reconcile"]
+    assert "reconcile timed out" in state.last_error
+    assert "paused" in state.last_error
+
+
+def test_memory_sync_runs_while_one_store_call_is_in_flight(monkeypatch):
+    memory_store = importlib.import_module("memory_store")
+    index = _FakeMemoryIndex()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, last_reconcile=0.0)
+    monkeypatch.setattr(memory_store, "db_calls_in_flight", lambda: 1)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert index.calls == ["tick"]
+    assert state.last_error is None
+
+
+def test_run_db_counts_calls_running_on_the_store_threads():
+    import threading
+
+    memory_store = importlib.import_module("memory_store")
+    release = threading.Event()
+    started = threading.Event()
+
+    def blocking():
+        started.set()
+        release.wait(5)
+        return "done"
+
+    async def run():
+        task = asyncio.ensure_future(memory_store.run_db(blocking))
+        await asyncio.get_running_loop().run_in_executor(None, started.wait, 5)
+        during = memory_store.db_calls_in_flight()
+        release.set()
+        result = await task
+        return during, result
+
+    during, result = asyncio.run(run())
+    assert during == 1 and result == "done"
+    assert memory_store.db_calls_in_flight() == 0
+
+
+def test_memory_sync_timeout_logs_where_the_tick_was_waiting(caplog):
+    import logging
+
+    state = http_server.MemorySyncState(index=_StuckTick(), clock=lambda: 0.0, tick_timeout=0.05)
+
+    with caplog.at_level(logging.WARNING, logger="sessionflow"):
+        asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    text = caplog.text
+    assert "_waits_forever_inner" in text, text
+    assert "Event.wait" in text or "wait" in text
+
+
+def test_memory_sync_reconcile_timeout_still_ticks_and_stays_due():
+    class _StuckReconcile(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            await _waits_forever_inner()
+
+    index = _StuckReconcile()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, tick_timeout=0.05)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+    assert index.calls == ["reconcile", "tick"]
+    assert state.last_reconcile is None
+    assert "reconcile timed out" in state.last_error
+
+
+def test_format_async_tasks_follows_the_await_chain():
+    async def middle():
+        await _waits_forever_inner()
+
+    async def run():
+        task = asyncio.create_task(middle(), name="probe-task")
+        await asyncio.sleep(0)
+        text = http_server.format_async_tasks()
+        task.cancel()
+        return text
+
+    text = asyncio.run(run())
+    assert "probe-task" in text
+    assert "middle" in text and "_waits_forever_inner" in text
+
+
+def test_sigusr1_logs_the_async_tasks(caplog):
+    import logging
+    import signal
+
+    async def run():
+        assert http_server.install_task_dump_handler()
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+            await asyncio.sleep(0.05)
+        finally:
+            asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR1)
+
+    with caplog.at_level(logging.WARNING, logger="sessionflow"):
+        asyncio.run(run())
+    assert "SIGUSR1" in caplog.text
+
+
+class _HealthIndex:
+    def __init__(self, last_tick):
+        self.last_tick = last_tick
+
+    def health(self):
+        return {"host": "minitron", "consumers": ["milvus", "fts:minitron"],
+                "milvus_blocked": None,
+                "last_tick": self.last_tick.isoformat() if self.last_tick else None}
+
+
+@pytest.mark.parametrize("age_s, stale", [(5.0, False), (10_000.0, True)])
+def test_memory_health_flags_a_stale_sync_loop(monkeypatch, age_s, stale):
+    from datetime import datetime, timedelta, timezone
+
+    index = _HealthIndex(datetime.now(timezone.utc) - timedelta(seconds=age_s))
+    state = http_server.MemorySyncState(index=index, tick_timeout=60.0)
+    monkeypatch.setitem(http_server._memory_runtime, "index", index)
+    monkeypatch.setitem(http_server._memory_runtime, "sync", state)
+    monkeypatch.setitem(http_server._memory_status, "ready", False)
+
+    payload = http_server._memory_health_payload()
+
+    assert payload["index"]["stale"] is stale
+    assert payload["index"]["last_tick_age_s"] == pytest.approx(age_s, abs=5.0)
+
+
+def test_memory_health_is_not_stale_before_the_first_tick(monkeypatch):
+    index = _HealthIndex(None)
+    monkeypatch.setitem(http_server._memory_runtime, "index", index)
+    monkeypatch.setitem(http_server._memory_runtime, "sync",
+                        http_server.MemorySyncState(index=index, tick_timeout=60.0))
+    monkeypatch.setitem(http_server._memory_status, "ready", False)
+
+    payload = http_server._memory_health_payload()
+
+    assert payload["index"]["stale"] is False
+    assert payload["index"]["last_tick_age_s"] is None

@@ -371,6 +371,10 @@ class MemoryIndex:
                 row = await run_db(self.store.canonical, memory_id)
                 if row is None:
                     return False
+                # Another server may have indexed this version since the batch was read.
+                if await run_db(self.store.is_acked, MILVUS_CONSUMER, memory_id,
+                                version=row["version"], generation=row["generation"]):
+                    return True
                 vector = None
                 if row["deleted_at"] is None:
                     vector = (await self.embed([row["text"]]))[0]
@@ -545,19 +549,23 @@ class MemoryIndex:
     # --- Loop, reconcile and rebuild -----------------------------------------
 
     async def tick(self) -> Dict[str, int]:
-        """Apply every record whose acknowledgement differs, up to ``TICK_BATCH`` per consumer."""
+        """Apply every record whose acknowledgement differs, up to ``TICK_BATCH`` per consumer.
+
+        This machine's FTS file goes first: it needs no embedding, so a slow or
+        stuck Milvus pass cannot hold it back.
+        """
         await self._refresh_model_block()
         done = {MILVUS_CONSUMER: 0, self.fts_consumer: 0}
         seen = 0
+        batch = await run_db(self.store.pending, self.fts_consumer, TICK_BATCH)
+        seen += len(batch)
+        for row in batch:
+            done[self.fts_consumer] += int(await self._apply_fts(row["memory_id"]))
         if not self.milvus_blocked:
             batch = await run_db(self.store.pending, MILVUS_CONSUMER, TICK_BATCH)
             seen += len(batch)
             for row in batch:
                 done[MILVUS_CONSUMER] += int(await self._apply_milvus(row["memory_id"]))
-        batch = await run_db(self.store.pending, self.fts_consumer, TICK_BATCH)
-        seen += len(batch)
-        for row in batch:
-            done[self.fts_consumer] += int(await self._apply_fts(row["memory_id"]))
         # Lagging until a tick finds nothing left to apply.
         self._lagging = seen > 0
         self.last_tick = datetime.now(timezone.utc)

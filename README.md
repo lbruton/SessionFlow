@@ -105,6 +105,7 @@ SessionFlow also stores memories: notes an agent writes on purpose, such as sess
 |----------|---------|-------------|
 | `SESSIONFLOW_MEMORY_DSN` | unset | Postgres connection string. SessionFlow reads it from the environment only. |
 | `SESSIONFLOW_MEMORY_SYNC_INTERVAL` | `5` | Seconds between index sync passes. |
+| `SESSIONFLOW_MEMORY_TICK_TIMEOUT` | `600` | Seconds one sync pass may run. A pass that runs longer is cancelled, its waiting tasks are logged, and `/health` reports it under `memory.sync_error`. `memory.index.stale` is true when the last pass is older than this plus three intervals. |
 | `SESSIONFLOW_MEMORY_SIMILAR_THRESHOLD` | `0.88` | Similarity at which `add_memory` lists a memory as similar. |
 | `SESSIONFLOW_MEMORY_AUDIT_AGE_DAYS` | `21` | Age at which the audit lists an open item or blocker. |
 | `SESSIONFLOW_HOST_NAME` | short host name | Names this machine's keyword index in the acknowledgements. |
