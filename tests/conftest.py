@@ -463,6 +463,13 @@ def stub_rag_engine(monkeypatch):
             sys.modules.pop(name, None)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_secret_fetch(monkeypatch):
+    """Point the memory DSN fetch at a missing binary so no test ever reaches Infisical."""
+    monkeypatch.setenv("SESSIONFLOW_INFISICAL_AGENT", "/nonexistent/infisical-agent")
+    monkeypatch.delenv("SESSIONFLOW_MEMORY_DSN", raising=False)
+
+
 @pytest.fixture
 def memory_pg():
     """Yield a Postgres DSN whose search_path is a fresh, empty schema for one test.
