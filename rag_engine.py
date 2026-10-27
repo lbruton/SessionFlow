@@ -27,7 +27,7 @@ from pathlib import Path
 os.environ['HF_HUB_OFFLINE'] = '1'
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 
-from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
+from pymilvus import MilvusClient, CollectionSchema, FieldSchema
 from pymilvus.exceptions import MilvusException
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -1519,7 +1519,8 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
                        providers: Optional[List[str]] = None,
                        date_from: Optional[str] = None,
                        date_to: Optional[str] = None,
-                       db_path: Optional[str] = None) -> List[Dict]:
+                       db_path: Optional[str] = None,
+                       newest: bool = False) -> List[Dict]:
     """Cross-harness, deduplicated, chronological feed of turns for an issue.
 
     Unions a structured Milvus source (``issue_ids like "%,ID,%"`` streamed batch
@@ -1543,9 +1544,12 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         date_from: Optional inclusive ISO-8601 lower bound on ``timestamp``.
         date_to: Optional inclusive ISO-8601 upper bound on ``timestamp``.
         db_path: Optional Milvus DB path override (also drives the FTS sidecar).
+        newest: When true, keep the newest ``limit`` turns (via ``_NewestN``) and
+            return them newest first; the default keeps the oldest ``limit``.
 
     Returns:
-        A list of timeline entry dicts, oldest first; ``[]`` when nothing
+        A list of timeline entry dicts, oldest first (newest first when
+        ``newest`` is set); ``[]`` when nothing
         references the issue (Req 4.7).
     """
     if not is_valid_issue_token(issue_id):
@@ -1589,7 +1593,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     # matter how many turns reference the issue — and a server-side cap stays
     # impossible (Milvus query_iterator order is undefined; it can't sort by a
     # scalar), so streaming is the only correctness-preserving bound.
-    collector = _OldestN(limit)
+    collector = _NewestN(limit) if newest else _OldestN(limit)
     structured_count = 0
     for batch in _query_batches(output_fields, filter_expr=filter_expr, db_path=db_path):
         structured_count += len(batch)
@@ -1846,7 +1850,8 @@ def sessions_by_issue(issue_ids: List[str], *, limit: int,
     rows: List[Dict] = []
     if issue_ids:
         for issue in issue_ids:
-            rows.extend(get_issue_timeline(issue, limit=SESSION_SCAN_LIMIT, db_path=db_path))
+            rows.extend(get_issue_timeline(issue, limit=SESSION_SCAN_LIMIT,
+                                           db_path=db_path, newest=True))
     elif day is not None and project_roots:
         rows = _rows_on_day(day, project_roots, db_path)
     bounds = chicago_day_bounds(day) if day is not None else None

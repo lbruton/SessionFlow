@@ -325,6 +325,56 @@ def test_mismatched_local_model_refuses_memory_vectors(store, milvus, tmp_path):
     assert "modernbert" in other.health()["milvus_blocked"]
 
 
+def test_running_index_stops_writing_after_the_stored_model_changes(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path)
+    first = store.add(_rec("before the swap"))
+    asyncio.run(idx.tick())
+    assert first.memory_id in milvus.rows()
+
+    store.bump_generation(model_name="modernbert", vector_dim=768)
+    second = store.add(_rec("after the swap"))
+    asyncio.run(idx.tick())
+
+    assert second.memory_id not in milvus.rows()
+    assert "modernbert" in idx.health()["milvus_blocked"]
+    assert second.memory_id in {r["memory_id"] for r in store.pending("milvus")}
+    assert store.pending("fts:minitron") == []
+
+    store.bump_generation(model_name="embeddinggemma", vector_dim=768)
+    asyncio.run(idx.tick())
+
+    assert idx.health()["milvus_blocked"] is None
+    assert second.memory_id in milvus.rows()
+
+
+def test_milvus_write_refuses_a_stale_model_between_ticks(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path)
+    written = store.add(_rec("raced the swap"))
+    store.bump_generation(model_name="modernbert", vector_dim=768)
+
+    assert asyncio.run(idx.apply(written.memory_id)) == "pending"
+
+    assert written.memory_id not in milvus.rows()
+    assert "modernbert" in idx.health()["milvus_blocked"]
+
+
+def test_reconcile_still_fixes_fts_when_the_milvus_scan_fails(store, milvus, tmp_path, monkeypatch):
+    idx = _index(store, milvus, tmp_path)
+    written = store.add(_rec("fts drift"))
+    asyncio.run(idx.tick())
+    with closing(sqlite3.connect(idx.fts_path)) as conn, conn:
+        conn.execute("UPDATE memories_fts SET version = 7 WHERE memory_id = ?", (written.memory_id,))
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("milvus scan failed")
+
+    monkeypatch.setattr(milvus, "query", broken)
+    with pytest.raises(RuntimeError, match="milvus scan failed"):
+        asyncio.run(idx.reconcile())
+
+    assert [r["memory_id"] for r in store.pending("fts:minitron")] == [written.memory_id]
+
+
 # --- Full reconcile (D-23) ---------------------------------------------------
 
 

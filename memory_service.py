@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Pat
 
 import memory_store
 import secret_redaction
+from collection_specs import memories_spec
 from embedding_control import _env_float, _env_int
 from memory_store import (
     MemoryFilters,
@@ -56,6 +57,16 @@ MAX_MEMORY_BYTES = 65536
 """Largest accepted memory text, counted in UTF-8 bytes."""
 
 DEFAULT_USER_ID = memory_store.DEFAULT_USER_ID
+
+
+def _index_key_limit(name: str) -> int:
+    # The embedding dimension does not affect scalar field limits.
+    return next(f.max_length for f in memories_spec(1).fields if f.name == name)
+
+
+# Longest project and user_id the memories index collection accepts, in UTF-8 bytes.
+MAX_PROJECT_BYTES = _index_key_limit("project")
+MAX_USER_ID_BYTES = _index_key_limit("user_id")
 
 # Types the audit lists when they stay active longer than the audit age.
 STALE_TYPES = frozenset({"open-item", "blocker"})
@@ -236,12 +247,31 @@ class MemoryService:
         return type_
 
     @staticmethod
-    def _write_project(project: Any) -> str:
+    def _check_index_key(name: str, value: str, limit: int) -> str:
+        size = len(value.encode("utf-8"))
+        if size > limit:
+            raise MemoryInputError(
+                "invalid_field",
+                f"{name} is {size} bytes; the limit is {limit} bytes (UTF-8)",
+                field=name, limit=limit, received=size,
+            )
+        return value
+
+    @classmethod
+    def _write_project(cls, project: Any) -> str:
         if not isinstance(project, str) or not project.strip():
             raise MemoryInputError("missing_field", "project is required", field="project")
         if project.strip() == "*":
             raise MemoryInputError("invalid_project", "A write needs one project, not \"*\"")
-        return project.strip()
+        return cls._check_index_key("project", project.strip(), MAX_PROJECT_BYTES)
+
+    @classmethod
+    def _write_user_id(cls, user_id: Any) -> str:
+        if not user_id:
+            return DEFAULT_USER_ID
+        if not isinstance(user_id, str):
+            raise MemoryInputError("invalid_field", "user_id must be a string", field="user_id")
+        return cls._check_index_key("user_id", user_id, MAX_USER_ID_BYTES)
 
     @staticmethod
     def _scope_project(project: Any) -> str:
@@ -273,7 +303,7 @@ class MemoryService:
             project=project,
             type=type_,
             content_hash=content_hash(text),
-            user_id=args.get("user_id") or DEFAULT_USER_ID,
+            user_id=self._write_user_id(args.get("user_id")),
             topic_key=args.get("topic_key") or None,
             extra=self._check_extra(args.get("extra")),
             issue_ids=_issue_ids(text),

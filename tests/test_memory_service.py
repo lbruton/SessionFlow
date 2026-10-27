@@ -17,9 +17,10 @@ import pytest
 try:
     import memory_service
     from memory_service import MemoryInputError, MemoryService
-    from memory_store import MemoryStore, MemoryStoreError
+    from memory_store import MemoryFilters, MemoryStore, MemoryStoreError
 except ImportError:
-    memory_service = MemoryInputError = MemoryService = MemoryStore = MemoryStoreError = None
+    memory_service = MemoryInputError = MemoryService = None
+    MemoryFilters = MemoryStore = MemoryStoreError = None
 
 AWS_KEY = "AKIA" + "1234567890ABCDEF"
 T0 = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
@@ -166,6 +167,28 @@ def test_bad_agent_lists_the_allowed_values(svc, agent):
     err = _err(svc.add, {"text": "x", "agent_id": agent, "project": "sessionflow", "type": "fact"})
     assert err.code == "invalid_agent"
     assert "claude-code" in str(err) and "antigravity" in str(err)
+
+
+@pytest.mark.parametrize("field", ["project", "user_id"])
+def test_oversized_index_keys_are_rejected_before_storing(svc, store, field):
+    err = _err(svc.add, {"text": "x", "agent_id": "codex", "project": "sessionflow",
+                         "type": "fact", field: "p" * 129})
+    assert err.code == "invalid_field"
+    assert field in str(err) and "128" in str(err) and "129" in str(err)
+    scan = {"project": "*", "status": None}
+    if field == "user_id":
+        scan["user_id"] = "p" * 129
+    assert store.count(MemoryFilters(**scan)) == 0
+    assert store.count(MemoryFilters(project="*", status=None)) == 0
+
+
+def test_project_limit_counts_utf8_bytes(svc):
+    over = "é" * 65  # 130 bytes, 65 characters
+    assert _err(svc.add, {"text": "x", "agent_id": "codex", "project": over,
+                          "type": "fact"}).code == "invalid_field"
+    exact = "é" * 64  # 128 bytes
+    written = _add(svc, "multibyte project", project=exact)
+    assert asyncio.run(svc.get(written["memory_id"], project=exact))["project"] == exact
 
 
 # --- Issue ids (AC-11) -------------------------------------------------------

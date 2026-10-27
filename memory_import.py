@@ -24,10 +24,11 @@ from memory_service import (
     IMPORT_ONLY_AGENT,
     LEGAL_MEMORY_AGENTS,
     LEGAL_MEMORY_TYPES,
+    MAX_PROJECT_BYTES,
     MemoryService,
     _issue_ids,
 )
-from memory_store import DEFAULT_USER_ID, MemoryStoreError, NewMemory, content_hash, run_db
+from memory_store import MemoryStoreError, NewMemory, content_hash, run_db
 
 OUTCOMES = ("imported", "deduplicated", "updated", "unchanged", "skipped")
 TYPE_MAP = {"retro-learning": "discovery"}
@@ -77,9 +78,11 @@ def _map(record: Dict[str, Any]) -> Dict[str, Any]:
     extra = metadata
     if record.get("categories"):
         extra["mem0_categories"] = list(record["categories"])
+    # The add path bypasses MemoryService.add, so apply its index-key limits here.
+    MemoryService._check_index_key("project", project, MAX_PROJECT_BYTES)
+    user_id = MemoryService._write_user_id(record.get("user_id"))
     return {"project": project, "type": type_, "agent_id": agent, "created_at": created,
-            "updated_at": updated, "user_id": record.get("user_id") or DEFAULT_USER_ID,
-            "extra": extra}
+            "updated_at": updated, "user_id": user_id, "extra": extra}
 
 
 def _with_id(extra: Dict[str, Any], ids: List[str]) -> Dict[str, Any]:
@@ -100,6 +103,11 @@ async def _import_one(record: Dict[str, Any], service: MemoryService) -> Dict[st
             if existing.get("deleted_at") is not None:
                 raise _Skip("deleted in SessionFlow after an earlier import")
             ids = list((existing.get("extra") or {}).get("mem0_ids") or [])
+            if len(set(ids)) > 1:
+                # Merged duplicates share one memory; comparing against either
+                # record's metadata would rewrite it on every run.
+                entry.update(outcome="unchanged", memory_id=existing["memory_id"])
+                return entry
             changes = {
                 "text": text, "type": fields["type"], "agent_id": fields["agent_id"],
                 "extra": _with_id(fields["extra"], ids + [mem0_id]),

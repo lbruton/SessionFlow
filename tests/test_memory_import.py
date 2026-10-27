@@ -201,6 +201,22 @@ def test_second_run_on_the_same_export_changes_nothing(svc, memory_pg, tmp_path)
     assert {r["outcome"] for r in report["records"]} == {"unchanged"}
 
 
+def test_merged_duplicates_with_different_metadata_stay_put_on_reruns(svc, memory_pg, store, tmp_path):
+    data = _export(_record("m-a", "same words", source="wrap"),
+                   _record("m-b", "same words", source="manual"))
+    _run(svc, data, tmp_path, "first.json")
+    (row,) = _all(store)
+    assert sorted(row["extra"]["mem0_ids"]) == ["m-a", "m-b"]
+    before = _state(memory_pg)
+
+    for name in ("second.json", "third.json"):
+        report = _run(svc, data, tmp_path, name)
+        assert _state(memory_pg) == before
+        assert _outcome(report, "m-a")["outcome"] == "unchanged"
+        assert _outcome(report, "m-b")["outcome"] == "unchanged"
+    assert len(_all(store)) == 1
+
+
 def test_changed_record_writes_one_new_version(svc, store, tmp_path):
     _run(svc, _export(_record("m-1", "first wording")), tmp_path, "first.json")
     (row,) = _all(store)
@@ -233,3 +249,12 @@ def test_report_counts_per_project_and_type(svc, tmp_path):
     assert report["counts"]["(none)"]["session-summary"]["skipped"] == 1
     assert sorted(r["mem0_id"] for r in report["records"]) == ["m-1", "m-2", "m-3", "m-4"]
     assert report["totals"]["read"] == 4
+
+
+@pytest.mark.parametrize("field", ["project", "user"])
+def test_oversized_scope_values_are_skipped_not_stored(svc, store, tmp_path, field):
+    kwargs = {"project": "p" * 129} if field == "project" else {"user": "u" * 129}
+    report = _run(svc, _export(_record("m-big", "too long a scope", **kwargs)), tmp_path)
+    assert _all(store) == []
+    entry = _outcome(report, "m-big")
+    assert entry["outcome"] == "skipped" and "128" in entry["reason"]

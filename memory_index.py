@@ -60,15 +60,23 @@ async def embed_for_index(texts: List[str]) -> List[List[float]]:
     batches. ``rag_engine.embed_texts`` routes the MLX work to ``mlx-embed``.
     """
     throttle = embedding_control.get_embed_throttle()
+    batch = getattr(throttle, "batch", None)
+    if batch is not None:
+        async with batch():
+            return await _embed_on_mlx_thread(texts)
     await throttle.wait()
     try:
-        loop = asyncio.get_running_loop()
-        executor = rag_engine._embed_executor
-        if executor is not None:
-            return await loop.run_in_executor(executor, rag_engine.embed_texts, texts)
-        return await asyncio.to_thread(rag_engine.embed_texts, texts)
+        return await _embed_on_mlx_thread(texts)
     finally:
         throttle.done()
+
+
+async def _embed_on_mlx_thread(texts: List[str]) -> List[List[float]]:
+    loop = asyncio.get_running_loop()
+    executor = rag_engine._embed_executor
+    if executor is not None:
+        return await loop.run_in_executor(executor, rag_engine.embed_texts, texts)
+    return await asyncio.to_thread(rag_engine.embed_texts, texts)
 
 
 class MemoryFTS:
@@ -289,16 +297,33 @@ class MemoryIndex:
         """Ensure the collection, check the memory model, and rebuild a missing or damaged FTS file."""
         await run_db(rag_engine._ensure_collection, self.milvus, self.milvus_uri, spec=self.spec)
         meta = await run_db(self.store.claim_index_model, self.model_name, self.spec.vector_dim())
-        if meta["model_name"] != self.model_name or meta["vector_dim"] != self.spec.vector_dim():
-            self.milvus_blocked = (
-                f"local model {self.model_name} ({self.spec.vector_dim()} dims) does not match "
-                f"the memory model {meta['model_name']} ({meta['vector_dim']} dims); "
-                "memory vectors are not written from this machine"
-            )
-            logger.warning("Memory Milvus writes refused: %s", self.milvus_blocked)
+        self._set_model_block(meta["model_name"], meta["vector_dim"])
         self.fts = await run_db(MemoryFTS, self.fts_path)
         if self.fts.recreated:
             await self._rebuild_fts()
+
+    def _model_mismatch(self, model_name: Any, vector_dim: Any) -> Optional[str]:
+        if model_name == self.model_name and vector_dim == self.spec.vector_dim():
+            return None
+        return (
+            f"local model {self.model_name} ({self.spec.vector_dim()} dims) does not match "
+            f"the memory model {model_name} ({vector_dim} dims); "
+            "memory vectors are not written from this machine"
+        )
+
+    def _set_model_block(self, model_name: Any, vector_dim: Any) -> None:
+        reason = self._model_mismatch(model_name, vector_dim)
+        if reason and reason != self.milvus_blocked:
+            logger.warning("Memory Milvus writes refused: %s", reason)
+        self.milvus_blocked = reason
+
+    async def _refresh_model_block(self) -> None:
+        """Compare the stored memory model with this machine's and set or clear the block."""
+        meta = await run_db(self.store.index_meta)
+        if meta["model_name"] is None:
+            meta = await run_db(self.store.claim_index_model, self.model_name,
+                                self.spec.vector_dim())
+        self._set_model_block(meta["model_name"], meta["vector_dim"])
 
     def health(self) -> Dict[str, Any]:
         """Return the consumer names, the Milvus block reason and the last tick time."""
@@ -325,6 +350,8 @@ class MemoryIndex:
             return False
         try:
             for _ in range(MAX_EMBED_RACES):
+                if self.milvus_blocked:
+                    return False
                 row = await run_db(self.store.canonical, memory_id)
                 if row is None:
                     return False
@@ -348,7 +375,9 @@ class MemoryIndex:
         """Write the canonical row to Milvus under the record lock.
 
         Returns the row written, or None when the text changed after it was
-        embedded, so the caller embeds again.
+        embedded, so the caller embeds again. A vector is refused, and the
+        block set, when the stored memory model is not this machine's model:
+        the check reads the model under the same lock as the write.
         """
         pk = rag_engine._pk_from_doc_id(memory_id)
         with self.store.locked_canonical(memory_id) as row:
@@ -358,6 +387,9 @@ class MemoryIndex:
                 self.milvus.delete(collection_name=self.spec.name, ids=[pk])
                 return row
             if vector is None or row["content_hash"] != embedded_hash:
+                return None
+            self._set_model_block(row["index_model_name"], row["index_vector_dim"])
+            if self.milvus_blocked:
                 return None
             extra = _extra(row)
             self.milvus.upsert(collection_name=self.spec.name, data=[{
@@ -491,6 +523,7 @@ class MemoryIndex:
 
     async def tick(self) -> Dict[str, int]:
         """Apply every record whose acknowledgement differs, up to ``TICK_BATCH`` per consumer."""
+        await self._refresh_model_block()
         done = {MILVUS_CONSUMER: 0, self.fts_consumer: 0}
         seen = 0
         if not self.milvus_blocked:
@@ -521,23 +554,29 @@ class MemoryIndex:
         state = await run_db(self.store.index_state)
         canonical = {r["memory_id"]: r for r in state}
         reset = 0
+        milvus_error: Optional[Exception] = None
+        await self._refresh_model_block()
 
         if not self.milvus_blocked:
-            milvus_rows = await run_db(self._milvus_rows)
-            stale = []
-            for mid, row in canonical.items():
-                held = milvus_rows.get(mid)
-                if row["deleted"]:
-                    if held is not None:
+            # The FTS half runs even when Milvus fails; the failure is raised after it.
+            try:
+                milvus_rows = await run_db(self._milvus_rows)
+                stale = []
+                for mid, row in canonical.items():
+                    held = milvus_rows.get(mid)
+                    if row["deleted"]:
+                        if held is not None:
+                            stale.append(mid)
+                    elif held is None or held["version"] != row["version"] \
+                            or held["generation"] != row["generation"]:
                         stale.append(mid)
-                elif held is None or held["version"] != row["version"] \
-                        or held["generation"] != row["generation"]:
-                    stale.append(mid)
-            strays = [r["id"] for mid, r in milvus_rows.items() if mid not in canonical]
-            if strays:
-                await run_db(self.milvus.delete, collection_name=self.spec.name, ids=strays)
-            if stale:
-                reset += await run_db(self.store.reset_acks, stale, MILVUS_CONSUMER)
+                strays = [r["id"] for mid, r in milvus_rows.items() if mid not in canonical]
+                if strays:
+                    await run_db(self.milvus.delete, collection_name=self.spec.name, ids=strays)
+                if stale:
+                    reset += await run_db(self.store.reset_acks, stale, MILVUS_CONSUMER)
+            except Exception as exc:  # noqa: BLE001 - re-raised after the FTS half
+                milvus_error = exc
 
         fts_rows = await run_db(self.fts.rows)
         stale = []
@@ -554,6 +593,8 @@ class MemoryIndex:
             await run_db(self.fts.forget, stale + strays)
         if stale:
             reset += await run_db(self.store.reset_acks, stale, self.fts_consumer)
+        if milvus_error is not None:
+            raise milvus_error
         return reset
 
     async def _rebuild_fts(self) -> None:
@@ -564,6 +605,7 @@ class MemoryIndex:
 
     async def rebuild(self) -> Dict[str, Any]:
         """Replay every record in ``change_seq`` order into both consumers, then check acknowledgements."""
+        await self._refresh_model_block()
         state = await run_db(self.store.index_state)
         live = {r["memory_id"] for r in state if not r["deleted"]}
         if not self.milvus_blocked:

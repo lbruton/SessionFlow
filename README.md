@@ -109,7 +109,7 @@ SessionFlow also stores memories: notes an agent writes on purpose, such as sess
 | `SESSIONFLOW_MEMORY_AUDIT_AGE_DAYS` | `21` | Age at which the audit lists an open item or blocker. |
 | `SESSIONFLOW_HOST_NAME` | short host name | Names this machine's keyword index in the acknowledgements. |
 
-`setup.sh` installs `hooks/memory-session-start.py` for Claude Code and Codex. At session start it shows the three newest session summaries and recent turns, and falls back to a local cache when the server cannot answer.
+`setup.sh` copies `hooks/memory-session-start.py` into the Claude Code and Codex hook folders. At session start it shows the three newest session summaries and recent turns, and falls back to a local cache when the server cannot answer. Setup registers the hook for Codex and prints the Claude Code `~/.claude/settings.json` SessionStart entry for you to add by hand.
 
 ```bash
 python memory_cli.py audit                        # Likely duplicates, aged open items, counts

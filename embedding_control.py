@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import math
 import os
 import time
-from typing import Awaitable, Callable, Optional
+import weakref
+from typing import AsyncIterator, Awaitable, Callable, Optional
 
 _LOG = logging.getLogger("sessionflow.embedding_budget")
 
@@ -130,6 +132,28 @@ class EmbedThrottle:
         self._clock = clock
         self._sleep = sleep
         self._last_done = 0.0
+        # An asyncio.Lock binds to one event loop, so each loop gets its own.
+        self._locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+            weakref.WeakKeyDictionary()
+        )
+
+    @asynccontextmanager
+    async def batch(self) -> AsyncIterator[None]:
+        """Hold the throttle for one batch: wait out the cooldown, run, then stamp it.
+
+        Concurrent batches on the same event loop run one at a time, so each
+        starts a full cooldown after the previous one finished.
+        """
+        loop = asyncio.get_running_loop()
+        lock = self._locks.get(loop)
+        if lock is None:
+            lock = self._locks[loop] = asyncio.Lock()
+        async with lock:
+            await self.wait()
+            try:
+                yield
+            finally:
+                self.done()
 
     async def wait(self) -> None:
         """Sleep until the cooldown after the last finished batch has passed."""

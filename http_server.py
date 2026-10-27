@@ -518,24 +518,33 @@ def _scrub(exc: BaseException) -> str:
 async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> None:
     """Run one memory sync tick: the reconcile when due, then the pending-acknowledgement pass.
 
-    A failure is recorded on ``state`` and never ends the loop.
+    The tick runs even when the reconcile fails, and a failed reconcile stays
+    due for the next pass. A failure is recorded on ``state`` and never ends
+    the loop.
     """
     now = state.clock()
-    try:
-        if first_tick or state.last_reconcile is None or (
-            now - state.last_reconcile >= MEMORY_RECONCILE_INTERVAL
-        ):
+    errors: list[str] = []
+    if first_tick or state.last_reconcile is None or (
+        now - state.last_reconcile >= MEMORY_RECONCILE_INTERVAL
+    ):
+        try:
             reset = await state.index.reconcile()
             state.last_reconcile = now
             if reset:
                 logger.info("Memory reconcile reset %d acknowledgements", reset)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            errors.append(_scrub(exc))
+            logger.warning("Memory reconcile failed: %s", errors[-1])
+    try:
         await state.index.tick()
-        state.last_error = None
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        state.last_error = _scrub(exc)
-        logger.warning("Memory sync tick failed: %s", state.last_error)
+        errors.append(_scrub(exc))
+        logger.warning("Memory sync tick failed: %s", errors[-1])
+    state.last_error = "; ".join(errors) or None
 
 
 # Memory start-up runs after the transcript side is ready, on its own threads,

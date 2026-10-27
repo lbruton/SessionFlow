@@ -447,6 +447,30 @@ def test_sessions_by_issue_groups_newest_first(monkeypatch):
     assert len(rag_engine.sessions_by_issue(["DEVS-145", "DEVS-146"], limit=2)) == 2
 
 
+def test_timeline_newest_mode_keeps_newest_turns_newest_first(monkeypatch):
+    structured = [_entry(f"d{i}", f"2026-05-0{i}T10:00:00") for i in range(1, 6)]
+    _patch_sources(monkeypatch, structured, [])
+    out = rag_engine.get_issue_timeline("SESF-25", limit=2, newest=True, db_path=DB)
+    assert [r["doc_id"] for r in out] == ["d5", "d4"]
+
+
+def test_timeline_default_order_stays_oldest_first(monkeypatch):
+    structured = [_entry(f"d{i}", f"2026-05-0{i}T10:00:00") for i in range(5, 0, -1)]
+    _patch_sources(monkeypatch, structured, [])
+    out = rag_engine.get_issue_timeline("SESF-25", limit=2, db_path=DB)
+    assert [r["doc_id"] for r in out] == ["d1", "d2"]
+
+
+def test_sessions_by_issue_keeps_newest_session_past_scan_limit(monkeypatch):
+    structured = [_entry(f"d{i}", f"2026-05-0{i}T10:00:00") for i in range(1, 6)]
+    for row in structured:
+        row["issue_ids"] = ",DEVS-145,"
+    _patch_sources(monkeypatch, structured, [])
+    monkeypatch.setattr(rag_engine, "SESSION_SCAN_LIMIT", 2)
+    out = rag_engine.sessions_by_issue(["DEVS-145"], limit=10, db_path=DB)
+    assert [s["session_id"] for s in out] == ["sess-d5", "sess-d4"]
+
+
 def test_sessions_by_issue_joins_codex_on_logical_id(monkeypatch):
     _fake_timeline(monkeypatch, {"DEVS-145": [
         _trow("payload-1", "2026-10-01T10:00:00Z", provider="codex", logical="thread-x"),

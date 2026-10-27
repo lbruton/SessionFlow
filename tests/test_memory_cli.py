@@ -11,6 +11,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import urllib.error
 
 import psycopg
 import pytest
@@ -114,6 +115,112 @@ def test_audit_prints_the_report_and_changes_nothing(monkeypatch, capsys):
     assert '"unknown_projects"' in capsys.readouterr().out
 
 
+class _StoredVectorMilvus:
+    """A Milvus stand-in holding one stored vector and answering the threshold search."""
+
+    def __init__(self, memory_id, neighbour_ids):
+        import rag_engine
+
+        self.row = {"id": rag_engine._pk_from_doc_id(memory_id), "vector": [0.5] * 4,
+                    "project": "sessionflow", "user_id": "lbruton", "generation": 1}
+        self.neighbour_ids = neighbour_ids
+        self.searched = []
+
+    def query(self, collection_name, filter="", output_fields=None, limit=None, **kwargs):
+        return [dict(self.row)]
+
+    def search(self, collection_name, data, **kwargs):
+        self.searched.append(data)
+        return [[{"entity": {"memory_id": m}, "distance": 0.99} for m in self.neighbour_ids]]
+
+
+def test_cli_index_returns_stored_vector_neighbours_without_embedding(no_embedding, tmp_path):
+    memory_id = "00000000-0000-0000-0000-000000000001"
+    milvus = _StoredVectorMilvus(memory_id, ["other"])
+
+    async def forbidden(texts):
+        raise AssertionError("memory_cli must never embed")
+
+    inner = memory_index.MemoryIndex(store=None, milvus=milvus, fts_path=tmp_path / "fts.db", host="cli",
+                                     embed=forbidden, model_name="embeddinggemma")
+    index = memory_cli._StoredVectorIndex(inner)
+
+    assert asyncio.run(index.neighbours(memory_id, threshold=0.9)) == ["other"]
+    assert milvus.searched == [[[0.5] * 4]]
+    assert index.unavailable is None
+    assert asyncio.run(index.apply(memory_id)) == "pending"
+
+
+def test_cli_index_reports_unavailable_when_milvus_fails(no_embedding):
+    class _Broken:
+        async def neighbours(self, memory_id, **kwargs):
+            raise RuntimeError("database is locked")
+
+    index = memory_cli._StoredVectorIndex(_Broken())
+
+    assert asyncio.run(index.neighbours("m1", threshold=0.9)) == []
+    assert "database is locked" in index.unavailable
+
+
+def test_audit_says_clusters_are_unavailable_when_milvus_cannot_open(monkeypatch, capsys):
+    class _Svc:
+        index = object()
+
+        async def audit(self):
+            return {"projects": {}, "unknown_projects": []}
+
+    monkeypatch.setattr(memory_cli, "_open_service", lambda: _Svc())
+    monkeypatch.setattr(memory_cli, "_open_neighbour_index", lambda: None)
+
+    assert memory_cli.main(["audit"]) == 0
+    assert "clusters are unavailable" in capsys.readouterr().err
+
+
+def test_audit_uses_the_stored_vector_index(monkeypatch):
+    svc = type("Svc", (), {"index": object(), "audit": lambda self: _done()})()
+
+    async def _done():
+        return {"projects": {}, "unknown_projects": []}
+
+    stored = memory_cli._StoredVectorIndex(object())
+    monkeypatch.setattr(memory_cli, "_open_service", lambda: svc)
+    monkeypatch.setattr(memory_cli, "_open_neighbour_index", lambda: stored)
+
+    assert memory_cli.main(["audit"]) == 0
+    assert svc.index is stored
+
+
+def test_post_restore_check_survives_transport_failures(monkeypatch):
+    def refused(*a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(memory_cli.urllib.request, "urlopen", refused)
+    assert memory_cli._post_restore_check({}) == {"ok": False, "error": "connection refused"}
+
+    def slow(*a, **k):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(memory_cli.urllib.request, "urlopen", slow)
+    assert memory_cli._post_restore_check({}) == {"ok": False, "error": "timed out"}
+
+
+def test_post_restore_check_handles_a_non_json_http_error(monkeypatch):
+    import io
+
+    def bad_gateway(*a, **k):
+        raise urllib.error.HTTPError("http://x", 502, "Bad Gateway", {}, io.BytesIO(b"<html>"))
+
+    monkeypatch.setattr(memory_cli.urllib.request, "urlopen", bad_gateway)
+    assert memory_cli._post_restore_check({}) == {"ok": False,
+                                                  "error": "server returned HTTP 502"}
+
+
+def test_restore_check_needs_pg_restore(monkeypatch, capsys):
+    monkeypatch.setattr(memory_cli.shutil, "which", lambda name: None)
+    assert memory_cli.main(["restore-check", "x.dump", "--target-dsn", "dbname=none"]) == 2
+    assert "pg_restore is not on PATH" in capsys.readouterr().err
+
+
 def test_import_delegates_to_the_importer(monkeypatch, tmp_path):
     seen = {}
 
@@ -204,6 +311,41 @@ def test_restore_check_rebuilds_and_matches(memory_pg, store, server_side, tmp_p
         assert conn.execute("SELECT count(*) FROM memory_index_acks").fetchone()[0] == 0
 
 
+needs_restore_dsn = pytest.mark.skipif(not restore_dsn, reason="SESSIONFLOW_TEST_PG_RESTORE_DSN unset")
+
+
+@needs_restore_dsn
+def test_restore_check_reports_a_pg_restore_failure(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(memory_cli.shutil, "which", lambda name: "/usr/bin/pg_restore")
+    stderr = "pg_restore: connecting to database\npg_restore: error: could not execute query\n"
+    monkeypatch.setattr(memory_cli.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
+        a, 1, stdout="", stderr=stderr))
+
+    assert memory_cli.main(["restore-check", str(tmp_path / "x.dump"),
+                            "--target-dsn", restore_dsn]) == 1
+
+    err = capsys.readouterr().err
+    assert "pg_restore failed: pg_restore: error: could not execute query" in err
+    assert "[" not in err
+    assert _target_tables() == 0
+
+
+@needs_restore
+def test_restore_check_fails_when_the_server_is_unreachable(memory_pg, store, tmp_path,
+                                                            monkeypatch):
+    store.add(_rec("anything"))
+    dump = tmp_path / "memory.dump"
+    _dump(memory_pg, dump)
+
+    def refused(*a, **k):
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(memory_cli.urllib.request, "urlopen", refused)
+
+    assert memory_cli.main(["restore-check", str(dump), "--target-dsn", restore_dsn]) == 1
+    assert _target_tables() == 0
+
+
 @needs_restore
 def test_restore_check_refuses_a_non_empty_target(memory_pg, store, server_side, tmp_path):
     store.add(_rec("anything"))
@@ -212,7 +354,8 @@ def test_restore_check_refuses_a_non_empty_target(memory_pg, store, server_side,
     with psycopg.connect(restore_dsn, autocommit=True) as conn:
         conn.execute("CREATE TABLE leftover (i int)")
     try:
-        assert memory_cli.main(["restore-check", str(dump), "--target-dsn", restore_dsn]) != 0
+        assert memory_cli.main(["restore-check", str(dump), "--target-dsn", restore_dsn]) == 2
+        assert _target_tables() == 1
     finally:
         with psycopg.connect(restore_dsn, autocommit=True) as conn:
             conn.execute("DROP TABLE IF EXISTS leftover")

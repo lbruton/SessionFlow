@@ -477,7 +477,8 @@ def test_source_session_lookup(memory_pg, store):
     rows, _ = store.list(MemoryFilters(project="sessionflow", type="session-summary",
                                        source_session_id="sess-1"), limit=10)
     assert [r["text"] for r in rows] == ["wrap one"]
-    assert _count(memory_pg, "SELECT count(*) FROM pg_indexes WHERE indexname = 'memories_source_session_idx'") == 1
+    assert _count(memory_pg, "SELECT count(*) FROM pg_indexes WHERE indexname = 'memories_source_session_idx' "
+                  "AND schemaname = current_schema()") == 1
 
 
 def test_find_by_mem0_id(store):

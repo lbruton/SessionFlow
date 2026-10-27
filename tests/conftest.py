@@ -459,7 +459,7 @@ def stub_rag_engine(monkeypatch):
     tests_dir = str(Path(__file__).resolve().parent)
     for name in set(sys.modules) - before:
         path = getattr(sys.modules.get(name), "__file__", None) or ""
-        if path.startswith(root) and not path.startswith(tests_dir) and "/venv/" not in path:
+        if path.startswith(root) and not path.startswith(tests_dir) and "site-packages" not in path:
             sys.modules.pop(name, None)
 
 

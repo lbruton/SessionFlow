@@ -48,6 +48,56 @@ class _DeferredIndex:
         return True
 
 
+class _StoredVectorIndex(_DeferredIndex):
+    """Deferred index whose audit neighbour lookup reads the stored vectors.
+
+    ``neighbours`` queries the vector already in Milvus and never embeds. A failed
+    lookup sets ``unavailable`` and returns no neighbours.
+    """
+
+    def __init__(self, memory_index: Any) -> None:
+        """Wrap a ``MemoryIndex`` that was never started."""
+        self._index = memory_index
+        self.unavailable: Optional[str] = None
+
+    async def neighbours(self, memory_id: str, **kwargs: Any) -> list:
+        """Return the stored-vector neighbours of one memory, or none when Milvus fails."""
+        try:
+            return await self._index.neighbours(memory_id, **kwargs)
+        except Exception as exc:  # Milvus Lite raises plain exceptions when the file is locked.
+            self.unavailable = f"{type(exc).__name__}: {exc}"
+            return []
+
+
+def _open_neighbour_index() -> Optional[_StoredVectorIndex]:
+    """Open Milvus read-only for neighbour lookups; return None when it cannot be opened."""
+    import memory_index
+    import rag_engine
+
+    uri = os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
+    try:
+        if not rag_engine._is_remote_uri(uri) and not Path(uri).exists():
+            return None
+        client = rag_engine._get_persistent_client(uri)
+        index = memory_index.MemoryIndex(
+            store=_open_store(), milvus=client, fts_path=Path(uri).with_name("memories_fts.db"),
+            host="cli", milvus_uri=uri,
+        )
+    except Exception:
+        return None
+    return _StoredVectorIndex(index)
+
+
+def _attach_neighbours(service: Any) -> Optional[_StoredVectorIndex]:
+    """Give the service a stored-vector neighbour lookup; leave it deferred if Milvus is closed."""
+    if not hasattr(service, "index"):
+        return None
+    index = _open_neighbour_index()
+    if index is not None:
+        service.index = index
+    return index
+
+
 def _open_store() -> memory_store.MemoryStore:
     store = memory_store.MemoryStore(memory_store.fetch_dsn())
     store.migrate()
@@ -103,7 +153,12 @@ def cmd_reindex(args: argparse.Namespace) -> int:
 
 def cmd_audit(args: argparse.Namespace) -> int:
     """Print the audit report; nothing is changed."""
-    report = asyncio.run(_open_service().audit())
+    service = _open_service()
+    index = _attach_neighbours(service)
+    report = asyncio.run(service.audit())
+    if index is None or index.unavailable:
+        _err("Similar-memory clusters are unavailable: Milvus could not be read. "
+             "Stale items and counts are still reported.")
     if args.format == "json":
         print(_json(report))
         return 0
@@ -194,7 +249,12 @@ def _post_restore_check(payload: Dict[str, Any]) -> Dict[str, Any]:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        return json.loads(exc.read() or b'{"ok": false, "error": "server error"}')
+        try:
+            return json.loads(exc.read())
+        except ValueError:
+            return {"ok": False, "error": f"server returned HTTP {exc.code}"}
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        return {"ok": False, "error": str(getattr(exc, "reason", exc))}
 
 
 def cmd_restore_check(args: argparse.Namespace) -> int:
@@ -214,7 +274,8 @@ def cmd_restore_check(args: argparse.Namespace) -> int:
             capture_output=True, text=True, check=False,
         )
         if proc.returncode != 0:
-            _err(f"pg_restore failed: {proc.stderr.strip().splitlines()[-1:] or ['unknown error']}")
+            lines = proc.stderr.strip().splitlines()
+            _err(f"pg_restore failed: {lines[-1] if lines else 'unknown error'}")
             return 1
         with psycopg.connect(target) as conn:
             schema = _memories_schema(conn)
