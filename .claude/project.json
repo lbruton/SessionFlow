@@ -22,7 +22,9 @@
     "profiles": [
       "code-core"
     ],
-    "extra": [],
+    "extra": [
+      "vale:Prose"
+    ],
     "exclude": []
   }
 }
