@@ -38,6 +38,12 @@ import sys
 import threading
 import time
 
+from collection_specs import (
+    ISSUE_ID_FIELD_MAX,
+    CollectionSpec,
+    memories_spec,
+    sessions_spec,
+)
 from fts_hybrid import FTSIndex, fts_backfill_required, rrf_merge
 from embedding_control import (
     EmbeddingIdentity,
@@ -72,7 +78,7 @@ _ISSUE_ID_PREFIX_DENYLIST = frozenset(
     {"UTF", "SHA", "HTTP", "HTTPS", "ISO", "RFC", "IPV", "MD", "BASE"}
 )
 # Milvus VARCHAR field length the extracted ids are stored in.
-_ISSUE_ID_FIELD_MAX = 4096
+_ISSUE_ID_FIELD_MAX = ISSUE_ID_FIELD_MAX
 # Default number of timeline entries returned by get_issue_timeline.
 DEFAULT_TIMELINE_LIMIT = 50
 # Generous FTS fetch window for the timeline fallback so the chronological slice
@@ -215,7 +221,9 @@ _MODEL_CACHE = Path.home() / ".cache/huggingface/hub" / _MODEL_CFG["cache_subdir
 _SEARCH_PREFIX = _MODEL_CFG["search_prefix"]
 _DOCUMENT_PREFIX = _MODEL_CFG["document_prefix"]
 
-COLLECTION_NAME = "sessions"
+SESSIONS_SPEC = sessions_spec(_EMBED_DIM)
+MEMORIES_SPEC = memories_spec(_EMBED_DIM)
+COLLECTION_NAME = SESSIONS_SPEC.name
 
 # --- Model identity check ---
 
@@ -258,8 +266,11 @@ def _check_model_identity(db_path: Optional[str] = None):
                     f"Run cleanup.py reset or clear the index before switching models."
                 )
             # Index is empty — safe to overwrite the stamp
-    # Stamp current model
-    _IDENTITY_FILE.write_text(json.dumps({"model_name": _MODEL_NAME}))
+    # The stamp covers the transcript collection only; the memory model
+    # generation lives in Postgres memory_index_meta.
+    _IDENTITY_FILE.write_text(
+        json.dumps({"model_name": _MODEL_NAME, "collection": COLLECTION_NAME})
+    )
 
 
 def get_model_name() -> str:
@@ -517,90 +528,110 @@ def _resolve_db_path(db_path: Optional[str]) -> str:
 
 
 def _expected_schema_fields() -> List[FieldSchema]:
-    """Source-of-truth Milvus field list for the sessions collection.
+    """Return the sessions collection field list from ``SESSIONS_SPEC``."""
+    return SESSIONS_SPEC.field_schemas()
 
-    Used by both _ensure_collection() (create path) and _detect_schema_drift()
-    (startup validation) so the two can't drift out of sync.
+
+def _spec_kwargs(spec: Optional[CollectionSpec]) -> Dict[str, CollectionSpec]:
+    """Forward ``spec`` to a helper only when the caller named one.
+
+    The sessions call form ``helper(client, db_path)`` stays unchanged, so
+    callers and test doubles written for it keep working.
     """
-    return [
-        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=False),
-        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=_EMBED_DIM),
-        FieldSchema(name="document", dtype=DataType.VARCHAR, max_length=65535),
-        FieldSchema(name="doc_id", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="session_id", dtype=DataType.VARCHAR, max_length=128),
-        FieldSchema(name="logical_session_id", dtype=DataType.VARCHAR, max_length=256),
-        FieldSchema(name="provider", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="source_kind", dtype=DataType.VARCHAR, max_length=96),
-        FieldSchema(name="source_class", dtype=DataType.VARCHAR, max_length=32),
-        FieldSchema(name="source_id", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="source_path", dtype=DataType.VARCHAR, max_length=1024),
-        FieldSchema(name="transcript_file", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="turn_index", dtype=DataType.INT64),
-        FieldSchema(name="timestamp", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="git_branch", dtype=DataType.VARCHAR, max_length=256),
-        FieldSchema(name="chunk_type", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="project_root", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="issue_ids", dtype=DataType.VARCHAR, max_length=_ISSUE_ID_FIELD_MAX),
-    ]
+    return {} if spec is None else {"spec": spec}
 
 
-def detect_schema_drift(client: MilvusClient) -> List[str]:
-    """Return a list of missing or extra field names if the live collection
-    schema differs from `_expected_schema_fields()`. Empty list = no drift.
+def _describe_value(field, key: str):
+    if isinstance(field, dict):
+        return field.get(key)
+    return getattr(field, key, None)
 
-    Only field NAMES are diffed today — pymilvus's describe_collection output
-    shape varies across Milvus Lite vs Standalone, and we have not hit a
-    case where a same-named field changed dtype/length silently.
+
+def _as_int(value) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def detect_schema_drift(client: MilvusClient,
+                        spec: Optional[CollectionSpec] = None) -> List[str]:
+    """Return how the live collection differs from ``spec``; empty means no drift.
+
+    Reports ``missing:``, ``extra:``, then ``type:`` and ``dim:`` for a
+    same-named field whose type or vector dimension changed. Lite and
+    Standalone describe output differs, so an absent type or dim is not drift.
     """
-    if not client.has_collection(COLLECTION_NAME):
+    spec = spec or SESSIONS_SPEC
+    if not client.has_collection(spec.name):
         return []
     try:
-        info = client.describe_collection(COLLECTION_NAME)
+        info = client.describe_collection(spec.name)
     except Exception as exc:
         print(f"Schema drift check skipped: describe_collection failed: {exc}", file=sys.stderr)
         return []
-    expected = {f.name for f in _expected_schema_fields()}
-    actual: set[str] = set()
+    expected = {f.name: f for f in spec.fields}
+    actual: Dict[str, object] = {}
     for field in info.get("fields", []) or []:
-        if isinstance(field, dict):
-            name = field.get("name")
-        else:
-            name = getattr(field, "name", None)
+        name = _describe_value(field, "name")
         if name:
-            actual.add(name)
-    missing = sorted(expected - actual)
-    extra = sorted(actual - expected)
-    return [f"missing:{n}" for n in missing] + [f"extra:{n}" for n in extra]
+            actual[name] = field
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    changed_type: List[str] = []
+    changed_dim: List[str] = []
+    for name in sorted(set(expected) & set(actual)):
+        want = expected[name]
+        live = actual[name]
+        live_type = _as_int(_describe_value(live, "type"))
+        if live_type is not None and live_type != int(want.dtype):
+            changed_type.append(name)
+            continue
+        if want.dim is not None:
+            params = _describe_value(live, "params") or {}
+            live_dim = _as_int(params.get("dim")) if isinstance(params, dict) else None
+            if live_dim is not None and live_dim != want.dim:
+                changed_dim.append(name)
+    return (
+        [f"missing:{n}" for n in missing]
+        + [f"extra:{n}" for n in extra]
+        + [f"type:{n}" for n in changed_type]
+        + [f"dim:{n}" for n in changed_dim]
+    )
 
 
-def migrate_schema(client: MilvusClient, db_path: str = "") -> None:
-    """Drop the sessions collection and recreate it with the current schema.
+def migrate_schema(client: MilvusClient, db_path: str = "",
+                   spec: Optional[CollectionSpec] = None) -> None:
+    """Drop the collection and recreate it with the current schema.
 
-    DESTRUCTIVE: all indexed turns are lost. Provided as the explicit recovery
-    path for `python cleanup.py migrate-schema` and for the auto-migrate
-    env opt-in (SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1).
+    DESTRUCTIVE: every row in the collection is lost. Provided as the explicit
+    recovery path for `python cleanup.py migrate-schema` and for the
+    auto-migrate env opt-in (SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1).
     """
-    if client.has_collection(COLLECTION_NAME):
+    name = (spec or SESSIONS_SPEC).name
+    if client.has_collection(name):
         print(
-            f"Dropping collection {COLLECTION_NAME!r} for schema migration "
-            "(all indexed turns will be lost)",
+            f"Dropping collection {name!r} for schema migration "
+            "(all indexed rows will be lost)",
             file=sys.stderr,
         )
-        client.drop_collection(COLLECTION_NAME)
-    _create_collection(client, db_path)
+        client.drop_collection(name)
+    _create_collection(client, db_path, **_spec_kwargs(spec))
     # drop_collection already clears the schema cache. Every schema mutation
     # still goes through _invalidate_schema_cache.
-    _invalidate_schema_cache(client)
+    _invalidate_schema_cache(client, **_spec_kwargs(spec))
 
 
-def _invalidate_schema_cache(client: MilvusClient) -> None:
-    """Invalidate pymilvus's process-global data-path schema cache for the collection.
+def _invalidate_schema_cache(client: MilvusClient,
+                             spec: Optional[CollectionSpec] = None) -> None:
+    """Invalidate pymilvus's process-global data-path schema cache for one collection.
 
     pymilvus keeps a process-wide schema cache that ``add_collection_field`` does
     not clear, so a live client raises ``code=65535 "field not exist"`` after a
     field add. Call this after every schema change. It uses pymilvus internals and
     degrades to a logged no-op if they move.
     """
+    name = (spec or SESSIONS_SPEC).name
     try:
         from pymilvus.client.cache import GlobalCache
     except Exception as exc:  # pragma: no cover - pymilvus internals moved
@@ -609,24 +640,26 @@ def _invalidate_schema_cache(client: MilvusClient) -> None:
     try:
         endpoint = client._get_connection().server_address
         # SessionFlow uses the default database; SchemaCache normalizes "" -> "default".
-        GlobalCache.schema.invalidate(endpoint, "", COLLECTION_NAME)
+        GlobalCache.schema.invalidate(endpoint, "", name)
     except Exception as exc:  # pragma: no cover - defense in depth
-        logger.warning("Schema cache invalidation failed for %s: %s", COLLECTION_NAME, exc)
+        logger.warning("Schema cache invalidation failed for %s: %s", name, exc)
 
 
-def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
-    """Create the sessions collection if missing; refuse to start on schema drift.
+def _ensure_collection(client: MilvusClient, db_path: str = "",
+                       spec: Optional[CollectionSpec] = None) -> None:
+    """Create the collection if missing; refuse to start on schema drift.
 
-    A collection that lacks a field from `_expected_schema_fields()` rejects every
-    insert, so drift must stop startup. With SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 it
-    drops and recreates the collection; otherwise it raises RuntimeError that
-    names `python cleanup.py migrate-schema`.
+    ``spec`` defaults to the sessions collection. A collection that lacks a
+    field from its spec rejects every insert, so drift must stop startup. With
+    SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 it drops and recreates the collection;
+    otherwise it raises RuntimeError naming the recovery options.
     """
-    if not client.has_collection(COLLECTION_NAME):
-        _create_collection(client, db_path)
+    name = (spec or SESSIONS_SPEC).name
+    if not client.has_collection(name):
+        _create_collection(client, db_path, **_spec_kwargs(spec))
         return
 
-    drift = detect_schema_drift(client)
+    drift = detect_schema_drift(client, **_spec_kwargs(spec))
     if not drift:
         return
 
@@ -634,20 +667,27 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     # detect_schema_drift issues a fresh describe_collection, so a stale/cached
     # first read that clears on the second describe must NOT raise or migrate.
     # This re-verify gates BOTH the auto-migrate and the raise branches.
-    drift = detect_schema_drift(client)
+    drift = detect_schema_drift(client, **_spec_kwargs(spec))
     if not drift:
         return
 
     auto = os.getenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", "").lower() in {"1", "true", "yes", "on"}
     if auto:
         print(
-            f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA detected schema drift {drift!r}; "
-            "dropping and recreating (all turns lost).",
+            f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA detected schema drift {drift!r} in "
+            f"{name!r}; dropping and recreating (all rows lost).",
             file=sys.stderr,
         )
-        migrate_schema(client, db_path)
+        migrate_schema(client, db_path, **_spec_kwargs(spec))
         return
 
+    if name != COLLECTION_NAME:
+        raise RuntimeError(
+            f"Milvus collection {name!r} schema is out of date (drift={drift}). "
+            f"First restart the server: a transient describe can clear on a "
+            f"fresh read. If drift persists, set SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 "
+            f"to drop and recreate it; its rows are re-indexed from Postgres."
+        )
     raise RuntimeError(
         f"Milvus collection {COLLECTION_NAME!r} schema is out of date "
         f"(drift={drift}). First try the non-destructive option: restart the "
@@ -660,36 +700,32 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     )
 
 
-def _create_collection(client: MilvusClient, db_path: str = "") -> None:
-    print(f"Creating collection: {COLLECTION_NAME} (dim={_EMBED_DIM})", file=sys.stderr)
-    schema = CollectionSchema(fields=_expected_schema_fields())
+def _create_collection(client: MilvusClient, db_path: str = "",
+                       spec: Optional[CollectionSpec] = None) -> None:
+    spec = spec or SESSIONS_SPEC
+    print(f"Creating collection: {spec.name} (dim={spec.vector_dim()})", file=sys.stderr)
+    schema = CollectionSchema(fields=spec.field_schemas())
 
     index_params = client.prepare_index_params()
-    if _is_remote_uri(db_path):
-        # Standalone supports HNSW — O(log n) search vs O(n) FLAT.
-        index_params.add_index(
-            field_name="vector",
-            index_type="HNSW",
-            metric_type="COSINE",
-            params={"M": 16, "efConstruction": 256},
-        )
-    else:
-        # Milvus Lite silently ignores non-FLAT indexes.
-        index_params.add_index(field_name="vector", index_type="FLAT", metric_type="COSINE")
+    # Standalone gets HNSW; Milvus Lite silently ignores non-FLAT indexes.
+    index_params.add_index(**spec.index_spec(remote=_is_remote_uri(db_path)))
 
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        schema=schema,
-        index_params=index_params,
-    )
+    create_kwargs = {
+        "collection_name": spec.name,
+        "schema": schema,
+        "index_params": index_params,
+    }
+    if spec.consistency_level is not None:
+        create_kwargs["consistency_level"] = spec.consistency_level
+    client.create_collection(**create_kwargs)
 
-    print(f"Collection created: {COLLECTION_NAME}", file=sys.stderr)
+    print(f"Collection created: {spec.name}", file=sys.stderr)
 
     # Standalone requires explicit load_collection before query/dedup paths work.
     # create_collection with index_params does not auto-load.
     if _is_remote_uri(db_path):
-        client.load_collection(collection_name=COLLECTION_NAME)
-        print(f"Collection loaded: {COLLECTION_NAME}", file=sys.stderr)
+        client.load_collection(collection_name=spec.name)
+        print(f"Collection loaded: {spec.name}", file=sys.stderr)
 
 
 @contextmanager
