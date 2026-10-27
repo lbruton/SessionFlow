@@ -108,7 +108,7 @@ jobs:
             echo '### Pytest'
             echo
             echo '```text'
-            grep -E '^(SKIPPED|=+ .* in [0-9.]+s)' pytest.log || true
+            grep -E '^SKIPPED|^[0-9]+ (passed|failed)|^=+ .* in [0-9.]+s' pytest.log || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
