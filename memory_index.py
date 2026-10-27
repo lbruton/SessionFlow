@@ -38,6 +38,10 @@ _FTS_COLUMNS = ("memory_id", "version", "content_hash", "user_id", "agent_id", "
                 "type", "status", "issue_ids", "source", "category", "created_at")
 
 
+class MemoryModelMismatch(RuntimeError):
+    """This machine's embedding model is not the memory model, so its vectors cannot be compared."""
+
+
 def _iso(value: Any) -> str:
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc).isoformat()
@@ -65,8 +69,18 @@ async def embed_for_index(texts: List[str]) -> List[List[float]]:
         async with batch():
             return await _embed_on_mlx_thread(texts)
     await throttle.wait()
+    return await _embed_on_mlx_thread(texts)
+
+
+def _embed_after_cooldown(texts: List[str]) -> List[List[float]]:
+    # Runs on mlx-embed. A transcript batch can finish between the async wait
+    # and this call, and the next one checks the stamp on this thread.
+    throttle = embedding_control.get_embed_throttle()
+    wait_blocking = getattr(throttle, "wait_blocking", None)
+    if wait_blocking is not None:
+        wait_blocking()
     try:
-        return await _embed_on_mlx_thread(texts)
+        return rag_engine.embed_texts(texts)
     finally:
         throttle.done()
 
@@ -75,8 +89,8 @@ async def _embed_on_mlx_thread(texts: List[str]) -> List[List[float]]:
     loop = asyncio.get_running_loop()
     executor = rag_engine._embed_executor
     if executor is not None:
-        return await loop.run_in_executor(executor, rag_engine.embed_texts, texts)
-    return await asyncio.to_thread(rag_engine.embed_texts, texts)
+        return await loop.run_in_executor(executor, _embed_after_cooldown, texts)
+    return await asyncio.to_thread(_embed_after_cooldown, texts)
 
 
 class MemoryFTS:
@@ -463,7 +477,14 @@ class MemoryIndex:
 
     async def vector_search(self, vector: List[float], *, filters: Dict[str, Any],
                             limit: int) -> List[Dict[str, Any]]:
-        """Return Milvus hits (``memory_id``, ``version``, ``generation``, ``score``), best first."""
+        """Return Milvus hits (``memory_id``, ``version``, ``generation``, ``score``), best first.
+
+        Raises ``MemoryModelMismatch`` when the stored memory model differs from
+        this machine's: same-size vectors from another model would still match.
+        """
+        await self._refresh_model_block()
+        if self.milvus_blocked:
+            raise MemoryModelMismatch(self.milvus_blocked)
         return await run_db(self._vector_search_sync, vector, filters, limit)
 
     async def fts_search(self, query: str, *, filters: Dict[str, Any],

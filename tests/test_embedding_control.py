@@ -233,3 +233,71 @@ def test_concurrent_memory_embeds_are_spaced_by_the_cooldown(monkeypatch):
 
     assert len(starts) == 2
     assert starts[1] - starts[0] >= 0.2 - 1e-9
+
+
+def test_throttle_reports_the_cooldown_left():
+    from embedding_control import EmbedThrottle
+
+    clock = [10.0]
+    throttle = EmbedThrottle(cooldown_ms=200, clock=lambda: clock[0])
+
+    assert throttle.remaining() == 0.0
+    throttle.done()
+    clock[0] += 0.05
+    assert throttle.remaining() == _approx(0.15)
+    clock[0] += 1.0
+    assert throttle.remaining() == 0.0
+
+
+def test_transcript_batch_waits_out_a_memory_embeds_cooldown(monkeypatch):
+    import asyncio
+
+    import embedding_control
+    import memory_index
+    import rag_engine
+
+    throttle = embedding_control.EmbedThrottle(cooldown_ms=200)
+    monkeypatch.setattr(embedding_control, "get_embed_throttle", lambda: throttle)
+    monkeypatch.setattr(rag_engine, "_embed_executor", None)
+    monkeypatch.setattr(rag_engine, "embed_texts", lambda texts: [[0.0] for _ in texts])
+    asyncio.run(memory_index.embed_for_index(["memory"]))
+
+    budget = embedding_control.EmbeddingBudget(batch_size=4, cooldown_ms=200, max_turns_per_run=10)
+    decision = budget.before_batch(batch_size=4)
+
+    assert decision.allowed is False
+    assert 0 < decision.retry_after_seconds <= 0.2
+
+
+def test_memory_embed_queued_behind_a_transcript_batch_waits_on_the_mlx_thread(monkeypatch):
+    import asyncio
+
+    import embedding_control
+    import memory_index
+    import rag_engine
+
+    clock = [100.0]
+    slept = []
+
+    def fake_blocking_sleep(seconds):
+        slept.append(seconds)
+        clock[0] += seconds
+
+    throttle = embedding_control.EmbedThrottle(
+        cooldown_ms=200, clock=lambda: clock[0], blocking_sleep=fake_blocking_sleep)
+    monkeypatch.setattr(embedding_control, "get_embed_throttle", lambda: throttle)
+    monkeypatch.setattr(rag_engine, "_embed_executor", None)
+    starts = []
+
+    def fake_embed(texts):
+        starts.append(clock[0])
+        return [[0.0] for _ in texts]
+
+    monkeypatch.setattr(rag_engine, "embed_texts", fake_embed)
+    throttle.done()  # a transcript batch finished after the memory embed was queued
+
+    asyncio.run(memory_index._embed_on_mlx_thread(["memory"]))
+
+    assert slept == [_approx(0.2)]
+    assert starts == [_approx(100.2)]
+    assert throttle.remaining() == _approx(0.2)

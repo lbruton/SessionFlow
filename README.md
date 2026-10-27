@@ -112,7 +112,7 @@ SessionFlow also stores memories: notes an agent writes on purpose, such as sess
 `setup.sh` copies `hooks/memory-session-start.py` into the Claude Code and Codex hook folders. At session start it shows the three newest session summaries and recent turns, and falls back to a local cache when the server cannot answer. Setup registers the hook for Codex and prints the Claude Code `~/.claude/settings.json` SessionStart entry for you to add by hand.
 
 ```bash
-python memory_cli.py audit                        # Likely duplicates, aged open items, counts
+python memory_cli.py audit                        # Likely duplicates, aged open items, counts, unknown projects
 python memory_cli.py rebuild --yes                # Re-index every memory from Postgres
 python memory_cli.py import export.json --report report.json
 python memory_cli.py restore-check memory.dump --target-dsn "$EMPTY_DSN"

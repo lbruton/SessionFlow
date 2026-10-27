@@ -117,8 +117,8 @@ class EmbedThrottle:
     """Cooldown between embed batches that waits instead of denying work.
 
     Memory index embeds use it in place of the transcript budget, which drops
-    batches. Transcript batches stamp it too, so a memory embed never starts
-    inside a transcript batch's cooldown. The cooldown never goes below 200 ms.
+    batches. Both consumers stamp it and honor it, so neither starts inside the
+    other's cooldown. The cooldown never goes below 200 ms.
     """
 
     def __init__(
@@ -126,11 +126,13 @@ class EmbedThrottle:
         cooldown_ms: int = MIN_COOLDOWN_MS,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        blocking_sleep: Callable[[float], None] = time.sleep,
     ) -> None:
-        """Set the cooldown; ``clock`` and ``sleep`` are injectable for tests."""
+        """Set the cooldown; ``clock`` and both sleeps are injectable for tests."""
         self.cooldown_ms = max(int(cooldown_ms), MIN_COOLDOWN_MS)
         self._clock = clock
         self._sleep = sleep
+        self._blocking_sleep = blocking_sleep
         self._last_done = 0.0
         # An asyncio.Lock binds to one event loop, so each loop gets its own.
         self._locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
@@ -155,13 +157,27 @@ class EmbedThrottle:
             finally:
                 self.done()
 
+    def remaining(self) -> float:
+        """Return the seconds left in the cooldown after the last finished batch."""
+        if not self._last_done:
+            return 0.0
+        return max(0.0, self.cooldown_ms / 1000.0 - (self._clock() - self._last_done))
+
     async def wait(self) -> None:
         """Sleep until the cooldown after the last finished batch has passed."""
-        if not self._last_done:
-            return
-        remaining = self.cooldown_ms / 1000.0 - (self._clock() - self._last_done)
+        remaining = self.remaining()
         if remaining > 0:
             await self._sleep(remaining)
+
+    def wait_blocking(self) -> None:
+        """Block the calling thread until the cooldown has passed.
+
+        Runs on the ``mlx-embed`` thread just before an embed, so work queued
+        behind another consumer's batch still starts a full cooldown after it.
+        """
+        remaining = self.remaining()
+        if remaining > 0:
+            self._blocking_sleep(remaining)
 
     def done(self) -> None:
         """Record that a batch finished now."""
@@ -227,13 +243,15 @@ class EmbeddingBudget:
                 f"Batch size {batch_size} exceeds configured limit {self.batch_size}",
             )
 
-        elapsed = time.monotonic() - self.last_batch_finished_at
-        cooldown = self.cooldown_ms / 1000.0
-        if self.last_batch_finished_at and elapsed < cooldown:
+        remaining = get_embed_throttle().remaining()
+        if self.last_batch_finished_at:
+            elapsed = time.monotonic() - self.last_batch_finished_at
+            remaining = max(remaining, self.cooldown_ms / 1000.0 - elapsed)
+        if remaining > 0:
             return EmbeddingDecision(
                 False,
                 "Embedding cooldown active",
-                retry_after_seconds=max(0.0, cooldown - elapsed),
+                retry_after_seconds=remaining,
             )
 
         return EmbeddingDecision(True)

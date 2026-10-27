@@ -29,6 +29,7 @@ class FakeMilvus:
     def __init__(self):
         self.collections: dict[str, dict[int, dict]] = {}
         self.fail_next_upsert = False
+        self.searches: list[dict] = []
 
     def has_collection(self, name):
         return name in self.collections
@@ -70,6 +71,10 @@ class FakeMilvus:
 
     def query(self, collection_name, filter="", output_fields=None, limit=None, **kwargs):
         return [dict(r) for r in self.collections.get(collection_name, {}).values()]
+
+    def search(self, collection_name, data, **kwargs):
+        self.searches.append({"collection_name": collection_name, **kwargs})
+        return [[]]
 
     def rows(self):
         return {r["memory_id"]: r for r in self.collections.get("memories", {}).values()}
@@ -345,6 +350,32 @@ def test_running_index_stops_writing_after_the_stored_model_changes(store, milvu
 
     assert idx.health()["milvus_blocked"] is None
     assert second.memory_id in milvus.rows()
+
+
+def test_mismatched_local_model_runs_no_vector_search(store, milvus, tmp_path):
+    _index(store, milvus, tmp_path, host="minitron", model_name="embeddinggemma")
+    other = _index(store, milvus, tmp_path, host="blue", model_name="modernbert")
+
+    with pytest.raises(memory_index.MemoryModelMismatch, match="modernbert"):
+        asyncio.run(other.vector_search(_vec("query"), filters={"project": "sessionflow"},
+                                        limit=5))
+
+    assert milvus.searches == []
+
+
+def test_vector_search_checks_the_stored_model_before_searching(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path)
+    assert asyncio.run(idx.vector_search(_vec("query"), filters={"project": "sessionflow"},
+                                         limit=5)) == []
+    assert len(milvus.searches) == 1
+
+    store.bump_generation(model_name="modernbert", vector_dim=768)
+
+    with pytest.raises(memory_index.MemoryModelMismatch):
+        asyncio.run(idx.vector_search(_vec("query"), filters={"project": "sessionflow"},
+                                      limit=5))
+    assert len(milvus.searches) == 1
+    assert "modernbert" in idx.health()["milvus_blocked"]
 
 
 def test_milvus_write_refuses_a_stale_model_between_ticks(store, milvus, tmp_path):

@@ -127,8 +127,8 @@ def _memory_day(row: Dict[str, Any]):
     return row["created_at"].astimezone(memory_store.CHICAGO).date()
 
 
-def resolve_project_roots(project: str) -> List[str]:
-    """Return the known project roots whose ``.claude/project.json`` names ``project``.
+def _known_project_slugs() -> List[tuple[str, str]]:
+    """Return ``(root, project)`` for each registered root with a readable ``.claude/project.json``.
 
     The roots are the ones the server has registered from transcripts, so no
     folder layout is assumed. The project is ``memory.project``, else ``tag``.
@@ -138,16 +138,26 @@ def resolve_project_roots(project: str) -> List[str]:
 
     import file_watcher
 
-    roots = []
+    pairs = []
     for root in file_watcher.known_project_roots():
         try:
             data = json.loads((Path(root) / ".claude" / "project.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
         slug = (data.get("memory") or {}).get("project") or str(data.get("tag") or "").lower()
-        if slug == project:
-            roots.append(root)
-    return roots
+        if slug:
+            pairs.append((root, slug))
+    return pairs
+
+
+def resolve_project_roots(project: str) -> List[str]:
+    """Return the known project roots whose ``.claude/project.json`` names ``project``."""
+    return [root for root, slug in _known_project_slugs() if slug == project]
+
+
+def project_inventory() -> set[str]:
+    """Return every project named by a known root's ``.claude/project.json``."""
+    return {slug for _, slug in _known_project_slugs()}
 
 
 def _parse_time(name: str, value: Any) -> Optional[datetime]:
@@ -453,6 +463,7 @@ class MemoryService:
         unknown = sorted(p for p in projects if self.project_inventory
                          and p not in self.project_inventory)
         return {"projects": projects, "unknown_projects": unknown,
+                "inventory_checked": bool(self.project_inventory),
                 "similar_threshold": self.similar_threshold,
                 "audit_age_days": self.audit_age_days}
 
