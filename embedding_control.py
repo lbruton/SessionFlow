@@ -125,6 +125,7 @@ class EmbedThrottle:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
+        """Set the cooldown; ``clock`` and ``sleep`` are injectable for tests."""
         self.cooldown_ms = max(int(cooldown_ms), MIN_COOLDOWN_MS)
         self._clock = clock
         self._sleep = sleep
