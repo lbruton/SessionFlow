@@ -409,3 +409,91 @@ def test_http_and_mcp_equivalent_for_same_input(stub_rag_engine, tmp_path, monke
     assert http_ids == ["a", "b"]
     # The MCP text rendering should reference the same turns.
     assert "a" in mcp_text and "b" in mcp_text
+
+
+# ---------------------------------------------------------------------------
+# Sessions by issue: timeline rows grouped into sessions, newest first, for
+# get_memory_context. Claude Code rows join on session_id and Codex rows on
+# logical_session_id; day bounds are America/Chicago calendar days.
+# ---------------------------------------------------------------------------
+
+
+def _trow(session_id, ts, provider="claude_code_cli", root="/Volumes/DATA/GitHub/SessionFlow",
+          logical=None, issue="DEVS-145"):
+    return {"doc_id": f"{session_id}:{ts}", "timestamp": ts, "provider": provider,
+            "session_id": session_id, "logical_session_id": logical or session_id,
+            "project_root": root, "issue_ids": f",{issue},"}
+
+
+def _fake_timeline(monkeypatch, rows_by_issue):
+    def fake(issue_id, *, limit=50, **kwargs):
+        return [r for r in rows_by_issue.get(issue_id.upper(), [])]
+
+    monkeypatch.setattr(rag_engine, "get_issue_timeline", fake)
+
+
+def test_sessions_by_issue_groups_newest_first(monkeypatch):
+    _fake_timeline(monkeypatch, {
+        "DEVS-145": [_trow("a", "2026-10-01T10:00:00Z"), _trow("a", "2026-10-03T10:00:00Z"),
+                     _trow("b", "2026-10-02T10:00:00Z")],
+        "DEVS-146": [_trow("c", "2026-10-05T10:00:00Z", issue="DEVS-146"),
+                     _trow("a", "2026-10-04T10:00:00Z", issue="DEVS-146")],
+    })
+    out = rag_engine.sessions_by_issue(["DEVS-145", "DEVS-146"], limit=10)
+    assert [s["session_id"] for s in out] == ["c", "a", "b"]
+    a = next(s for s in out if s["session_id"] == "a")
+    assert a["turns"] == 3 and a["last_timestamp"] == "2026-10-04T10:00:00Z"
+    assert sorted(a["issue_ids"]) == ["DEVS-145", "DEVS-146"]
+    assert len(rag_engine.sessions_by_issue(["DEVS-145", "DEVS-146"], limit=2)) == 2
+
+
+def test_sessions_by_issue_joins_codex_on_logical_id(monkeypatch):
+    _fake_timeline(monkeypatch, {"DEVS-145": [
+        _trow("payload-1", "2026-10-01T10:00:00Z", provider="codex", logical="thread-x"),
+        _trow("payload-2", "2026-10-01T11:00:00Z", provider="codex", logical="thread-x"),
+        _trow("thread-x", "2026-10-01T12:00:00Z", provider="claude_code_cli"),
+    ]})
+    out = rag_engine.sessions_by_issue(["DEVS-145"], limit=10)
+    keys = sorted((s["provider"], s["session_id"]) for s in out)
+    assert keys == [("claude_code_cli", "thread-x"), ("codex", "thread-x")]
+    assert next(s for s in out if s["provider"] == "codex")["turns"] == 2
+
+
+def test_sessions_by_issue_filters_project_roots_and_worktrees(monkeypatch):
+    root = "/Volumes/DATA/GitHub/SessionFlow"
+    _fake_timeline(monkeypatch, {"DEVS-145": [
+        _trow("main", "2026-10-01T10:00:00Z", root=root),
+        _trow("wt", "2026-10-01T11:00:00Z", root=f"{root}/.worktrees/spec-DEVS-145"),
+        _trow("other", "2026-10-01T12:00:00Z", root="/Volumes/DATA/GitHub/Devops"),
+        _trow("prefix", "2026-10-01T13:00:00Z", root=f"{root}-old"),
+    ]})
+    out = rag_engine.sessions_by_issue(["DEVS-145"], limit=10, project_roots=[root])
+    assert {s["session_id"] for s in out} == {"main", "wt"}
+
+
+def test_sessions_by_issue_day_uses_chicago_bounds(monkeypatch):
+    from datetime import date
+
+    _fake_timeline(monkeypatch, {"DEVS-145": [
+        _trow("before", "2026-10-20T04:59:59Z"),
+        _trow("inside", "2026-10-20T05:00:00Z"),
+        _trow("last", "2026-10-21T04:59:59Z"),
+        _trow("after", "2026-10-21T05:00:00Z"),
+    ]})
+    out = rag_engine.sessions_by_issue(["DEVS-145"], limit=10, day=date(2026, 10, 20))
+    assert {s["session_id"] for s in out} == {"inside", "last"}
+
+
+def test_sessions_by_issue_excludes_the_source_session(monkeypatch):
+    _fake_timeline(monkeypatch, {"DEVS-145": [_trow("src", "2026-10-01T10:00:00Z"),
+                                              _trow("other", "2026-10-02T10:00:00Z")]})
+    out = rag_engine.sessions_by_issue(["DEVS-145"], limit=10, exclude_session="src")
+    assert [s["session_id"] for s in out] == ["other"]
+
+
+def test_chicago_day_bounds_are_half_open_and_follow_dst():
+    from datetime import date, datetime, timezone
+
+    start, end = rag_engine.chicago_day_bounds(date(2026, 11, 1))
+    assert start == datetime(2026, 11, 1, 5, 0, tzinfo=timezone.utc)
+    assert end == datetime(2026, 11, 2, 6, 0, tzinfo=timezone.utc)
