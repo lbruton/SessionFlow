@@ -194,7 +194,7 @@ def test_slow_memory_startup_does_not_delay_transcript_readiness(
 
 def test_failed_dsn_fetch_leaves_transcripts_ready(stub_rag_engine, tmp_path, monkeypatch):
     def broken_fetch(*args, **kwargs):
-        raise RuntimeError("infisical unreachable and no DSN cache")
+        raise RuntimeError("memory store not configured: set SESSIONFLOW_MEMORY_DSN")
 
     monkeypatch.setattr("memory_store.fetch_dsn", broken_fetch, raising=False)
     release = threading.Event()
@@ -205,4 +205,4 @@ def test_failed_dsn_fetch_leaves_transcripts_ready(stub_rag_engine, tmp_path, mo
         body = client.get("/health").json()
         assert body["startup"] == "ready" and body["milvus"] is True
         assert body["memory"]["ready"] is False
-        assert "infisical unreachable" in body["memory"]["error"]
+        assert "memory store not configured" in body["memory"]["error"]

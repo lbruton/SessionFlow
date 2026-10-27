@@ -16,8 +16,6 @@ import base64
 import hashlib
 import json
 import os
-import shutil
-import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -36,15 +34,13 @@ from psycopg_pool import ConnectionPool
 CHICAGO = ZoneInfo("America/Chicago")
 DEFAULT_USER_ID = "lbruton"
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "sql" / "memory"
-REPO_ROOT = Path(__file__).resolve().parent
 
 # A unique_violation means a concurrent writer won; re-reading resolves it.
 MAX_WRITE_RETRIES = 3
 
-DSN_SECRET_NAME = "SESSIONFLOW_MEMORY_DSN"
-DSN_SECRET_PATH = "/mcp/sessionflow"
-DSN_CACHE = Path.home() / ".sessionflow" / "memory_dsn.cache"
-DSN_FETCH_TIMEOUT = 10.0
+DSN_ENV = "SESSIONFLOW_MEMORY_DSN"
+DSN_FILE_ENV = "SESSIONFLOW_MEMORY_DSN_FILE"
+DSN_FILE_DEFAULT = Path.home() / ".sessionflow" / "memory_dsn"
 
 DUMP_JOB = "pg-dump"
 DUMP_HOUR, DUMP_MINUTE = 2, 30
@@ -197,66 +193,39 @@ def content_hash(text: str) -> str:
 # --- DSN --------------------------------------------------------------------
 
 
-def _agent_binary() -> str:
-    configured = os.environ.get("SESSIONFLOW_INFISICAL_AGENT")
-    if configured:
-        return configured
-    found = shutil.which("infisical-agent")
-    if found:
-        return found
-    return str(Path.home() / ".local" / "bin" / "infisical-agent")
+def dsn_file() -> Path:
+    """Return the DSN file path: ``SESSIONFLOW_MEMORY_DSN_FILE`` or ``~/.sessionflow/memory_dsn``."""
+    configured = os.environ.get(DSN_FILE_ENV)
+    return Path(configured).expanduser() if configured else DSN_FILE_DEFAULT
 
 
-def _write_dsn_cache(value: str, cache_path: Path) -> None:
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_path.with_name(cache_path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(value)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, cache_path)
+def fetch_dsn() -> str:
+    """Return the memory store DSN the user configured, without ever logging it.
 
-
-def _read_dsn_cache(cache_path: Path) -> Optional[str]:
-    try:
-        value = cache_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return value or None
-
-
-def fetch_dsn(timeout: float = DSN_FETCH_TIMEOUT, cache_path: Path = DSN_CACHE) -> str:
-    """Return the memory store DSN without ever logging it.
-
-    ``SESSIONFLOW_MEMORY_DSN`` in the environment wins. Otherwise
-    ``infisical-agent`` runs from the SessionFlow checkout with a bounded
-    timeout and refreshes a 600-permission cache; when it fails, the cache is used.
+    ``SESSIONFLOW_MEMORY_DSN`` in the environment wins; otherwise the DSN file
+    is read. How the value gets there (a secrets manager, a launcher, by hand)
+    is the user's choice. The file must not be readable by group or others.
     """
-    from_env = os.environ.get(DSN_SECRET_NAME)
-    if from_env:
+    from_env = os.environ.get(DSN_ENV)
+    if from_env and from_env.strip():
         return from_env.strip()
-    reason = ""
+    path = dsn_file()
     try:
-        proc = subprocess.run(
-            [_agent_binary(), "secrets", "get", DSN_SECRET_NAME, "--plain", "--silent",
-             f"--path={DSN_SECRET_PATH}"],
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=timeout, check=False,
+        mode = path.stat().st_mode
+    except FileNotFoundError:
+        raise MemoryStoreError(
+            "dsn_unavailable",
+            f"memory store not configured: set {DSN_ENV} or write the DSN to {path} (mode 600)",
+        ) from None
+    if mode & 0o077:
+        raise MemoryStoreError(
+            "dsn_unavailable",
+            f"{path} is readable by other users; run chmod 600 on it",
         )
-        value = proc.stdout.strip()
-        if proc.returncode == 0 and value:
-            _write_dsn_cache(value, cache_path)
-            return value
-        reason = f"infisical-agent exited {proc.returncode}"
-    except subprocess.TimeoutExpired:
-        reason = f"infisical-agent timed out after {timeout:g}s"
-    except OSError as exc:
-        reason = f"infisical-agent failed to start: {exc.strerror or type(exc).__name__}"
-    cached = _read_dsn_cache(cache_path)
-    if cached:
-        return cached
-    raise MemoryStoreError(
-        "dsn_unavailable", f"infisical unreachable and no DSN cache ({reason})"
-    )
+    value = path.read_text(encoding="utf-8").strip()
+    if not value:
+        raise MemoryStoreError("dsn_unavailable", f"{path} is empty")
+    return value
 
 
 # --- Executor ---------------------------------------------------------------
