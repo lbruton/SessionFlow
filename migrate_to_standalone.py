@@ -21,18 +21,17 @@ import sys
 import time
 from pathlib import Path
 
-from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
+from pymilvus import MilvusClient, CollectionSchema
 
-COLLECTION_NAME = "sessions"
+from collection_specs import sessions_spec
+
 EMBED_DIM = 768
+SPEC = sessions_spec(EMBED_DIM)
+COLLECTION_NAME = SPEC.name
 BATCH_SIZE = 1000
 LITE_DB = str(Path.home() / ".sessionflow" / "milvus.db")
 
-ALL_FIELDS = [
-    "id", "vector", "document", "doc_id", "session_id",
-    "transcript_file", "turn_index", "timestamp",
-    "git_branch", "chunk_type", "project_root",
-]
+ALL_FIELDS = SPEC.field_names()
 
 
 def create_collection(client: MilvusClient):
@@ -41,27 +40,10 @@ def create_collection(client: MilvusClient):
         print(f"Collection '{COLLECTION_NAME}' already exists on target.")
         return False
 
-    schema = CollectionSchema(fields=[
-        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=False),
-        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=EMBED_DIM),
-        FieldSchema(name="document", dtype=DataType.VARCHAR, max_length=65535),
-        FieldSchema(name="doc_id", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="session_id", dtype=DataType.VARCHAR, max_length=128),
-        FieldSchema(name="transcript_file", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="turn_index", dtype=DataType.INT64),
-        FieldSchema(name="timestamp", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="git_branch", dtype=DataType.VARCHAR, max_length=256),
-        FieldSchema(name="chunk_type", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="project_root", dtype=DataType.VARCHAR, max_length=512),
-    ])
+    schema = CollectionSchema(fields=SPEC.field_schemas())
 
     index_params = client.prepare_index_params()
-    index_params.add_index(
-        field_name="vector",
-        index_type="HNSW",
-        metric_type="COSINE",
-        params={"M": 16, "efConstruction": 256},
-    )
+    index_params.add_index(**SPEC.index_spec(remote=True))
 
     client.create_collection(
         collection_name=COLLECTION_NAME,

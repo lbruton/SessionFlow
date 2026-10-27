@@ -211,3 +211,73 @@ def test_backfill_fts_raises_typed_error_on_query_milvusexception(monkeypatch):
     db_path = os.path.join(tempfile.gettempdir(), "sessionflow-heal-d4-query.db")
     with pytest.raises(rag_engine.FtsBackfillTransientError):
         rag_engine.backfill_fts(db_path=db_path)
+
+
+# ---------------------------------------------------------------------------
+# Memory sync loop: every tick applies pending acknowledgements for this
+# machine's consumers; the full reconcile runs on the first tick and then at
+# most every 6 hours.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMemoryIndex:
+    def __init__(self):
+        self.calls = []
+
+    async def tick(self):
+        self.calls.append("tick")
+
+    async def reconcile(self):
+        self.calls.append("reconcile")
+        return 0
+
+
+def test_memory_sync_reconciles_on_first_tick_then_every_six_hours():
+    index = _FakeMemoryIndex()
+    clock = [1000.0]
+    state = http_server.MemorySyncState(index=index, clock=lambda: clock[0])
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+    clock[0] += 6 * 3600 + 1
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert index.calls == ["reconcile", "tick", "tick", "reconcile", "tick"]
+
+
+def test_memory_sync_tick_failure_does_not_stop_the_loop():
+    class _Broken(_FakeMemoryIndex):
+        async def tick(self):
+            raise RuntimeError("postgres unreachable")
+
+    state = http_server.MemorySyncState(index=_Broken(), clock=lambda: 0.0)
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+    assert "postgres unreachable" in state.last_error
+
+
+def test_memory_sync_reconcile_failure_still_ticks_and_stays_due():
+    class _ReconcileBroken(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            raise RuntimeError("milvus scan failed")
+
+    index = _ReconcileBroken()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+    assert index.calls == ["reconcile", "tick"]
+    assert state.last_reconcile is None
+    assert "milvus scan failed" in state.last_error
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+    assert index.calls == ["reconcile", "tick", "reconcile", "tick"]
+
+
+def test_memory_sync_cancellation_propagates_from_reconcile():
+    class _Cancelled(_FakeMemoryIndex):
+        async def reconcile(self):
+            raise asyncio.CancelledError
+
+    state = http_server.MemorySyncState(index=_Cancelled(), clock=lambda: 0.0)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))

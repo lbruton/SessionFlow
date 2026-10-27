@@ -450,5 +450,50 @@ def stub_rag_engine(monkeypatch):
         get_model=lambda *args, **kwargs: object(),
         get_model_name=lambda *args, **kwargs: "embeddinggemma",
     )
+    before = set(sys.modules)
     monkeypatch.setitem(sys.modules, "rag_engine", module)
-    return module
+    yield module
+    # A project module first imported under the stub keeps a reference to it;
+    # evict it so later tests import it again against the real rag_engine.
+    root = str(Path(__file__).resolve().parent.parent)
+    tests_dir = str(Path(__file__).resolve().parent)
+    for name in set(sys.modules) - before:
+        path = getattr(sys.modules.get(name), "__file__", None) or ""
+        if path.startswith(root) and not path.startswith(tests_dir) and "site-packages" not in path:
+            sys.modules.pop(name, None)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_memory_dsn(monkeypatch):
+    """Keep a developer's real memory DSN out of every test."""
+    monkeypatch.delenv("SESSIONFLOW_MEMORY_DSN", raising=False)
+
+
+@pytest.fixture
+def memory_pg():
+    """Yield a Postgres DSN whose search_path is a fresh, empty schema for one test.
+
+    Each test gets its own ``t_<uuid>`` schema, dropped afterwards, so counts,
+    listings and histories never see another test's rows. No migration is
+    applied; the code under test runs it. Skips when ``SESSIONFLOW_TEST_PG_DSN``
+    is unset.
+    """
+    base = os.environ.get("SESSIONFLOW_TEST_PG_DSN")
+    if not base:
+        pytest.skip("SESSIONFLOW_TEST_PG_DSN unset")
+    import uuid
+
+    import psycopg
+    from psycopg import sql
+    from psycopg.conninfo import make_conninfo
+
+    schema = f"t_{uuid.uuid4().hex}"
+    with psycopg.connect(base, autocommit=True) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    try:
+        yield make_conninfo(base, options=f"-c search_path={schema}")
+    finally:
+        with psycopg.connect(base, autocommit=True) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(schema))
+            )

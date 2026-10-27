@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import logging
 import math
 import os
 import time
-from typing import Optional
+import weakref
+from typing import AsyncIterator, Awaitable, Callable, Optional
 
 _LOG = logging.getLogger("sessionflow.embedding_budget")
 
@@ -90,8 +93,8 @@ class EmbeddingIdentity:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @classmethod
-    def current_local(cls) -> "EmbeddingIdentity":
-        """Build the identity for the locally-configured MLX model."""
+    def current_local(cls, collection: str = "sessions") -> "EmbeddingIdentity":
+        """Build the identity of ``collection`` for the locally-configured MLX model."""
         model_name = os.getenv("SESSIONFLOW_MODEL", "embeddinggemma").lower()
         dimension = LOCAL_MODEL_DIMS.get(model_name)
         if dimension is None:
@@ -103,7 +106,66 @@ class EmbeddingIdentity:
             embedding_provider="local_mlx",
             model_name=model_name,
             dimension=dimension,
+            collection_name=collection,
         )
+
+
+MIN_COOLDOWN_MS = 200
+
+
+class EmbedThrottle:
+    """Cooldown between embed batches that waits instead of denying work.
+
+    Memory index embeds use it in place of the transcript budget, which drops
+    batches. Transcript batches stamp it too, so a memory embed never starts
+    inside a transcript batch's cooldown. The cooldown never goes below 200 ms.
+    """
+
+    def __init__(
+        self,
+        cooldown_ms: int = MIN_COOLDOWN_MS,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        """Set the cooldown; ``clock`` and ``sleep`` are injectable for tests."""
+        self.cooldown_ms = max(int(cooldown_ms), MIN_COOLDOWN_MS)
+        self._clock = clock
+        self._sleep = sleep
+        self._last_done = 0.0
+        # An asyncio.Lock binds to one event loop, so each loop gets its own.
+        self._locks: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+            weakref.WeakKeyDictionary()
+        )
+
+    @asynccontextmanager
+    async def batch(self) -> AsyncIterator[None]:
+        """Hold the throttle for one batch: wait out the cooldown, run, then stamp it.
+
+        Concurrent batches on the same event loop run one at a time, so each
+        starts a full cooldown after the previous one finished.
+        """
+        loop = asyncio.get_running_loop()
+        lock = self._locks.get(loop)
+        if lock is None:
+            lock = self._locks[loop] = asyncio.Lock()
+        async with lock:
+            await self.wait()
+            try:
+                yield
+            finally:
+                self.done()
+
+    async def wait(self) -> None:
+        """Sleep until the cooldown after the last finished batch has passed."""
+        if not self._last_done:
+            return
+        remaining = self.cooldown_ms / 1000.0 - (self._clock() - self._last_done)
+        if remaining > 0:
+            await self._sleep(remaining)
+
+    def done(self) -> None:
+        """Record that a batch finished now."""
+        self._last_done = self._clock()
 
 
 @dataclass
@@ -179,6 +241,7 @@ class EmbeddingBudget:
     def after_batch(self, duration: float, turns: int, error: Optional[BaseException] = None) -> None:
         """Record a finished batch's duration, turn count, and any error."""
         self.last_batch_finished_at = time.monotonic()
+        get_embed_throttle().done()
         self.last_batch_duration = duration
         self.batches_processed += 1
         self.turns_processed += turns
@@ -227,3 +290,18 @@ def reset_embedding_budget() -> EmbeddingBudget:
     global _BUDGET
     _BUDGET = EmbeddingBudget.from_env()
     return _BUDGET
+
+
+_THROTTLE: Optional[EmbedThrottle] = None
+
+
+def get_embed_throttle() -> EmbedThrottle:
+    """Return the process-wide embed throttle, creating it on first use."""
+    global _THROTTLE
+    if _THROTTLE is None:
+        _THROTTLE = EmbedThrottle(
+            cooldown_ms=_env_int(
+                "SESSIONFLOW_EMBED_COOLDOWN_MS", MIN_COOLDOWN_MS, minimum=MIN_COOLDOWN_MS
+            )
+        )
+    return _THROTTLE

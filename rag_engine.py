@@ -27,7 +27,7 @@ from pathlib import Path
 os.environ['HF_HUB_OFFLINE'] = '1'
 os.environ['TRANSFORMERS_OFFLINE'] = '1'
 
-from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
+from pymilvus import MilvusClient, CollectionSchema, FieldSchema
 from pymilvus.exceptions import MilvusException
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
@@ -38,6 +38,12 @@ import sys
 import threading
 import time
 
+from collection_specs import (
+    ISSUE_ID_FIELD_MAX,
+    CollectionSpec,
+    memories_spec,
+    sessions_spec,
+)
 from fts_hybrid import FTSIndex, fts_backfill_required, rrf_merge
 from embedding_control import (
     EmbeddingIdentity,
@@ -72,7 +78,7 @@ _ISSUE_ID_PREFIX_DENYLIST = frozenset(
     {"UTF", "SHA", "HTTP", "HTTPS", "ISO", "RFC", "IPV", "MD", "BASE"}
 )
 # Milvus VARCHAR field length the extracted ids are stored in.
-_ISSUE_ID_FIELD_MAX = 4096
+_ISSUE_ID_FIELD_MAX = ISSUE_ID_FIELD_MAX
 # Default number of timeline entries returned by get_issue_timeline.
 DEFAULT_TIMELINE_LIMIT = 50
 # Generous FTS fetch window for the timeline fallback so the chronological slice
@@ -215,7 +221,9 @@ _MODEL_CACHE = Path.home() / ".cache/huggingface/hub" / _MODEL_CFG["cache_subdir
 _SEARCH_PREFIX = _MODEL_CFG["search_prefix"]
 _DOCUMENT_PREFIX = _MODEL_CFG["document_prefix"]
 
-COLLECTION_NAME = "sessions"
+SESSIONS_SPEC = sessions_spec(_EMBED_DIM)
+MEMORIES_SPEC = memories_spec(_EMBED_DIM)
+COLLECTION_NAME = SESSIONS_SPEC.name
 
 # --- Model identity check ---
 
@@ -258,8 +266,11 @@ def _check_model_identity(db_path: Optional[str] = None):
                     f"Run cleanup.py reset or clear the index before switching models."
                 )
             # Index is empty — safe to overwrite the stamp
-    # Stamp current model
-    _IDENTITY_FILE.write_text(json.dumps({"model_name": _MODEL_NAME}))
+    # The stamp covers the transcript collection only; the memory model
+    # generation lives in Postgres memory_index_meta.
+    _IDENTITY_FILE.write_text(
+        json.dumps({"model_name": _MODEL_NAME, "collection": COLLECTION_NAME})
+    )
 
 
 def get_model_name() -> str:
@@ -436,12 +447,15 @@ _embed_semaphore: Optional[asyncio.Semaphore] = None
 # state is not safe to migrate across threads.
 _embed_executor: Optional[ThreadPoolExecutor] = None
 _server_mode = False
+# Milvus path given to init_server_mode; the default for memory-context lookups.
+_server_db_path: Optional[str] = None
 
 
 def init_server_mode(db_path: Optional[str] = None):
     """Initialize async concurrency primitives for HTTP server mode."""
-    global _write_lock, _embed_semaphore, _embed_executor, _server_mode
+    global _write_lock, _embed_semaphore, _embed_executor, _server_mode, _server_db_path
     _check_model_identity(db_path=db_path)
+    _server_db_path = db_path
     _write_lock = asyncio.Lock()
     _embed_semaphore = asyncio.Semaphore(1)
     _embed_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-embed")
@@ -517,90 +531,110 @@ def _resolve_db_path(db_path: Optional[str]) -> str:
 
 
 def _expected_schema_fields() -> List[FieldSchema]:
-    """Source-of-truth Milvus field list for the sessions collection.
+    """Return the sessions collection field list from ``SESSIONS_SPEC``."""
+    return SESSIONS_SPEC.field_schemas()
 
-    Used by both _ensure_collection() (create path) and _detect_schema_drift()
-    (startup validation) so the two can't drift out of sync.
+
+def _spec_kwargs(spec: Optional[CollectionSpec]) -> Dict[str, CollectionSpec]:
+    """Forward ``spec`` to a helper only when the caller named one.
+
+    The sessions call form ``helper(client, db_path)`` stays unchanged, so
+    callers and test doubles written for it keep working.
     """
-    return [
-        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=False),
-        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=_EMBED_DIM),
-        FieldSchema(name="document", dtype=DataType.VARCHAR, max_length=65535),
-        FieldSchema(name="doc_id", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="session_id", dtype=DataType.VARCHAR, max_length=128),
-        FieldSchema(name="logical_session_id", dtype=DataType.VARCHAR, max_length=256),
-        FieldSchema(name="provider", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="source_kind", dtype=DataType.VARCHAR, max_length=96),
-        FieldSchema(name="source_class", dtype=DataType.VARCHAR, max_length=32),
-        FieldSchema(name="source_id", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="source_path", dtype=DataType.VARCHAR, max_length=1024),
-        FieldSchema(name="transcript_file", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="turn_index", dtype=DataType.INT64),
-        FieldSchema(name="timestamp", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="git_branch", dtype=DataType.VARCHAR, max_length=256),
-        FieldSchema(name="chunk_type", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="project_root", dtype=DataType.VARCHAR, max_length=512),
-        FieldSchema(name="issue_ids", dtype=DataType.VARCHAR, max_length=_ISSUE_ID_FIELD_MAX),
-    ]
+    return {} if spec is None else {"spec": spec}
 
 
-def detect_schema_drift(client: MilvusClient) -> List[str]:
-    """Return a list of missing or extra field names if the live collection
-    schema differs from `_expected_schema_fields()`. Empty list = no drift.
+def _describe_value(field, key: str):
+    if isinstance(field, dict):
+        return field.get(key)
+    return getattr(field, key, None)
 
-    Only field NAMES are diffed today — pymilvus's describe_collection output
-    shape varies across Milvus Lite vs Standalone, and we have not hit a
-    case where a same-named field changed dtype/length silently.
+
+def _as_int(value) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def detect_schema_drift(client: MilvusClient,
+                        spec: Optional[CollectionSpec] = None) -> List[str]:
+    """Return how the live collection differs from ``spec``; empty means no drift.
+
+    Reports ``missing:``, ``extra:``, then ``type:`` and ``dim:`` for a
+    same-named field whose type or vector dimension changed. Lite and
+    Standalone describe output differs, so an absent type or dim is not drift.
     """
-    if not client.has_collection(COLLECTION_NAME):
+    spec = spec or SESSIONS_SPEC
+    if not client.has_collection(spec.name):
         return []
     try:
-        info = client.describe_collection(COLLECTION_NAME)
+        info = client.describe_collection(spec.name)
     except Exception as exc:
         print(f"Schema drift check skipped: describe_collection failed: {exc}", file=sys.stderr)
         return []
-    expected = {f.name for f in _expected_schema_fields()}
-    actual: set[str] = set()
+    expected = {f.name: f for f in spec.fields}
+    actual: Dict[str, object] = {}
     for field in info.get("fields", []) or []:
-        if isinstance(field, dict):
-            name = field.get("name")
-        else:
-            name = getattr(field, "name", None)
+        name = _describe_value(field, "name")
         if name:
-            actual.add(name)
-    missing = sorted(expected - actual)
-    extra = sorted(actual - expected)
-    return [f"missing:{n}" for n in missing] + [f"extra:{n}" for n in extra]
+            actual[name] = field
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    changed_type: List[str] = []
+    changed_dim: List[str] = []
+    for name in sorted(set(expected) & set(actual)):
+        want = expected[name]
+        live = actual[name]
+        live_type = _as_int(_describe_value(live, "type"))
+        if live_type is not None and live_type != int(want.dtype):
+            changed_type.append(name)
+            continue
+        if want.dim is not None:
+            params = _describe_value(live, "params") or {}
+            live_dim = _as_int(params.get("dim")) if isinstance(params, dict) else None
+            if live_dim is not None and live_dim != want.dim:
+                changed_dim.append(name)
+    return (
+        [f"missing:{n}" for n in missing]
+        + [f"extra:{n}" for n in extra]
+        + [f"type:{n}" for n in changed_type]
+        + [f"dim:{n}" for n in changed_dim]
+    )
 
 
-def migrate_schema(client: MilvusClient, db_path: str = "") -> None:
-    """Drop the sessions collection and recreate it with the current schema.
+def migrate_schema(client: MilvusClient, db_path: str = "",
+                   spec: Optional[CollectionSpec] = None) -> None:
+    """Drop the collection and recreate it with the current schema.
 
-    DESTRUCTIVE: all indexed turns are lost. Provided as the explicit recovery
-    path for `python cleanup.py migrate-schema` and for the auto-migrate
-    env opt-in (SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1).
+    DESTRUCTIVE: every row in the collection is lost. Provided as the explicit
+    recovery path for `python cleanup.py migrate-schema` and for the
+    auto-migrate env opt-in (SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1).
     """
-    if client.has_collection(COLLECTION_NAME):
+    name = (spec or SESSIONS_SPEC).name
+    if client.has_collection(name):
         print(
-            f"Dropping collection {COLLECTION_NAME!r} for schema migration "
-            "(all indexed turns will be lost)",
+            f"Dropping collection {name!r} for schema migration "
+            "(all indexed rows will be lost)",
             file=sys.stderr,
         )
-        client.drop_collection(COLLECTION_NAME)
-    _create_collection(client, db_path)
+        client.drop_collection(name)
+    _create_collection(client, db_path, **_spec_kwargs(spec))
     # drop_collection already clears the schema cache. Every schema mutation
     # still goes through _invalidate_schema_cache.
-    _invalidate_schema_cache(client)
+    _invalidate_schema_cache(client, **_spec_kwargs(spec))
 
 
-def _invalidate_schema_cache(client: MilvusClient) -> None:
-    """Invalidate pymilvus's process-global data-path schema cache for the collection.
+def _invalidate_schema_cache(client: MilvusClient,
+                             spec: Optional[CollectionSpec] = None) -> None:
+    """Invalidate pymilvus's process-global data-path schema cache for one collection.
 
     pymilvus keeps a process-wide schema cache that ``add_collection_field`` does
     not clear, so a live client raises ``code=65535 "field not exist"`` after a
     field add. Call this after every schema change. It uses pymilvus internals and
     degrades to a logged no-op if they move.
     """
+    name = (spec or SESSIONS_SPEC).name
     try:
         from pymilvus.client.cache import GlobalCache
     except Exception as exc:  # pragma: no cover - pymilvus internals moved
@@ -609,24 +643,26 @@ def _invalidate_schema_cache(client: MilvusClient) -> None:
     try:
         endpoint = client._get_connection().server_address
         # SessionFlow uses the default database; SchemaCache normalizes "" -> "default".
-        GlobalCache.schema.invalidate(endpoint, "", COLLECTION_NAME)
+        GlobalCache.schema.invalidate(endpoint, "", name)
     except Exception as exc:  # pragma: no cover - defense in depth
-        logger.warning("Schema cache invalidation failed for %s: %s", COLLECTION_NAME, exc)
+        logger.warning("Schema cache invalidation failed for %s: %s", name, exc)
 
 
-def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
-    """Create the sessions collection if missing; refuse to start on schema drift.
+def _ensure_collection(client: MilvusClient, db_path: str = "",
+                       spec: Optional[CollectionSpec] = None) -> None:
+    """Create the collection if missing; refuse to start on schema drift.
 
-    A collection that lacks a field from `_expected_schema_fields()` rejects every
-    insert, so drift must stop startup. With SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 it
-    drops and recreates the collection; otherwise it raises RuntimeError that
-    names `python cleanup.py migrate-schema`.
+    ``spec`` defaults to the sessions collection. A collection that lacks a
+    field from its spec rejects every insert, so drift must stop startup. With
+    SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 it drops and recreates the collection;
+    otherwise it raises RuntimeError naming the recovery options.
     """
-    if not client.has_collection(COLLECTION_NAME):
-        _create_collection(client, db_path)
+    name = (spec or SESSIONS_SPEC).name
+    if not client.has_collection(name):
+        _create_collection(client, db_path, **_spec_kwargs(spec))
         return
 
-    drift = detect_schema_drift(client)
+    drift = detect_schema_drift(client, **_spec_kwargs(spec))
     if not drift:
         return
 
@@ -634,20 +670,27 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     # detect_schema_drift issues a fresh describe_collection, so a stale/cached
     # first read that clears on the second describe must NOT raise or migrate.
     # This re-verify gates BOTH the auto-migrate and the raise branches.
-    drift = detect_schema_drift(client)
+    drift = detect_schema_drift(client, **_spec_kwargs(spec))
     if not drift:
         return
 
     auto = os.getenv("SESSIONFLOW_AUTO_MIGRATE_SCHEMA", "").lower() in {"1", "true", "yes", "on"}
     if auto:
         print(
-            f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA detected schema drift {drift!r}; "
-            "dropping and recreating (all turns lost).",
+            f"SESSIONFLOW_AUTO_MIGRATE_SCHEMA detected schema drift {drift!r} in "
+            f"{name!r}; dropping and recreating (all rows lost).",
             file=sys.stderr,
         )
-        migrate_schema(client, db_path)
+        migrate_schema(client, db_path, **_spec_kwargs(spec))
         return
 
+    if name != COLLECTION_NAME:
+        raise RuntimeError(
+            f"Milvus collection {name!r} schema is out of date (drift={drift}). "
+            f"First restart the server: a transient describe can clear on a "
+            f"fresh read. If drift persists, set SESSIONFLOW_AUTO_MIGRATE_SCHEMA=1 "
+            f"to drop and recreate it; its rows are re-indexed from Postgres."
+        )
     raise RuntimeError(
         f"Milvus collection {COLLECTION_NAME!r} schema is out of date "
         f"(drift={drift}). First try the non-destructive option: restart the "
@@ -660,36 +703,32 @@ def _ensure_collection(client: MilvusClient, db_path: str = "") -> None:
     )
 
 
-def _create_collection(client: MilvusClient, db_path: str = "") -> None:
-    print(f"Creating collection: {COLLECTION_NAME} (dim={_EMBED_DIM})", file=sys.stderr)
-    schema = CollectionSchema(fields=_expected_schema_fields())
+def _create_collection(client: MilvusClient, db_path: str = "",
+                       spec: Optional[CollectionSpec] = None) -> None:
+    spec = spec or SESSIONS_SPEC
+    print(f"Creating collection: {spec.name} (dim={spec.vector_dim()})", file=sys.stderr)
+    schema = CollectionSchema(fields=spec.field_schemas())
 
     index_params = client.prepare_index_params()
-    if _is_remote_uri(db_path):
-        # Standalone supports HNSW — O(log n) search vs O(n) FLAT.
-        index_params.add_index(
-            field_name="vector",
-            index_type="HNSW",
-            metric_type="COSINE",
-            params={"M": 16, "efConstruction": 256},
-        )
-    else:
-        # Milvus Lite silently ignores non-FLAT indexes.
-        index_params.add_index(field_name="vector", index_type="FLAT", metric_type="COSINE")
+    # Standalone gets HNSW; Milvus Lite silently ignores non-FLAT indexes.
+    index_params.add_index(**spec.index_spec(remote=_is_remote_uri(db_path)))
 
-    client.create_collection(
-        collection_name=COLLECTION_NAME,
-        schema=schema,
-        index_params=index_params,
-    )
+    create_kwargs = {
+        "collection_name": spec.name,
+        "schema": schema,
+        "index_params": index_params,
+    }
+    if spec.consistency_level is not None:
+        create_kwargs["consistency_level"] = spec.consistency_level
+    client.create_collection(**create_kwargs)
 
-    print(f"Collection created: {COLLECTION_NAME}", file=sys.stderr)
+    print(f"Collection created: {spec.name}", file=sys.stderr)
 
     # Standalone requires explicit load_collection before query/dedup paths work.
     # create_collection with index_params does not auto-load.
     if _is_remote_uri(db_path):
-        client.load_collection(collection_name=COLLECTION_NAME)
-        print(f"Collection loaded: {COLLECTION_NAME}", file=sys.stderr)
+        client.load_collection(collection_name=spec.name)
+        print(f"Collection loaded: {spec.name}", file=sys.stderr)
 
 
 @contextmanager
@@ -1329,6 +1368,8 @@ def _timeline_entry(row: Dict) -> Dict:
         "chunk_type": row.get("chunk_type", role),
         "text": row.get("text", row.get("document", row.get("content", ""))),
         "issue_ids": row.get("issue_ids", ""),
+        "project_root": row.get("project_root", ""),
+        "logical_session_id": row.get("logical_session_id", ""),
     }
 
 
@@ -1478,7 +1519,8 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
                        providers: Optional[List[str]] = None,
                        date_from: Optional[str] = None,
                        date_to: Optional[str] = None,
-                       db_path: Optional[str] = None) -> List[Dict]:
+                       db_path: Optional[str] = None,
+                       newest: bool = False) -> List[Dict]:
     """Cross-harness, deduplicated, chronological feed of turns for an issue.
 
     Unions a structured Milvus source (``issue_ids like "%,ID,%"`` streamed batch
@@ -1502,9 +1544,12 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         date_from: Optional inclusive ISO-8601 lower bound on ``timestamp``.
         date_to: Optional inclusive ISO-8601 upper bound on ``timestamp``.
         db_path: Optional Milvus DB path override (also drives the FTS sidecar).
+        newest: When true, keep the newest ``limit`` turns (via ``_NewestN``) and
+            return them newest first; the default keeps the oldest ``limit``.
 
     Returns:
-        A list of timeline entry dicts, oldest first; ``[]`` when nothing
+        A list of timeline entry dicts, oldest first (newest first when
+        ``newest`` is set); ``[]`` when nothing
         references the issue (Req 4.7).
     """
     if not is_valid_issue_token(issue_id):
@@ -1517,7 +1562,8 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     )
 
     output_fields = ["document", "doc_id", "session_id", "timestamp",
-                     "chunk_type", "provider", "issue_ids"]
+                     "chunk_type", "provider", "issue_ids", "project_root",
+                     "logical_session_id"]
 
     # Per-entry filters, hoisted so they run during the stream over each source
     # row rather than over a fully-materialized list — only survivors reach the
@@ -1547,7 +1593,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     # matter how many turns reference the issue — and a server-side cap stays
     # impossible (Milvus query_iterator order is undefined; it can't sort by a
     # scalar), so streaming is the only correctness-preserving bound.
-    collector = _OldestN(limit)
+    collector = _NewestN(limit) if newest else _OldestN(limit)
     structured_count = 0
     for batch in _query_batches(output_fields, filter_expr=filter_expr, db_path=db_path):
         structured_count += len(batch)
@@ -1682,19 +1728,27 @@ def _semantic_scores(results: List[Dict]) -> List[float]:
 
 
 def _rank_results(results: List[Dict], sort_by: str, n: int,
-                  now: Optional[datetime] = None) -> List[Dict]:
+                  now: Optional[datetime] = None, *,
+                  timestamp_key: str = "timestamp",
+                  tie_break: Optional[str] = None) -> List[Dict]:
     """Order the merged candidate pool by the chosen strategy, then truncate.
 
     - ``relevance``: keep the post-RRF order (no recency re-rank).
-    - ``recency``: re-rank by timestamp descending; missing-timestamp rows last.
+    - ``recency``: re-rank by ``timestamp_key`` descending; missing-timestamp rows last.
     - ``hybrid``: final = (1-w)*semantic_score + w*recency_score.
 
-    Strips ranking scratch keys (`_rrf_score`, `_score`, `_semantic_score`,
-    `_recency_score`) before returning — but preserves non-score engine metadata
-    such as `_fts_warning`.
+    ``tie_break`` names a key that orders exact ties descending; without it,
+    ties keep their incoming order. Strips ranking scratch keys (`_rrf_score`,
+    `_score`, `_semantic_score`, `_recency_score`) before returning but keeps
+    non-score engine metadata such as `_fts_warning`.
     """
     if now is None:
         now = datetime.now(timezone.utc)
+
+    def _with_tie(primary):
+        if tie_break is None:
+            return primary
+        return lambda r: (primary(r), str(r.get(tie_break, "")))
 
     if sort_by == "relevance":
         ranked = list(results)
@@ -1702,7 +1756,7 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
         _epoch = datetime.min.replace(tzinfo=timezone.utc)
         ranked = sorted(
             results,
-            key=lambda r: _parse_timestamp_utc(r.get("timestamp", "")) or _epoch,
+            key=_with_tie(lambda r: _parse_timestamp_utc(r.get(timestamp_key, "")) or _epoch),
             reverse=True,
         )
     else:  # hybrid
@@ -1714,17 +1768,185 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
         )
         semantic = _semantic_scores(results)
         for r, sem in zip(results, semantic, strict=True):
-            rec = _recency_score(r.get("timestamp", ""), now, decay_days)
+            rec = _recency_score(r.get(timestamp_key, ""), now, decay_days)
             r["_semantic_score"] = sem
             r["_recency_score"] = rec
             r["_score"] = (1 - weight) * sem + weight * rec
-        ranked = sorted(results, key=lambda r: r.get("_score", 0.0), reverse=True)
+        ranked = sorted(
+            results, key=_with_tie(lambda r: r.get("_score", 0.0)), reverse=True
+        )
 
     for r in ranked:
         for key in _RANKING_SCRATCH_KEYS:
             r.pop(key, None)
 
     return ranked[:n]
+
+
+_CHICAGO = None
+# Timeline rows read per issue when grouping sessions for a memory's context.
+SESSION_SCAN_LIMIT = 500
+# Characters of each source-session turn returned with a memory's context.
+SESSION_TURN_CHARS = 2000
+
+
+def chicago_day_bounds(day) -> tuple:
+    """Return the half-open UTC interval ``[start, end)`` of one America/Chicago day."""
+    global _CHICAGO
+    if _CHICAGO is None:
+        from zoneinfo import ZoneInfo
+
+        _CHICAGO = ZoneInfo("America/Chicago")
+    start = datetime(day.year, day.month, day.day, tzinfo=_CHICAGO)
+    nxt = day + timedelta(days=1)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=_CHICAGO)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _session_key(row: Dict) -> tuple:
+    # Codex rows of one thread carry per-payload session ids; the thread id
+    # lives in logical_session_id, so Codex groups on it.
+    provider = row.get("provider") or ""
+    if provider == "codex":
+        return provider, row.get("logical_session_id") or row.get("session_id") or ""
+    return provider, row.get("session_id") or ""
+
+
+def _root_matches(root: str, roots: List[str]) -> bool:
+    return any(root == r or root.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def _rows_on_day(day, project_roots: List[str], db_path: Optional[str]) -> List[Dict]:
+    start, end = chicago_day_bounds(day)
+    # String bounds a day wide on each side; the exact Chicago bounds apply after parsing.
+    lo = (start - timedelta(days=1)).strftime("%Y-%m-%d")
+    hi = (end + timedelta(days=1)).strftime("%Y-%m-%d")
+    roots = " or ".join(f'project_root like "{_escape_filter_scalar(r.rstrip("/"))}%"'
+                        for r in project_roots)
+    filter_expr = f'timestamp >= "{lo}" and timestamp < "{hi}" and ({roots})'
+    fields = ["doc_id", "session_id", "logical_session_id", "provider", "timestamp",
+              "project_root", "issue_ids"]
+    rows: List[Dict] = []
+    for batch in _query_batches(fields, filter_expr=filter_expr, db_path=db_path):
+        rows.extend(batch)
+    return rows
+
+
+def sessions_by_issue(issue_ids: List[str], *, limit: int,
+                      project_roots: Optional[List[str]] = None, day=None,
+                      exclude_session: Optional[str] = None,
+                      db_path: Optional[str] = None) -> List[Dict]:
+    """Group transcript turns into sessions, newest first, for a memory's context.
+
+    Rows come from each issue's timeline; with no issue IDs and a ``day``, from
+    that day's turns in ``project_roots``. ``project_roots`` keeps a root and its
+    subfolders (worktrees). ``day`` keeps one America/Chicago day.
+
+    Returns:
+        Dicts of ``session_id``, ``provider``, ``turns``, ``first_timestamp``,
+        ``last_timestamp`` and ``issue_ids``, at most ``limit``.
+    """
+    db_path = db_path or _server_db_path
+    rows: List[Dict] = []
+    if issue_ids:
+        for issue in issue_ids:
+            rows.extend(get_issue_timeline(issue, limit=SESSION_SCAN_LIMIT,
+                                           db_path=db_path, newest=True))
+    elif day is not None and project_roots:
+        rows = _rows_on_day(day, project_roots, db_path)
+    bounds = chicago_day_bounds(day) if day is not None else None
+    sessions: Dict[tuple, Dict] = {}
+    seen_docs = set()
+    for row in rows:
+        doc = row.get("doc_id")
+        if doc in seen_docs:
+            continue
+        seen_docs.add(doc)
+        if project_roots and not _root_matches(row.get("project_root") or "", project_roots):
+            continue
+        ts = _parse_timestamp_utc(row.get("timestamp", ""))
+        if bounds is not None and (ts is None or not bounds[0] <= ts < bounds[1]):
+            continue
+        key = _session_key(row)
+        if not key[1] or key[1] == exclude_session:
+            continue
+        entry = sessions.setdefault(key, {
+            "session_id": key[1], "provider": key[0], "turns": 0, "issue_ids": set(),
+            "first_timestamp": row.get("timestamp", ""), "last_timestamp": row.get("timestamp", ""),
+            "_first": ts, "_last": ts,
+        })
+        entry["turns"] += 1
+        entry["issue_ids"].update(i for i in (row.get("issue_ids") or "").split(",") if i)
+        if ts is not None and (entry["_first"] is None or ts < entry["_first"]):
+            entry["_first"], entry["first_timestamp"] = ts, row.get("timestamp", "")
+        if ts is not None and (entry["_last"] is None or ts > entry["_last"]):
+            entry["_last"], entry["last_timestamp"] = ts, row.get("timestamp", "")
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    ordered = sorted(sessions.values(), key=lambda s: s["_last"] or _epoch, reverse=True)
+    out = []
+    for s in ordered[:limit]:
+        s.pop("_first")
+        s.pop("_last")
+        s["issue_ids"] = sorted(s["issue_ids"])
+        out.append(s)
+    return out
+
+
+def session_turns(session_id: str, provider: Optional[str], *, limit: int,
+                  db_path: Optional[str] = None) -> List[Dict]:
+    """Return the last ``limit`` turns of one session in order, each trimmed for display.
+
+    Codex sessions are matched on ``logical_session_id``, others on ``session_id``.
+    """
+    db_path = db_path or _server_db_path
+    column = "logical_session_id" if provider == "codex" else "session_id"
+    parts = [f'{column} == "{_escape_filter_scalar(session_id)}"']
+    if provider:
+        parts.append(f'provider == "{_escape_filter_scalar(provider)}"')
+    fields = ["turn_index", "timestamp", "chunk_type", "document"]
+    rows: List[Dict] = []
+    for batch in _query_batches(fields, filter_expr=" and ".join(parts), db_path=db_path):
+        rows.extend(batch)
+    rows.sort(key=lambda r: (r.get("turn_index") or 0))
+    return [{"turn_index": r.get("turn_index"), "timestamp": r.get("timestamp", ""),
+             "chunk_type": r.get("chunk_type", ""),
+             "content": (r.get("document") or "")[:SESSION_TURN_CHARS]}
+            for r in rows[-limit:]]
+
+
+MEMORY_RANGE_LIMIT = 16384
+"""Milvus caps one search at this many hits; a range search returns at most this many."""
+
+
+def memory_threshold_search(client, vector: List[float], *, project: str, user_id: str,
+                            generation: int, threshold: float,
+                            collection: str = "memories",
+                            exclude_memory_id: Optional[str] = None) -> List[Dict]:
+    """Return every active memory in one project whose vector is at least ``threshold`` similar.
+
+    A COSINE range search, not a top-N search, so no match above the threshold
+    is dropped. Only vectors of the current ``generation`` are compared.
+
+    Returns:
+        ``{"memory_id", "score"}`` dicts, most similar first.
+    """
+    parts = [
+        f'project == "{_escape_filter_scalar(project)}"',
+        f'user_id == "{_escape_filter_scalar(user_id)}"',
+        'status == "active"',
+        f"generation == {int(generation)}",
+    ]
+    if exclude_memory_id:
+        parts.append(f'memory_id != "{_escape_filter_scalar(exclude_memory_id)}"')
+    results = client.search(
+        collection_name=collection, data=[vector], limit=MEMORY_RANGE_LIMIT,
+        filter=" and ".join(parts), output_fields=["memory_id"],
+        search_params={"metric_type": "COSINE",
+                       "params": {"radius": float(threshold), "range_filter": 1.0}},
+    )
+    hits = [{"memory_id": h["entity"]["memory_id"], "score": float(h["distance"])}
+            for h in (results[0] if results else []) if h["distance"] >= threshold]
+    return sorted(hits, key=lambda h: h["score"], reverse=True)
 
 
 def get_turns(session_id: str, turn_index: int, context: int = 2,

@@ -13,7 +13,7 @@ Health: curl http://127.0.0.1:7102/health
 import asyncio
 import concurrent.futures
 import contextlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 import logging
 import os
@@ -47,7 +47,10 @@ from provider_codex import CodexAdapter
 from provider_opencode import OpenCodeAdapter
 from provider_ingestion import ProviderIngestionService, process_startup_provider_backfill
 from file_watcher import register_project, get_global_watcher
-from tools import register_tools, set_current_project_root
+from tools import register_tools, set_current_project_root, set_memory_service
+import memory_store
+import secret_redaction
+import socket
 
 logger = logging.getLogger("sessionflow")
 
@@ -480,6 +483,214 @@ async def _fts_heal_worker() -> None:
             pass
 
 
+# --- Memory index sync loop ---
+
+# Seconds between memory sync ticks; each tick applies every pending acknowledgement.
+MEMORY_SYNC_INTERVAL = float(os.getenv("SESSIONFLOW_MEMORY_SYNC_INTERVAL", "5"))
+# The full index-versus-Postgres reconcile runs on the first tick and then at
+# most this often.
+MEMORY_RECONCILE_INTERVAL = 6 * 3600
+
+
+@dataclass
+class MemorySyncState:
+    """State of the memory sync loop, reported in ``/health``.
+
+    Attributes:
+        index: The ``MemoryIndex`` (or any object with async ``tick`` and ``reconcile``).
+        clock: Monotonic clock, injectable for tests.
+        last_reconcile: Clock value of the last full reconcile, or None.
+        last_error: Text of the last tick or reconcile failure, or None.
+    """
+
+    index: object
+    clock: object = field(default=time.monotonic)
+    last_reconcile: float | None = None
+    last_error: str | None = None
+
+
+def _scrub(exc: BaseException) -> str:
+    """Return the exception text with any secret value redacted."""
+    redacted, _ = secret_redaction.redact(str(exc), mode="enforce")
+    return redacted
+
+
+async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> None:
+    """Run one memory sync tick: the reconcile when due, then the pending-acknowledgement pass.
+
+    The tick runs even when the reconcile fails, and a failed reconcile stays
+    due for the next pass. A failure is recorded on ``state`` and never ends
+    the loop.
+    """
+    now = state.clock()
+    errors: list[str] = []
+    if first_tick or state.last_reconcile is None or (
+        now - state.last_reconcile >= MEMORY_RECONCILE_INTERVAL
+    ):
+        try:
+            reset = await state.index.reconcile()
+            state.last_reconcile = now
+            if reset:
+                logger.info("Memory reconcile reset %d acknowledgements", reset)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            errors.append(_scrub(exc))
+            logger.warning("Memory reconcile failed: %s", errors[-1])
+    try:
+        await state.index.tick()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        errors.append(_scrub(exc))
+        logger.warning("Memory sync tick failed: %s", errors[-1])
+    state.last_error = "; ".join(errors) or None
+
+
+# Memory start-up runs after the transcript side is ready, on its own threads,
+# so a slow DSN fetch or Postgres outage never touches transcript readiness.
+_memory_status: dict = {"ready": False, "error": None}
+_memory_runtime: dict = {}
+MEMORY_FTS_FILE = _SERVER_DIR / "memories_fts.db"
+
+
+def _memory_host() -> str:
+    return os.getenv("SESSIONFLOW_HOST_NAME") or socket.gethostname().split(".")[0].lower()
+
+
+def _open_memory_store():
+    """Fetch the DSN, open the store and apply migrations; runs on a startup thread."""
+    dsn = memory_store.fetch_dsn()
+    store = memory_store.MemoryStore(dsn)
+    try:
+        store.migrate()
+    except Exception:
+        store.close()
+        raise
+    return store
+
+
+async def _start_memory(executor: concurrent.futures.Executor,
+                        tasks: dict[str, asyncio.Task]) -> None:
+    """Start the memory store, its indexes, the tools and the sync loop.
+
+    Any failure is reported as memory readiness ``False`` with the reason;
+    transcript search keeps working.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        import memory_index
+        import memory_service
+
+        store = await loop.run_in_executor(executor, _open_memory_store)
+        _memory_runtime["store"] = store
+        client = await loop.run_in_executor(
+            executor, rag_engine._get_persistent_client, MILVUS_URI
+        )
+        index = memory_index.MemoryIndex(
+            store=store, milvus=client, fts_path=MEMORY_FTS_FILE, host=_memory_host(),
+            milvus_uri=MILVUS_URI,
+        )
+        await index.start()
+        _, _, allowlist_path = rag_engine._redaction_settings()
+
+        async def embed_query(text: str) -> list[float]:
+            vectors = await loop.run_in_executor(
+                rag_engine._embed_executor, lambda: rag_engine.embed_texts([text], is_query=True)
+            )
+            return vectors[0]
+
+        service = memory_service.MemoryService(
+            store=store, index=index, embed_query=embed_query,
+            allowlist=rag_engine.load_allowlist(allowlist_path),
+        )
+        _memory_runtime["index"] = index
+        state = MemorySyncState(index=index)
+        _memory_runtime["sync"] = state
+        tasks["memory_sync"] = asyncio.create_task(_memory_sync_worker(state))
+        set_memory_service(service)
+        _memory_status.update(ready=True, error=None)
+        print("[HTTP] Memory store ready.", file=sys.stderr)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        _memory_status.update(ready=False, error=_scrub(exc))
+        print(f"[HTTP] Warning: memory store unavailable: {_memory_status['error']}",
+              file=sys.stderr)
+
+
+def jsonable(value):
+    """Return ``value`` with datetimes turned into ISO strings, for JSONResponse."""
+    if isinstance(value, dict):
+        return {k: jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [jsonable(v) for v in value]
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _memory_health_payload() -> dict:
+    """Return memory readiness, the start-up error, acknowledgement lag and dump status."""
+    payload = {"ready": _memory_status["ready"], "error": _memory_status["error"],
+               "ack_lag": None, "dump": None, "index": None, "sync_error": None}
+    store = _memory_runtime.get("store")
+    index = _memory_runtime.get("index")
+    sync = _memory_runtime.get("sync")
+    if index is not None:
+        payload["index"] = index.health()
+    if sync is not None:
+        payload["sync_error"] = sync.last_error
+    if store is not None and _memory_status["ready"]:
+        try:
+            payload["ack_lag"] = store.ack_lag()
+            payload["dump"] = store.dump_status()
+        except Exception as exc:
+            payload["error"] = f"memory store unreachable: {_scrub(exc)}"
+    return payload
+
+
+async def restore_check_endpoint(request: Request) -> JSONResponse:
+    """Index a restored memory database into temporary targets and compare it with its manifest.
+
+    ``memory_cli restore-check`` calls this after restoring a dump. The
+    production collection, FTS file, rows and acknowledgements are not touched.
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return JSONResponse({"ok": False, "error": "loopback only"}, status_code=403)
+    index = _memory_runtime.get("index")
+    if not _memory_status["ready"] or index is None:
+        return JSONResponse({"ok": False, "error": "memory store not ready"}, status_code=503)
+    body = await request.json()
+    try:
+        target_dsn, manifest = body["target_dsn"], body["manifest"]
+        timeout_s = float(body.get("timeout_s", 600))
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "target_dsn and manifest are required"},
+                            status_code=400)
+    import memory_index
+
+    try:
+        result = await memory_index.run_restore_check(
+            target_dsn=target_dsn, manifest=manifest, milvus=index.milvus,
+            fts_dir=_SERVER_DIR, embed=memory_index.embed_for_index,
+            model_name=rag_engine.get_model_name(), timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": _scrub(exc)}, status_code=500)
+    return JSONResponse(jsonable(result))
+
+
+async def _memory_sync_worker(state: MemorySyncState) -> None:
+    """Run the memory sync loop for the life of the server."""
+    first_tick = True
+    while True:
+        await _memory_sync_run_once(state, first_tick=first_tick)
+        first_tick = False
+        await asyncio.sleep(MEMORY_SYNC_INTERVAL)
+
+
 async def _process_startup_provider_backfill_locked(
     db_path: str,
     enabled_providers: list[str],
@@ -608,7 +819,11 @@ async def health(request: Request) -> JSONResponse:
         # it to the loop's default executor so the scan never blocks the event loop.
         loop = asyncio.get_running_loop()
         fts_payload = await loop.run_in_executor(None, _fts_lag_payload)
+    memory_payload = await asyncio.get_running_loop().run_in_executor(
+        None, _memory_health_payload
+    )
     return JSONResponse({
+        "memory": jsonable(memory_payload),
         "status": "starting" if starting else "ok",
         "startup": _startup_state,
         "server": "sessionflow",
@@ -992,6 +1207,12 @@ async def _background_startup(
     _startup_state = "ready"
     print("[HTTP] Startup complete.", file=sys.stderr)
 
+    memory_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="memory-startup"
+    )
+    _memory_runtime["executor"] = memory_executor
+    tasks["memory_startup"] = asyncio.create_task(_start_memory(memory_executor, tasks))
+
 
 @contextlib.asynccontextmanager
 async def lifespan(app: Starlette):
@@ -1038,6 +1259,22 @@ async def lifespan(app: Starlette):
     startup_executor.shutdown(wait=False, cancel_futures=True)
 
     heartbeat.stop()
+    for key in ("memory_startup", "memory_sync"):
+        memory_task = worker_tasks.get(key)
+        if memory_task is not None:
+            memory_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await memory_task
+    set_memory_service(None)
+    memory_executor = _memory_runtime.pop("executor", None)
+    if memory_executor is not None:
+        memory_executor.shutdown(wait=False, cancel_futures=True)
+    memory_store_handle = _memory_runtime.pop("store", None)
+    if memory_store_handle is not None:
+        with contextlib.suppress(Exception):
+            memory_store_handle.close()
+    _memory_runtime.clear()
+    _memory_status.update(ready=False, error=None)
     provider_backfill_task = worker_tasks.get("provider_backfill")
     if provider_backfill_task is not None:
         provider_backfill_task.cancel()
@@ -1090,7 +1327,12 @@ mcp_server = Server(
         "project_root='*' to search every project. Results blend relevance and recency "
         "by default; pass sort_by='relevance' or 'recency' to change that. To read a hit "
         "in context, call get_turns with its session_id and turn_index. The server cannot "
-        "see the live session ID, so pass session_id only to pin a session from a prior result."
+        "see the live session ID, so pass session_id only to pin a session from a prior result. "
+        "It also stores memories: verbatim session summaries, decisions, handoffs and facts. "
+        "Write one with add_memory, find them with search_memories or list_memories (newest "
+        "first), read one with get_memory and see the conversation behind it with "
+        "get_memory_context. Every memory tool takes 'project' explicitly; reads accept '*' "
+        "for every project. Pass format='json' for structured output."
     ),
 )
 register_tools(mcp_server)
@@ -1111,6 +1353,7 @@ app = Starlette(
         Route("/index", index_endpoint, methods=["POST"]),
         Route("/watch", watch_endpoint, methods=["POST"]),
         Route("/timeline", timeline_endpoint, methods=["GET"]),
+        Route("/memory/restore-check", restore_check_endpoint, methods=["POST"]),
         Mount("/mcp", app=ProjectMiddleware(session_manager.handle_request)),
     ],
     lifespan=lifespan,

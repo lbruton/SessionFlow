@@ -300,3 +300,151 @@ def test_output_never_contains_a_secret_value(cleanup_mod, monkeypatch, capsys):
     captured = capsys.readouterr()
     combined = captured.out + captured.err
     assert SYNTHETIC_SECRET not in combined
+
+
+# ---------------------------------------------------------------------------
+# Transcript cleanup never touches memory data: the Milvus `memories`
+# collection, the local memories_fts.db and the Postgres canonical store.
+# reset and migrate-schema also say so.
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """A Milvus client that records which collection every call targets."""
+
+    def __init__(self):
+        self.ops = []
+
+    def has_collection(self, name):
+        self.ops.append(("has", name))
+        return True
+
+    def drop_collection(self, name):
+        self.ops.append(("drop", name))
+
+    def delete(self, collection_name, **kwargs):
+        self.ops.append(("delete", collection_name))
+        return {"delete_count": 0}
+
+    def query(self, collection_name, **kwargs):
+        self.ops.append(("query", collection_name))
+        return []
+
+    def query_iterator(self, collection_name, **kwargs):
+        self.ops.append(("query_iterator", collection_name))
+
+        class _It:
+            def next(self):
+                return []
+
+            def close(self):
+                return None
+
+        return _It()
+
+    def flush(self, collection_name, **kwargs):
+        self.ops.append(("flush", collection_name))
+
+    def close(self):
+        return None
+
+    def touched(self):
+        return {name for _, name in self.ops}
+
+
+@pytest.fixture
+def isolated_memory(monkeypatch, tmp_path):
+    """Recording Milvus, a real memories_fts.db, and Postgres access forbidden."""
+    import contextlib
+
+    import psycopg
+
+    import rag_engine
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    state_dir = tmp_path / ".sessionflow"
+    state_dir.mkdir()
+    memories_fts = state_dir / "memories_fts.db"
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(memories_fts)) as conn, conn:
+        conn.execute("CREATE TABLE marker (i int)")
+        conn.execute("INSERT INTO marker VALUES (1)")
+
+    client = _RecordingClient()
+
+    @contextlib.contextmanager
+    def fake_client(*args, **kwargs):
+        yield client
+
+    def no_postgres(*args, **kwargs):
+        raise AssertionError("transcript cleanup must not open Postgres")
+
+    class _Fts:
+        def clear(self, *a, **k):
+            return None
+
+        def delete_by_doc_ids(self, *a, **k):
+            return 0
+
+        def __getattr__(self, name):
+            return lambda *a, **k: 0
+
+    monkeypatch.setattr(rag_engine, "milvus_client", fake_client)
+    monkeypatch.setattr(rag_engine, "milvus_client_for_migration", fake_client)
+    monkeypatch.setattr(rag_engine, "_create_collection", lambda *a, **k: None)
+    monkeypatch.setattr(rag_engine, "_fts", _Fts())
+    monkeypatch.setattr(psycopg, "connect", no_postgres)
+    return {"client": client, "memories_fts": memories_fts}
+
+
+def _assert_memory_untouched(env):
+    import sqlite3
+    from contextlib import closing
+
+    assert "memories" not in env["client"].touched()
+    assert env["memories_fts"].exists()
+    with closing(sqlite3.connect(env["memories_fts"])) as conn, conn:
+        assert conn.execute("SELECT count(*) FROM marker").fetchone()[0] == 1
+
+
+def test_reset_leaves_memory_data_and_says_so(cleanup_mod, isolated_memory, capsys):
+    args = cleanup_mod.build_parser().parse_args(["reset", "--yes"])
+    cleanup_mod.cmd_reset(args)
+    _assert_memory_untouched(isolated_memory)
+    assert ("drop", "sessions") in isolated_memory["client"].ops
+    out = capsys.readouterr().out.lower()
+    assert "memory data" in out and "untouched" in out
+
+
+def test_migrate_schema_leaves_memory_data_and_says_so(cleanup_mod, isolated_memory, capsys):
+    args = cleanup_mod.build_parser().parse_args(["migrate-schema", "--yes"])
+    cleanup_mod.cmd_migrate_schema(args)
+    _assert_memory_untouched(isolated_memory)
+    out = capsys.readouterr().out.lower()
+    assert "memory data" in out and "untouched" in out
+
+
+def test_age_expiry_deletes_only_transcripts(isolated_memory):
+    import rag_engine
+
+    rag_engine.delete_older_than(30, db_path="/tmp/x.db")
+    _assert_memory_untouched(isolated_memory)
+
+
+def test_cleanup_sessions_paths_delete_only_transcripts(isolated_memory):
+    import rag_engine
+
+    rag_engine.delete_by_session("some-session", db_path="/tmp/x.db")
+    _assert_memory_untouched(isolated_memory)
+
+
+def test_sanitize_drop_path_deletes_only_transcripts(isolated_memory):
+    import inspect
+
+    import rag_engine
+    import sanitize
+
+    assert "rag_engine.delete_by_doc_id" in inspect.getsource(sanitize)
+    rag_engine.delete_by_doc_id("doc-1", db_path="/tmp/x.db")
+    _assert_memory_untouched(isolated_memory)

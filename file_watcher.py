@@ -15,7 +15,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Dict, List, Optional, Set
 
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -89,6 +89,12 @@ def _slug_from_transcript_path(transcript_path: str) -> Optional[str]:
         return relative.parts[0] if relative.parts else None
     except (ValueError, OSError):
         return None
+
+
+def known_project_roots() -> List[str]:
+    """Return every project root the server has registered, from the saved slug map."""
+    _load_slug_map()
+    return sorted(set(_slug_map.values()))
 
 
 def register_project(project_root: str):

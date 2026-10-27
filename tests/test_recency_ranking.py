@@ -410,3 +410,40 @@ def _call_tool(tools_module, name, arguments):
     tools_module.register_tools(_Server())
     result = asyncio.run(captured["call"](name, arguments))
     return result[0].text
+
+
+# ---------------------------------------------------------------------------
+# Memory search ranks on created_at and breaks exact ties by memory_id
+# (descending, matching the listing order). Transcript ranking is unchanged:
+# without tie_break, equal rows keep their incoming order.
+# ---------------------------------------------------------------------------
+
+
+def test_recency_ties_keep_input_order_without_tie_break():
+    rows = [_row("b", 0.5, 1.0), _row("c", 0.5, 1.0), _row("a", 0.5, 1.0)]
+    ranked = rag_engine._rank_results(rows, "recency", 3, now=NOW)
+    assert [r["doc_id"] for r in ranked] == ["b", "c", "a"]
+
+
+def test_recency_ties_break_by_id_when_asked():
+    stamp = _iso(1.0)
+    rows = [
+        {"memory_id": "b", "_rrf_score": 0.5, "created_at": stamp},
+        {"memory_id": "c", "_rrf_score": 0.5, "created_at": stamp},
+        {"memory_id": "a", "_rrf_score": 0.5, "created_at": stamp},
+    ]
+    ranked = rag_engine._rank_results(
+        rows, "recency", 3, now=NOW, timestamp_key="created_at", tie_break="memory_id"
+    )
+    assert [r["memory_id"] for r in ranked] == ["c", "b", "a"]
+
+
+def test_hybrid_uses_the_given_timestamp_key():
+    rows = [
+        {"memory_id": "old", "_rrf_score": 0.5, "created_at": _iso(60.0)},
+        {"memory_id": "new", "_rrf_score": 0.5, "created_at": _iso(0.0)},
+    ]
+    ranked = rag_engine._rank_results(
+        rows, "hybrid", 2, now=NOW, timestamp_key="created_at", tie_break="memory_id"
+    )
+    assert [r["memory_id"] for r in ranked] == ["new", "old"]

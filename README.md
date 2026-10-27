@@ -89,6 +89,35 @@ Several harnesses can start at the same time, and their `SessionStart` hooks the
 
 The `start`, `stop`, `restart` and `status` commands work the same with or without the LaunchAgent. `setup.sh` offers to install it. Set `SESSIONFLOW_INSTALL_AGENT=1` to install it without a prompt.
 
+## Memories
+
+SessionFlow also stores memories: notes an agent writes on purpose, such as session summaries, decisions and handoffs. Postgres holds them verbatim. The Milvus `memories` collection and a local `memories_fts.db` file are search indexes that SessionFlow rebuilds from Postgres. Memory is optional. Without `SESSIONFLOW_MEMORY_DSN`, the server serves transcripts only and `/health` reports memory as not configured.
+
+| Tool | Returns |
+|------|---------|
+| `add_memory` | The stored memory, or the existing one with the same topic key or text, and a list of similar memories. |
+| `search_memories` | Memories that match a query in one project, or in every project with `project: "*"`. |
+| `list_memories` | Memories newest first, with a cursor for the next page. |
+| `get_memory` / `update_memory` / `delete_memory` | One memory, read, changed or deleted by ID. |
+| `get_memory_context` | A memory, the session that produced it and other sessions about its issue IDs. |
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSIONFLOW_MEMORY_DSN` | unset | Postgres connection string. SessionFlow reads it from the environment only. |
+| `SESSIONFLOW_MEMORY_SYNC_INTERVAL` | `5` | Seconds between index sync passes. |
+| `SESSIONFLOW_MEMORY_SIMILAR_THRESHOLD` | `0.88` | Similarity at which `add_memory` lists a memory as similar. |
+| `SESSIONFLOW_MEMORY_AUDIT_AGE_DAYS` | `21` | Age at which the audit lists an open item or blocker. |
+| `SESSIONFLOW_HOST_NAME` | short host name | Names this machine's keyword index in the acknowledgements. |
+
+`setup.sh` copies `hooks/memory-session-start.py` into the Claude Code and Codex hook folders. At session start it shows the three newest session summaries and recent turns, and falls back to a local cache when the server cannot answer. Setup registers the hook for Codex and prints the Claude Code `~/.claude/settings.json` SessionStart entry for you to add by hand.
+
+```bash
+python memory_cli.py audit                        # Likely duplicates, aged open items, counts
+python memory_cli.py rebuild --yes                # Re-index every memory from Postgres
+python memory_cli.py import export.json --report report.json
+python memory_cli.py restore-check memory.dump --target-dsn "$EMPTY_DSN"
+```
+
 ## Provider support
 
 SessionFlow ingests native structured transcripts. It does not read terminal logs.

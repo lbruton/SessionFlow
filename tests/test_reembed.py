@@ -409,3 +409,64 @@ def test_cli_drive_gives_up_after_repeated_crashes(env, monkeypatch):
     monkeypatch.setattr(cleanup.time, "sleep", lambda s: None)
     assert cleanup.cmd_reembed(args) == 1
     assert len(spawned) == 2
+
+
+# ---------------------------------------------------------------------------
+# One state and worklist file per collection; a re-embed run also bumps the
+# memories embedding generation once, and leaves memory embedding to the
+# server's sync loop.
+# ---------------------------------------------------------------------------
+
+
+def test_state_files_are_per_collection(env):
+    reembed = env["module"]
+    assert reembed._state_path().name == "reembed_state.json"
+    assert reembed._state_path("memories") != reembed._state_path()
+    assert reembed._worklist_path("memories") != reembed._worklist_path()
+
+
+def test_fresh_run_bumps_memory_generation_once(env, monkeypatch):
+    reembed = env["module"]
+    bumps = []
+    monkeypatch.setattr(reembed, "_reembed_memories", lambda: bumps.append(1) or 2)
+
+    first = reembed.run(confirmed=True, max_turns=2)
+    assert first.status == "paused"
+    reembed.run(confirmed=True)
+
+    assert bumps == [1]
+
+
+def _memory_record(memory_store, text):
+    import hashlib
+
+    return memory_store.NewMemory(
+        text=text,
+        agent_id="claude-code",
+        project="sessionflow",
+        type="fact",
+        content_hash=hashlib.sha256(text.encode()).hexdigest(),
+    )
+
+
+def test_cli_reembed_covers_memories_without_embedding_them(env, monkeypatch, memory_pg):
+    import memory_store
+
+    reembed = env["module"]
+    store = memory_store.MemoryStore(memory_pg)
+    try:
+        store.migrate()
+        written = store.add(_memory_record(memory_store, "memory text that must not embed here"))
+        store.ack("milvus", written.memory_id, version=1, generation=1, deleted=False)
+        assert store.pending("milvus") == []
+
+        monkeypatch.setattr(reembed, "_open_memory_store", lambda: store)
+        cleanup, args = _parse(["reembed", "run", "--yes"])
+        assert cleanup.cmd_reembed(args) == 0
+
+        assert store.index_meta()["generation"] == 2
+        assert [r["memory_id"] for r in store.pending("milvus")] == [written.memory_id]
+        flat = [t for batch in env["embed_inputs"] for t in batch]
+        assert all("memory text" not in t for t in flat)
+    finally:
+        store.close()

@@ -89,3 +89,147 @@ def test_embedding_budget_records_cooldown_after_batch():
     assert decision.retry_after_seconds > 0
     time.sleep(decision.retry_after_seconds)
     assert budget.before_batch(batch_size=4, estimated_chars=100).allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Identity per collection, and the waiting throttle memory embeds share with
+# transcripts. The throttle never denies work; it waits out the cooldown.
+# ---------------------------------------------------------------------------
+
+
+def test_identity_records_the_collection_it_describes():
+    from embedding_control import EmbeddingIdentity
+
+    assert EmbeddingIdentity.current_local().collection_name == "sessions"
+    assert EmbeddingIdentity.current_local(collection="memories").collection_name == "memories"
+
+
+def test_throttle_keeps_the_200ms_floor():
+    from embedding_control import EmbedThrottle
+
+    assert EmbedThrottle(cooldown_ms=50).cooldown_ms == 200
+    assert EmbedThrottle(cooldown_ms=350).cooldown_ms == 350
+
+
+def test_throttle_waits_instead_of_dropping():
+    import asyncio
+
+    from embedding_control import EmbedThrottle
+
+    clock = [100.0]
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+        clock[0] += seconds
+
+    throttle = EmbedThrottle(cooldown_ms=200, clock=lambda: clock[0], sleep=fake_sleep)
+
+    async def two_batches():
+        await throttle.wait()
+        throttle.done()
+        clock[0] += 0.05
+        await throttle.wait()
+        throttle.done()
+
+    asyncio.run(two_batches())
+
+    assert slept == [_approx(0.15)]
+
+
+def test_throttle_does_not_wait_after_the_cooldown():
+    import asyncio
+
+    from embedding_control import EmbedThrottle
+
+    clock = [0.0]
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    throttle = EmbedThrottle(cooldown_ms=200, clock=lambda: clock[0], sleep=fake_sleep)
+
+    async def batches():
+        await throttle.wait()
+        throttle.done()
+        clock[0] += 1.0
+        await throttle.wait()
+
+    asyncio.run(batches())
+    assert slept == []
+
+
+def test_shared_throttle_is_one_instance():
+    from embedding_control import get_embed_throttle
+
+    assert get_embed_throttle() is get_embed_throttle()
+
+
+def _approx(value):
+    import pytest
+
+    return pytest.approx(value, abs=1e-9)
+
+
+def test_throttle_batch_spaces_concurrent_batches_by_the_cooldown():
+    import asyncio
+
+    from embedding_control import EmbedThrottle
+
+    clock = [100.0]
+
+    async def fake_sleep(seconds):
+        clock[0] += seconds
+
+    throttle = EmbedThrottle(cooldown_ms=200, clock=lambda: clock[0], sleep=fake_sleep)
+    starts = []
+
+    async def one_batch():
+        async with throttle.batch():
+            starts.append(clock[0])
+            await asyncio.sleep(0)
+
+    async def run():
+        await asyncio.gather(one_batch(), one_batch())
+
+    asyncio.run(run())
+    asyncio.run(run())  # a second event loop must not hit a lock bound to the first
+
+    assert starts[1] - starts[0] >= 0.2 - 1e-9
+    assert starts[3] - starts[2] >= 0.2 - 1e-9
+
+
+def test_concurrent_memory_embeds_are_spaced_by_the_cooldown(monkeypatch):
+    import asyncio
+
+    import embedding_control
+    import memory_index
+    import rag_engine
+
+    clock = [50.0]
+
+    async def fake_sleep(seconds):
+        clock[0] += seconds
+
+    throttle = embedding_control.EmbedThrottle(
+        cooldown_ms=200, clock=lambda: clock[0], sleep=fake_sleep)
+    monkeypatch.setattr(embedding_control, "get_embed_throttle", lambda: throttle)
+    monkeypatch.setattr(rag_engine, "_embed_executor", None)
+    starts = []
+
+    def fake_embed(texts):
+        starts.append(clock[0])
+        time.sleep(0.05)  # a batch still running when the other caller reaches the throttle
+        return [[0.0] for _ in texts]
+
+    monkeypatch.setattr(rag_engine, "embed_texts", fake_embed)
+
+    async def both():
+        await asyncio.gather(memory_index.embed_for_index(["a"]),
+                             memory_index.embed_for_index(["b"]))
+
+    asyncio.run(both())
+
+    assert len(starts) == 2
+    assert starts[1] - starts[0] >= 0.2 - 1e-9

@@ -141,12 +141,18 @@ def cmd_delete(args):
         sys.exit(1)
 
 
+MEMORY_UNTOUCHED = (
+    "Memory data is untouched: the memories collection, memories_fts.db and the "
+    "Postgres memory store are not changed by transcript cleanup."
+)
+
+
 def cmd_reset(args):
-    """Delete all indexed data across every project (with confirmation)."""
+    """Delete all indexed transcript data across every project (with confirmation)."""
     db = get_db_path()
 
     if not args.yes:
-        answer = input("This will delete ALL indexed data (all projects). Continue? [y/N] ")
+        answer = input("This will delete ALL indexed transcript data (all projects). Continue? [y/N] ")
         if answer.lower() != "y":
             print("Cancelled.")
             return
@@ -162,6 +168,7 @@ def cmd_reset(args):
             f.unlink()
 
     print("Reset complete. All session data deleted.")
+    print(MEMORY_UNTOUCHED)
 
 
 def cmd_stats(args):
@@ -209,6 +216,7 @@ def cmd_migrate_schema(args):
             print(f"Detected schema drift: {drift}")
         rag_engine.migrate_schema(client, db_path=db)
     print("Schema migrated. Backfill the FTS sidecar via the server watcher.")
+    print(MEMORY_UNTOUCHED)
 
 
 def cmd_status(args):

@@ -118,12 +118,20 @@ def _state_dir() -> Path:
     return _ensure_private_dir(Path.home() / _STATE_DIRNAME)
 
 
-def _state_path() -> Path:
-    return _state_dir() / _STATE_NAME
+def _collection_file(name: str, collection: str) -> str:
+    # The sessions files keep their original names so existing checkpoints resume.
+    if collection == rag_engine.COLLECTION_NAME:
+        return name
+    stem, dot, ext = name.partition(".")
+    return f"{stem}-{collection}{dot}{ext}"
 
 
-def _worklist_path() -> Path:
-    return _state_dir() / _WORKLIST_NAME
+def _state_path(collection: str = "sessions") -> Path:
+    return _state_dir() / _collection_file(_STATE_NAME, collection)
+
+
+def _worklist_path(collection: str = "sessions") -> Path:
+    return _state_dir() / _collection_file(_WORKLIST_NAME, collection)
 
 
 def _backup_path(run_id: str) -> Path:
@@ -141,7 +149,7 @@ def _write_private_atomic(path: Path, text: str) -> None:
 
 
 def _load_state() -> Optional[dict]:
-    path = Path.home() / _STATE_DIRNAME / _STATE_NAME
+    path = Path.home() / _STATE_DIRNAME / _collection_file(_STATE_NAME, rag_engine.COLLECTION_NAME)
     if not path.exists():
         return None
     try:
@@ -254,6 +262,39 @@ def _rate_from_state(state: Optional[dict]) -> float:
     return DEFAULT_TURNS_PER_SECOND
 
 
+MEMORY_COLLECTION = "memories"
+
+
+def _open_memory_store():
+    import memory_store
+
+    store = memory_store.MemoryStore(memory_store.fetch_dsn())
+    store.migrate()
+    return store
+
+
+def _reembed_memories() -> Optional[int]:
+    """Start a new memory embedding generation for the active model.
+
+    Memory vectors are rebuilt by the server's sync loop from the Postgres
+    text, never in this process: the bump makes every Milvus acknowledgement
+    pending, and the reset clears them. Returns the new generation, or None
+    when the memory store is unreachable (transcripts still re-embed).
+    """
+    try:
+        store = _open_memory_store()
+        generation = store.bump_generation(
+            model_name=rag_engine.get_model_name(),
+            vector_dim=rag_engine.MEMORIES_SPEC.vector_dim(),
+        )
+        store.reset_acks(consumer="milvus")
+    except Exception as exc:  # noqa: BLE001 - a memory outage must not block transcripts
+        print(f"Memory re-embed skipped: {rag_engine._scrub_exception(exc)}")
+        return None
+    print(f"Memory embedding generation {generation} started; the server re-indexes memories.")
+    return generation
+
+
 def plan(db_path: Optional[str] = None) -> ReembedReport:
     """Report what a run would do, without writing anything.
 
@@ -360,6 +401,11 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
         worklist = _snapshot_ids(db_path)
         _write_private_atomic(_worklist_path(), json.dumps(worklist))
         state = _new_state(worklist)
+        state["memory_generation"] = _reembed_memories()
+        _write_private_atomic(_state_path(MEMORY_COLLECTION), json.dumps({
+            "run_id": state["run_id"], "generation": state["memory_generation"],
+            "model_name": state["model_name"], "created_at": state["created_at"],
+        }))
 
     state["status"] = "running"
     _save_state(state)

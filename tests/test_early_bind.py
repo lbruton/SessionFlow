@@ -159,3 +159,50 @@ async def test_health_handler_direct_call_reports_starting_before_startup(stub_r
     response = await http_server.health(None)
 
     assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Memory start-up (DSN fetch, Postgres migration, memories collection check)
+# runs after the bind and reports its own readiness: a slow or failed memory
+# start never delays or breaks transcript search.
+# ---------------------------------------------------------------------------
+
+
+def test_slow_memory_startup_does_not_delay_transcript_readiness(
+    stub_rag_engine, tmp_path, monkeypatch
+):
+    memory_release = threading.Event()
+
+    def blocked_fetch(*args, **kwargs):
+        memory_release.wait(timeout=10)
+        raise RuntimeError("released")
+
+    # memory_store is not re-imported by _server, so this patch reaches the server.
+    monkeypatch.setattr("memory_store.fetch_dsn", blocked_fetch, raising=False)
+    release = threading.Event()
+    release.set()
+    try:
+        with _server(stub_rag_engine, tmp_path, monkeypatch, release) as (http_server, client, calls):
+            assert _wait_for(lambda: client.get("/health").status_code == 200)
+            body = client.get("/health").json()
+            assert body["startup"] == "ready" and body["milvus"] is True
+            assert set(body["memory"]) >= {"ready", "error", "ack_lag", "dump"}
+            assert body["memory"]["ready"] is False
+    finally:
+        memory_release.set()
+
+
+def test_failed_dsn_fetch_leaves_transcripts_ready(stub_rag_engine, tmp_path, monkeypatch):
+    def broken_fetch(*args, **kwargs):
+        raise RuntimeError("memory store not configured: set SESSIONFLOW_MEMORY_DSN")
+
+    monkeypatch.setattr("memory_store.fetch_dsn", broken_fetch, raising=False)
+    release = threading.Event()
+    release.set()
+    with _server(stub_rag_engine, tmp_path, monkeypatch, release) as (http_server, client, calls):
+        assert _wait_for(lambda: client.get("/health").status_code == 200)
+        assert _wait_for(lambda: client.get("/health").json()["memory"]["error"] is not None)
+        body = client.get("/health").json()
+        assert body["startup"] == "ready" and body["milvus"] is True
+        assert body["memory"]["ready"] is False
+        assert "memory store not configured" in body["memory"]["error"]
