@@ -9,6 +9,21 @@ other names where a transcript came from.
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Pattern
+
+import memory_store
+import secret_redaction
+from memory_store import (
+    MemoryFilters,
+    MemoryNotFound,
+    MemoryStore,
+    MemoryStoreError,
+    NewMemory,
+    content_hash,
+    run_db,
+)
+
 LEGAL_MEMORY_TYPES = frozenset({
     "session-summary",
     "decision",
@@ -39,4 +54,278 @@ IMPORT_ONLY_AGENT = "unknown"
 MAX_MEMORY_BYTES = 65536
 """Largest accepted memory text, counted in UTF-8 bytes."""
 
-DEFAULT_USER_ID = "lbruton"
+DEFAULT_USER_ID = memory_store.DEFAULT_USER_ID
+
+_PROVENANCE_TEXT = ("source_session_id", "source_provider", "source_project_root")
+_PROVENANCE_TIME = ("source_started_at", "source_ended_at")
+# Fields a caller may change with update_memory; text changes recompute the
+# content hash and issue IDs.
+_UPDATE_FIELDS = frozenset({"text", "agent_id", "type", "topic_key", "extra",
+                            *_PROVENANCE_TEXT, *_PROVENANCE_TIME})
+
+
+class MemoryInputError(MemoryStoreError):
+    """A request that fails validation; nothing was written."""
+
+
+def _issue_ids(text: str) -> List[str]:
+    import rag_engine
+
+    return [i for i in rag_engine._extract_issue_ids(text).split(",") if i]
+
+
+def _parse_time(name: str, value: Any) -> Optional[datetime]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise MemoryInputError("invalid_field", f"{name} must be an ISO-8601 timestamp",
+                                   field=name) from exc
+    if parsed.tzinfo is None:
+        raise MemoryInputError("invalid_field", f"{name} needs a UTC offset", field=name)
+    return parsed
+
+
+class MemoryService:
+    """Validates memory requests, writes them to the store, then updates the indexes.
+
+    The store commit is the success boundary. An index failure after it
+    returns success with ``index: "pending"``, and the sync loop repairs it.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: MemoryStore,
+        index: Any,
+        embed_query: Callable[[str], Awaitable[List[float]]],
+        allowlist: Optional[List[Pattern[str]]] = None,
+        similar_threshold: float = 0.9,
+        audit_age_days: int = 30,
+        project_inventory: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Wire the store, the index channels and the query embedder.
+
+        ``allowlist`` holds the redaction allowlist patterns; a match is never
+        treated as a secret.
+        """
+        self.store = store
+        self.index = index
+        self.embed_query = embed_query
+        self.allowlist = list(allowlist or [])
+        self.similar_threshold = similar_threshold
+        self.audit_age_days = audit_age_days
+        self.project_inventory = set(project_inventory or ())
+
+    # --- Validation ---------------------------------------------------------
+
+    def _check_text(self, text: Any) -> str:
+        if not isinstance(text, str) or text == "":
+            raise MemoryInputError("missing_field", "text is required", field="text")
+        size = len(text.encode("utf-8"))
+        if size > MAX_MEMORY_BYTES:
+            raise MemoryInputError(
+                "too_large",
+                f"text is {size} bytes; the limit is {MAX_MEMORY_BYTES} bytes (UTF-8)",
+                limit=MAX_MEMORY_BYTES, received=size,
+            )
+        _, spans = secret_redaction.scan_spans(text, mode="report", allowlist=self.allowlist)
+        if spans:
+            rules = sorted({s.rule_name for s in spans})
+            raise MemoryInputError(
+                "secret_detected",
+                f"text matches the secret pattern {', '.join(rules)}; nothing was stored",
+                rules=rules,
+            )
+        return text
+
+    @staticmethod
+    def _check_agent(agent_id: Any) -> str:
+        if agent_id in (None, ""):
+            raise MemoryInputError("missing_field", "agent_id is required", field="agent_id")
+        if agent_id not in LEGAL_MEMORY_AGENTS:
+            raise MemoryInputError(
+                "invalid_agent",
+                f"agent_id {agent_id!r} is not allowed; use one of "
+                f"{', '.join(sorted(LEGAL_MEMORY_AGENTS))}",
+                allowed=sorted(LEGAL_MEMORY_AGENTS),
+            )
+        return agent_id
+
+    @staticmethod
+    def _check_type(type_: Any) -> str:
+        if type_ in (None, ""):
+            raise MemoryInputError("missing_field", "type is required", field="type")
+        if type_ not in LEGAL_MEMORY_TYPES:
+            raise MemoryInputError(
+                "invalid_type",
+                f"type {type_!r} is not allowed; use one of {', '.join(sorted(LEGAL_MEMORY_TYPES))}",
+                allowed=sorted(LEGAL_MEMORY_TYPES),
+            )
+        return type_
+
+    @staticmethod
+    def _write_project(project: Any) -> str:
+        if not isinstance(project, str) or not project.strip():
+            raise MemoryInputError("missing_field", "project is required", field="project")
+        if project.strip() == "*":
+            raise MemoryInputError("invalid_project", "A write needs one project, not \"*\"")
+        return project.strip()
+
+    @staticmethod
+    def _scope_project(project: Any) -> str:
+        if not isinstance(project, str) or not project.strip():
+            raise MemoryInputError(
+                "project_required", "project is required; pass \"*\" to span every project"
+            )
+        return project.strip()
+
+    @staticmethod
+    def _check_extra(extra: Any) -> Dict[str, Any]:
+        if extra is None:
+            return {}
+        if not isinstance(extra, dict):
+            raise MemoryInputError("invalid_field", "extra must be an object", field="extra")
+        return extra
+
+    # --- Writes -------------------------------------------------------------
+
+    async def add(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate and add one memory, then index it and list similar records."""
+        text = self._check_text(args.get("text"))
+        agent_id = self._check_agent(args.get("agent_id"))
+        project = self._write_project(args.get("project"))
+        type_ = self._check_type(args.get("type"))
+        rec = NewMemory(
+            text=text,
+            agent_id=agent_id,
+            project=project,
+            type=type_,
+            content_hash=content_hash(text),
+            user_id=args.get("user_id") or DEFAULT_USER_ID,
+            topic_key=args.get("topic_key") or None,
+            extra=self._check_extra(args.get("extra")),
+            issue_ids=_issue_ids(text),
+            supersedes=list(args.get("supersedes") or []),
+            **{k: args.get(k) or None for k in _PROVENANCE_TEXT},
+            **{k: _parse_time(k, args.get(k)) for k in _PROVENANCE_TIME},
+        )
+        result = await run_db(self.store.add, rec)
+        out = self._write_payload(result)
+        out["index"] = await self._apply(result.memory_id)
+        out["similar"], out["similar_state"] = await self._similar(text, project, rec.user_id,
+                                                                   result.memory_id)
+        return out
+
+    async def update(self, memory_id: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Change the given fields of one memory; ``args["project"]`` scopes the call."""
+        project = args.get("project")
+        changes: Dict[str, Any] = {}
+        unknown = set(args) - _UPDATE_FIELDS - {"project", "format"}
+        if unknown:
+            raise MemoryInputError("invalid_field", f"Cannot update {', '.join(sorted(unknown))}",
+                                   fields=sorted(unknown))
+        if "text" in args:
+            changes["text"] = self._check_text(args["text"])
+            changes["content_hash"] = content_hash(changes["text"])
+            changes["issue_ids"] = _issue_ids(changes["text"])
+        if "agent_id" in args:
+            changes["agent_id"] = self._check_agent(args["agent_id"])
+        if "type" in args:
+            changes["type"] = self._check_type(args["type"])
+        if "topic_key" in args:
+            changes["topic_key"] = args["topic_key"] or None
+        if "extra" in args:
+            changes["extra"] = self._check_extra(args["extra"])
+        for key in _PROVENANCE_TEXT:
+            if key in args:
+                changes[key] = args[key] or None
+        for key in _PROVENANCE_TIME:
+            if key in args:
+                changes[key] = _parse_time(key, args[key])
+        if not changes:
+            raise MemoryInputError("missing_field", "Pass at least one field to change")
+        result = await run_db(self.store.update, memory_id, changes, expect_project=project)
+        out = self._write_payload(result)
+        out["index"] = await self._apply(result.memory_id)
+        return out
+
+    async def delete(self, memory_id: str, project: Optional[str] = None) -> Dict[str, Any]:
+        """Delete one memory as a tombstone, then remove it from the indexes."""
+        result = await run_db(self.store.delete, memory_id, expect_project=project)
+        out = self._write_payload(result)
+        out["index"] = await self._apply(result.memory_id)
+        return out
+
+    @staticmethod
+    def _write_payload(result: memory_store.WriteResult) -> Dict[str, Any]:
+        return {
+            "memory_id": result.memory_id,
+            "outcome": result.outcome,
+            "version": result.version,
+            "created_at": result.created_at,
+            "updated_at": result.updated_at,
+        }
+
+    async def _apply(self, memory_id: str) -> str:
+        try:
+            return await self.index.apply(memory_id)
+        except Exception:  # noqa: BLE001 - the sync loop retries every pending record
+            return "pending"
+
+    async def _similar(self, text: str, project: str, user_id: str,
+                       memory_id: str) -> tuple[List[Dict[str, Any]], str]:
+        try:
+            found, state = await self.index.similar(
+                text, project=project, user_id=user_id, threshold=self.similar_threshold
+            )
+        except Exception:  # noqa: BLE001 - similarity is advisory; report it as pending
+            return [], "pending"
+        return [s for s in found if s.get("memory_id") != memory_id], state
+
+    # --- Reads --------------------------------------------------------------
+
+    async def get(self, memory_id: str, project: Optional[str] = None) -> Dict[str, Any]:
+        """Return one live memory; an unknown or deleted ID raises ``not_found``."""
+        row = await run_db(self.store.get, memory_id, expect_project=project)
+        if row is None:
+            raise MemoryNotFound(memory_id)
+        return row
+
+    async def list(self, filters: Dict[str, Any], limit: int = 20,
+                   cursor: Optional[str] = None) -> Dict[str, Any]:
+        """Return one page of memories newest first and the cursor for the next page."""
+        parsed = self._filters(filters)
+        rows, next_cursor = await run_db(self.store.list, parsed, limit, cursor)
+        return {"results": rows, "next_cursor": next_cursor}
+
+    def _filters(self, filters: Dict[str, Any]) -> MemoryFilters:
+        project = self._scope_project(filters.get("project"))
+        status = filters.get("status", "active")
+        if status == "any":
+            status = None
+        days = {}
+        for key in ("created_from", "created_to"):
+            value = filters.get(key)
+            if value:
+                try:
+                    days[key] = datetime.fromisoformat(str(value)).date()
+                except ValueError as exc:
+                    raise MemoryInputError("invalid_field", f"{key} must be YYYY-MM-DD",
+                                           field=key) from exc
+        return MemoryFilters(
+            project=project,
+            user_id=filters.get("user_id") or DEFAULT_USER_ID,
+            agent_id=filters.get("agent_id") or None,
+            type=filters.get("type") or None,
+            status=status,
+            issue_id=filters.get("issue_id") or None,
+            source=filters.get("source") or None,
+            category=filters.get("category") or None,
+            source_session_id=filters.get("source_session_id") or None,
+            **days,
+        )
