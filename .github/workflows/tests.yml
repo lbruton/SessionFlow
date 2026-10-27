@@ -22,6 +22,11 @@ concurrency:
 env:
   PYTHON_VERSION: "3.13"
 
+# An explicit bash shell runs every step with -eo pipefail, so `pytest | tee` keeps pytest's exit code.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   ruff:
     name: Ruff
