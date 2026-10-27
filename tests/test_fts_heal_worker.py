@@ -373,6 +373,27 @@ def test_memory_sync_pauses_while_store_workers_are_still_busy(monkeypatch):
     assert "paused" in state.last_error
 
 
+def test_memory_sync_rechecks_store_workers_before_the_tick(monkeypatch):
+    memory_store = importlib.import_module("memory_store")
+    busy = [memory_store.DB_WORKERS - 2]
+
+    class _LeavesAWorkerBusy(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            busy[0] += 1  # a timed-out store call that keeps its thread
+            raise RuntimeError("reconcile timed out")
+
+    index = _LeavesAWorkerBusy()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0)
+    monkeypatch.setattr(memory_store, "db_calls_in_flight", lambda: busy[0])
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+    assert index.calls == ["reconcile"]
+    assert "reconcile timed out" in state.last_error
+    assert "paused" in state.last_error
+
+
 def test_memory_sync_runs_while_one_store_call_is_in_flight(monkeypatch):
     memory_store = importlib.import_module("memory_store")
     index = _FakeMemoryIndex()

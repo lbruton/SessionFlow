@@ -598,23 +598,31 @@ def _scrub(exc: BaseException) -> str:
     return redacted
 
 
+def _store_workers_saturated() -> str | None:
+    """Return a pause message while all but one memory-db worker are busy, else None."""
+    busy = memory_store.db_calls_in_flight()
+    if busy < memory_store.DB_WORKERS - 1:
+        return None
+    return (f"memory sync paused: {busy} of {memory_store.DB_WORKERS} store workers "
+            "are busy, likely with calls left running by a timeout")
+
+
 async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> None:
     """Run one memory sync tick: the reconcile when due, then the pending-acknowledgement pass.
 
     The tick runs even when the reconcile fails. A failed reconcile stays due
     and runs again once ``MEMORY_RECONCILE_RETRY_INTERVAL`` has passed. Each
-    step is bounded by ``state.tick_timeout``. The pass is skipped while all
+    step is bounded by ``state.tick_timeout``. Worker capacity is checked
+    before the pass and again before the tick, and the work stops while all
     but one memory-db worker are busy, so calls left running by a timeout
     cannot take the last worker from search. A failure, timeout or pause is
     recorded on ``state`` and never ends the loop.
     """
-    busy = memory_store.db_calls_in_flight()
-    if busy >= memory_store.DB_WORKERS - 1:
-        message = (f"memory sync paused: {busy} of {memory_store.DB_WORKERS} store workers "
-                   "are busy, likely with calls left running by a timeout")
-        if state.last_error != message:
-            logger.warning("%s", message)
-        state.last_error = message
+    paused = _store_workers_saturated()
+    if paused:
+        if state.last_error != paused:
+            logger.warning("%s", paused)
+        state.last_error = paused
         return
     now = state.clock()
     errors: list[str] = []
@@ -644,6 +652,12 @@ async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> 
             state.last_reconcile_attempt = state.clock()
             if reconciled:
                 state.last_reconcile = state.last_reconcile_attempt
+        paused = _store_workers_saturated()
+        if paused:
+            logger.warning("%s", paused)
+            errors.append(paused)
+            state.last_error = "; ".join(errors)
+            return
     try:
         await _run_bounded(state.index.tick(), state.tick_timeout, "tick")
     except asyncio.CancelledError:
