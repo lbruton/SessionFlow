@@ -1,0 +1,131 @@
+name: Tests
+
+# Runs the ruff docstring gate (ruff.toml) and the pytest suite. The memory-store tests run against
+# a Postgres 17 service. Tests that need the local EmbeddingGemma model skip on Linux, and `-rs`
+# lists every skip with its reason. `Tests` is the single check to require.
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.13"
+
+# An explicit bash shell runs every step with -eo pipefail, so `pytest | tee` keeps pytest's exit code.
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ruff:
+    name: Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install ruff
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff
+        run: ruff check --output-format=github .
+
+  pytest:
+    name: Pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: sessionflow
+          POSTGRES_DB: sessionflow_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sessionflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SESSIONFLOW_TEST_PG_DSN: postgresql://sessionflow@localhost:5432/sessionflow_test
+      SESSIONFLOW_TEST_PG_RESTORE_DSN: postgresql://sessionflow@localhost:5432/sessionflow_restore
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      # The restore test calls pg_dump and pg_restore, which must match the server's major version.
+      # The update reads only the PGDG list: the full apt update can stall on the Ubuntu mirror.
+      - name: Install the Postgres 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -o Dir::Etc::sourcelist=sources.list.d/pgdg.list \
+            -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+
+      - name: Create the restore database
+        run: |
+          pg_dump --version
+          createdb -h localhost -U sessionflow sessionflow_restore
+
+      # mlx has no backend on Linux without the cpu extra. The padding-mask test runs on it; the
+      # model tests skip because no EmbeddingGemma weights are cached on the runner.
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt "mlx[cpu]"
+
+      - name: Pytest
+        run: python -m pytest -rs -q 2>&1 | tee pytest.log
+
+      - name: Summarize skips
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### Pytest'
+            echo
+            echo '```text'
+            grep -E '^SKIPPED|^[0-9]+ (passed|failed)|^=+ .* in [0-9.]+s' pytest.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  report:
+    name: Tests
+    if: ${{ !cancelled() }}
+    needs: [ruff, pytest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Fail when a job failed
+        if: ${{ needs.ruff.result != 'success' || needs.pytest.result != 'success' }}
+        run: |
+          echo "Ruff: ${{ needs.ruff.result }}; pytest: ${{ needs.pytest.result }}."
+          exit 1

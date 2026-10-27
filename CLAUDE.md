@@ -61,12 +61,19 @@ Docstring policy (enforced by `ruff`; config in `ruff.toml`, `D1` rules, Google 
 - Module docstring on every file.
 - Public functions, classes, and methods: Google-style — args, returns, non-obvious behavior.
 - Private symbols (leading `_`): only when the name isn't self-explanatory.
+- Tests (`tests/**`) and the one-off scripts listed in `ruff.toml` are exempt.
+- `ruff check .` in the `Tests` workflow is the gate. CodeRabbit's pre-merge Docstring Coverage check is off in `.coderabbit.yaml`: it counts tests and private helpers, which this policy exempts. Do not chase a coverage percentage.
+
+CI (`.github/workflows/`):
+
+- `tests.yml` runs `ruff check .` and `pytest -rs` on Ubuntu with a Postgres 17 service (`SESSIONFLOW_TEST_PG_DSN`, `SESSIONFLOW_TEST_PG_RESTORE_DSN`, `pg_dump`/`pg_restore` 17). MLX installs with the `cpu` extra; tests that need the cached EmbeddingGemma model skip, and the job summary lists every skip.
+- `vale.yml` runs the Prose style (`.vale.ini`, deployed by `skills-deploy` as `vale:Prose`) on `README.md` and `.context/`. Warnings on lines a PR adds fail the check; existing alerts do not.
 
 Pre-PR:
 
 - `pip install -r requirements-dev.txt`.
-- Run `ruff check` on the `.py` files you changed.
-- A bare `ruff check .` reports the SESF-31 backlog (~92 existing gaps) until that issue clears; afterward it is the standing guard.
+- Run `ruff check .` and `python -m pytest -rs`. Set the two DSNs to a local Postgres 17 to run the memory-store tests.
+- Run `vale` on the docs you changed.
 
 ## Issue Tracking
 

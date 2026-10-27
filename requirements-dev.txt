@@ -1,3 +1,4 @@
-# Development-only dependencies (linting, etc.). Runtime deps live in requirements.txt.
-# Pinned for a reproducible docstring baseline (SESF-31) — bump deliberately.
+# Development-only dependencies (linting, tests). Runtime deps live in requirements.txt.
+# Pinned for a reproducible docstring baseline and CI run; bump deliberately.
 ruff==0.15.15
+pytest==9.0.3

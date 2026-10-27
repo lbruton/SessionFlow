@@ -82,6 +82,12 @@ reviews:
     docstrings:
       enabled: false
 
+  # The docstring gate is ruff D1 in the Tests workflow (public API only, tests exempt; ruff.toml).
+  # CodeRabbit's coverage check counts tests and private helpers, so it is off.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+
   # Static analysis tools
   tools:
     markdownlint:
