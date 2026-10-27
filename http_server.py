@@ -13,7 +13,7 @@ Health: curl http://127.0.0.1:7102/health
 import asyncio
 import concurrent.futures
 import contextlib
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import json
 import logging
 import os
@@ -478,6 +478,64 @@ async def _fts_heal_worker() -> None:
             await asyncio.wait_for(event.wait(), timeout=state.next_delay())
         except asyncio.TimeoutError:
             pass
+
+
+# --- Memory index sync loop ---
+
+# Seconds between memory sync ticks; each tick applies every pending acknowledgement.
+MEMORY_SYNC_INTERVAL = float(os.getenv("SESSIONFLOW_MEMORY_SYNC_INTERVAL", "5"))
+# The full index-versus-Postgres reconcile runs on the first tick and then at
+# most this often.
+MEMORY_RECONCILE_INTERVAL = 6 * 3600
+
+
+@dataclass
+class MemorySyncState:
+    """State of the memory sync loop, reported in ``/health``.
+
+    Attributes:
+        index: The ``MemoryIndex`` (or any object with async ``tick`` and ``reconcile``).
+        clock: Monotonic clock, injectable for tests.
+        last_reconcile: Clock value of the last full reconcile, or None.
+        last_error: Text of the last tick or reconcile failure, or None.
+    """
+
+    index: object
+    clock: object = field(default=time.monotonic)
+    last_reconcile: float | None = None
+    last_error: str | None = None
+
+
+async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> None:
+    """Run one memory sync tick: the reconcile when due, then the pending-acknowledgement pass.
+
+    A failure is recorded on ``state`` and never ends the loop.
+    """
+    now = state.clock()
+    try:
+        if first_tick or state.last_reconcile is None or (
+            now - state.last_reconcile >= MEMORY_RECONCILE_INTERVAL
+        ):
+            reset = await state.index.reconcile()
+            state.last_reconcile = now
+            if reset:
+                logger.info("Memory reconcile reset %d acknowledgements", reset)
+        await state.index.tick()
+        state.last_error = None
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        state.last_error = rag_engine._scrub_exception(exc)
+        logger.warning("Memory sync tick failed: %s", state.last_error)
+
+
+async def _memory_sync_worker(state: MemorySyncState) -> None:
+    """Run the memory sync loop for the life of the server."""
+    first_tick = True
+    while True:
+        await _memory_sync_run_once(state, first_tick=first_tick)
+        first_tick = False
+        await asyncio.sleep(MEMORY_SYNC_INTERVAL)
 
 
 async def _process_startup_provider_backfill_locked(

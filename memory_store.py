@@ -20,10 +20,11 @@ import shutil
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -853,6 +854,48 @@ class MemoryStore:
             params.append(int(limit))
         with self._pool.connection() as conn:
             rows = conn.execute(sql, params).fetchall()
+        return [_row(r) for r in rows]
+
+    def canonical(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """Return the current row, tombstone included, with the current ``generation``."""
+        mid = _uuid_or_none(memory_id)
+        if mid is None:
+            return None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_COLUMN_SQL}, meta.generation FROM memories "
+                "CROSS JOIN memory_index_meta meta WHERE memory_id = %s",
+                (mid,),
+            ).fetchone()
+        return _row(row)
+
+    @contextmanager
+    def locked_canonical(self, memory_id: str) -> Iterator[Optional[Dict[str, Any]]]:
+        """Yield the current row under a transaction-scoped advisory lock on its ID.
+
+        Index workers on every machine take this lock, so two workers never
+        interleave a read and a Milvus write for the same record.
+        """
+        mid = uuid.UUID(str(memory_id))
+        with self._pool.connection() as conn:
+            with conn.transaction():
+                conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                             (str(mid),))
+                row = conn.execute(
+                    f"SELECT {_COLUMN_SQL}, meta.generation FROM memories "
+                    "CROSS JOIN memory_index_meta meta WHERE memory_id = %s",
+                    (mid,),
+                ).fetchone()
+                yield _row(row)
+
+    def index_state(self) -> List[Dict[str, Any]]:
+        """Return every record's ID, version, hash and tombstone flag in ``change_seq`` order."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT memory_id, version, content_hash, (deleted_at IS NOT NULL) AS deleted, "
+                "meta.generation FROM memories CROSS JOIN memory_index_meta meta "
+                "ORDER BY change_seq"
+            ).fetchall()
         return [_row(r) for r in rows]
 
     def ack_lag(self) -> Dict[str, int]:
