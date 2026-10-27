@@ -1718,19 +1718,27 @@ def _semantic_scores(results: List[Dict]) -> List[float]:
 
 
 def _rank_results(results: List[Dict], sort_by: str, n: int,
-                  now: Optional[datetime] = None) -> List[Dict]:
+                  now: Optional[datetime] = None, *,
+                  timestamp_key: str = "timestamp",
+                  tie_break: Optional[str] = None) -> List[Dict]:
     """Order the merged candidate pool by the chosen strategy, then truncate.
 
     - ``relevance``: keep the post-RRF order (no recency re-rank).
-    - ``recency``: re-rank by timestamp descending; missing-timestamp rows last.
+    - ``recency``: re-rank by ``timestamp_key`` descending; missing-timestamp rows last.
     - ``hybrid``: final = (1-w)*semantic_score + w*recency_score.
 
-    Strips ranking scratch keys (`_rrf_score`, `_score`, `_semantic_score`,
-    `_recency_score`) before returning — but preserves non-score engine metadata
-    such as `_fts_warning`.
+    ``tie_break`` names a key that orders exact ties descending; without it,
+    ties keep their incoming order. Strips ranking scratch keys (`_rrf_score`,
+    `_score`, `_semantic_score`, `_recency_score`) before returning but keeps
+    non-score engine metadata such as `_fts_warning`.
     """
     if now is None:
         now = datetime.now(timezone.utc)
+
+    def _with_tie(primary):
+        if tie_break is None:
+            return primary
+        return lambda r: (primary(r), str(r.get(tie_break, "")))
 
     if sort_by == "relevance":
         ranked = list(results)
@@ -1738,7 +1746,7 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
         _epoch = datetime.min.replace(tzinfo=timezone.utc)
         ranked = sorted(
             results,
-            key=lambda r: _parse_timestamp_utc(r.get("timestamp", "")) or _epoch,
+            key=_with_tie(lambda r: _parse_timestamp_utc(r.get(timestamp_key, "")) or _epoch),
             reverse=True,
         )
     else:  # hybrid
@@ -1750,11 +1758,13 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
         )
         semantic = _semantic_scores(results)
         for r, sem in zip(results, semantic, strict=True):
-            rec = _recency_score(r.get("timestamp", ""), now, decay_days)
+            rec = _recency_score(r.get(timestamp_key, ""), now, decay_days)
             r["_semantic_score"] = sem
             r["_recency_score"] = rec
             r["_score"] = (1 - weight) * sem + weight * rec
-        ranked = sorted(results, key=lambda r: r.get("_score", 0.0), reverse=True)
+        ranked = sorted(
+            results, key=_with_tie(lambda r: r.get("_score", 0.0)), reverse=True
+        )
 
     for r in ranked:
         for key in _RANKING_SCRATCH_KEYS:
