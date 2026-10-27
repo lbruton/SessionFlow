@@ -9,7 +9,7 @@ other names where a transcript came from.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Pattern
 
 import memory_store
@@ -72,6 +72,27 @@ def _issue_ids(text: str) -> List[str]:
     import rag_engine
 
     return [i for i in rag_engine._extract_issue_ids(text).split(",") if i]
+
+
+def _matches(row: Dict[str, Any], f: MemoryFilters) -> bool:
+    """Return whether a canonical row passes every listing filter."""
+    extra = row.get("extra") or {}
+    checks = (
+        row["user_id"] == f.user_id,
+        f.project == "*" or row["project"] == f.project,
+        f.status is None or row["status"] == f.status,
+        f.type is None or row["type"] == f.type,
+        f.agent_id is None or row["agent_id"] == f.agent_id,
+        f.issue_id is None or f.issue_id.strip().upper() in row["issue_ids"],
+        f.source is None or extra.get("source") == f.source,
+        f.category is None or extra.get("category") == f.category,
+        f.source_session_id is None or row["source_session_id"] == f.source_session_id,
+        f.created_from is None
+        or row["created_at"] >= memory_store.chicago_day_start(f.created_from),
+        f.created_to is None
+        or row["created_at"] < memory_store.chicago_day_start(f.created_to + timedelta(days=1)),
+    )
+    return all(checks)
 
 
 def _parse_time(name: str, value: Any) -> Optional[datetime]:
@@ -302,6 +323,76 @@ class MemoryService:
         parsed = self._filters(filters)
         rows, next_cursor = await run_db(self.store.list, parsed, limit, cursor)
         return {"results": rows, "next_cursor": next_cursor}
+
+    # --- Search -------------------------------------------------------------
+
+    async def search(self, query: str, filters: Dict[str, Any], n: int = 10,
+                     sort_by: str = "hybrid") -> Dict[str, Any]:
+        """Hybrid memory search validated against Postgres.
+
+        Both channels overfetch ``3*n``. Every hit is checked against the
+        canonical row (version, and generation for vectors) and the filters,
+        so a stale index entry never hides a current one. A short result is
+        refilled once with a larger fetch; ``incomplete`` is True when it is
+        still short while the indexes lag.
+        """
+        parsed = self._filters(filters)
+        n = max(1, int(n))
+        fetch = 3 * n
+        results, channels = await self._search_once(query, parsed, n, fetch, sort_by)
+        if len(results) < n:
+            results, channels = await self._search_once(query, parsed, n, fetch * 3, sort_by)
+        incomplete = len(results) < n and bool(self.index.lagging())
+        return {"results": results, "channels": channels, "incomplete": incomplete}
+
+    @staticmethod
+    def _channel_filters(f: MemoryFilters) -> Dict[str, Any]:
+        return {"project": f.project, "user_id": f.user_id, "status": f.status, "type": f.type,
+                "agent_id": f.agent_id, "issue_id": f.issue_id, "source": f.source,
+                "category": f.category}
+
+    async def _search_once(self, query: str, f: MemoryFilters, n: int, fetch: int,
+                           sort_by: str) -> tuple[List[Dict[str, Any]], List[str]]:
+        import rag_engine
+        from fts_hybrid import rrf_merge
+
+        channel_filters = self._channel_filters(f)
+        channels: List[str] = []
+        vector_hits: List[Dict[str, Any]] = []
+        fts_hits: List[Dict[str, Any]] = []
+        try:
+            vector = await self.embed_query(query)
+            vector_hits = await self.index.vector_search(vector, filters=channel_filters,
+                                                         limit=fetch)
+            channels.append("vector")
+        except Exception:  # noqa: BLE001 - Milvus down: keyword search alone still answers
+            vector_hits = []
+        try:
+            fts_hits = await self.index.fts_search(query, filters=channel_filters, limit=fetch)
+            channels.append("fts")
+        except Exception:  # noqa: BLE001 - a broken FTS file is rebuilt; vectors still answer
+            fts_hits = []
+
+        ids = {h["memory_id"] for h in vector_hits} | {h["memory_id"] for h in fts_hits}
+        rows = await run_db(self.store.get_many, sorted(ids)) if ids else {}
+        generation = (await run_db(self.store.index_meta))["generation"] if vector_hits else None
+
+        def keep(hit: Dict[str, Any], check_generation: bool) -> bool:
+            row = rows.get(hit["memory_id"])
+            if row is None or hit.get("version") != row["version"]:
+                return False
+            if check_generation and hit.get("generation") != generation:
+                return False
+            return _matches(row, f)
+
+        valid_vector = [{"doc_id": h["memory_id"]} for h in vector_hits if keep(h, True)]
+        valid_fts = [{"doc_id": h["memory_id"]} for h in fts_hits if keep(h, False)]
+        merged = rrf_merge(valid_vector, valid_fts, n=len(valid_vector) + len(valid_fts))
+        scored = [{"memory_id": m["doc_id"], "_rrf_score": m["_rrf_score"],
+                   "created_at": rows[m["doc_id"]]["created_at"].isoformat()} for m in merged]
+        ranked = rag_engine._rank_results(scored, sort_by, n, timestamp_key="created_at",
+                                          tie_break="memory_id")
+        return [rows[r["memory_id"]] for r in ranked], channels
 
     def _filters(self, filters: Dict[str, Any]) -> MemoryFilters:
         project = self._scope_project(filters.get("project"))

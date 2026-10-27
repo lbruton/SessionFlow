@@ -272,6 +272,7 @@ class MemoryIndex:
         self.fts: Optional[MemoryFTS] = None
         self.milvus_blocked: Optional[str] = None
         self.last_tick: Optional[datetime] = None
+        self._lagging = True
 
     @property
     def fts_consumer(self) -> str:
@@ -308,7 +309,10 @@ class MemoryIndex:
         """Bring both consumers up to date for one record; ``ok`` or ``pending``."""
         milvus_ok = await self._apply_milvus(memory_id)
         fts_ok = await self._apply_fts(memory_id)
-        return "ok" if milvus_ok and fts_ok else "pending"
+        if milvus_ok and fts_ok:
+            return "ok"
+        self._lagging = True
+        return "pending"
 
     async def _apply_milvus(self, memory_id: str) -> bool:
         if self.milvus_blocked:
@@ -388,16 +392,70 @@ class MemoryIndex:
                            rag_engine._scrub_exception(exc))
             return False
 
+    # --- Search channels ----------------------------------------------------
+
+    def _milvus_filter(self, filters: Dict[str, Any]) -> str:
+        parts = []
+        for key in ("project", "user_id", "status", "type", "agent_id", "source", "category"):
+            value = filters.get(key)
+            if value is None or (key == "project" and value == "*"):
+                continue
+            parts.append(f'{key} == "{rag_engine._escape_filter_scalar(str(value))}"')
+        if filters.get("issue_id"):
+            token = rag_engine._issue_id_containment_token(str(filters["issue_id"]))
+            parts.append(f'issue_ids like "%,{rag_engine._escape_filter_scalar(token)},%"')
+        return " and ".join(parts)
+
+    def _vector_search_sync(self, vector: List[float], filters: Dict[str, Any],
+                            limit: int) -> List[Dict[str, Any]]:
+        search_params: Dict[str, Any] = {"metric_type": self.spec.metric_type}
+        if rag_engine._is_remote_uri(self.milvus_uri):
+            search_params["params"] = {"ef": 128}
+        results = self.milvus.search(
+            collection_name=self.spec.name, data=[vector], limit=int(limit),
+            filter=self._milvus_filter(filters), search_params=search_params,
+            output_fields=["memory_id", "version", "generation"],
+        )
+        hits = []
+        for hit in (results[0] if results else []):
+            entity = hit["entity"]
+            hits.append({"memory_id": entity["memory_id"], "version": entity["version"],
+                         "generation": entity["generation"], "score": hit["distance"]})
+        return hits
+
+    async def vector_search(self, vector: List[float], *, filters: Dict[str, Any],
+                            limit: int) -> List[Dict[str, Any]]:
+        """Return Milvus hits (``memory_id``, ``version``, ``generation``, ``score``), best first."""
+        return await run_db(self._vector_search_sync, vector, filters, limit)
+
+    async def fts_search(self, query: str, *, filters: Dict[str, Any],
+                         limit: int) -> List[Dict[str, Any]]:
+        """Return keyword hits (``memory_id``, ``version``) from this machine's FTS file."""
+        rest = {k: v for k, v in filters.items() if k != "project"}
+        return await run_db(self.fts.search, query, project=filters.get("project", "*"),
+                            limit=limit, filters=rest)
+
+    def lagging(self) -> bool:
+        """Return whether the last tick left records pending on this machine."""
+        return self._lagging
+
     # --- Loop, reconcile and rebuild -----------------------------------------
 
     async def tick(self) -> Dict[str, int]:
         """Apply every record whose acknowledgement differs, up to ``TICK_BATCH`` per consumer."""
         done = {MILVUS_CONSUMER: 0, self.fts_consumer: 0}
+        seen = 0
         if not self.milvus_blocked:
-            for row in await run_db(self.store.pending, MILVUS_CONSUMER, TICK_BATCH):
+            batch = await run_db(self.store.pending, MILVUS_CONSUMER, TICK_BATCH)
+            seen += len(batch)
+            for row in batch:
                 done[MILVUS_CONSUMER] += int(await self._apply_milvus(row["memory_id"]))
-        for row in await run_db(self.store.pending, self.fts_consumer, TICK_BATCH):
+        batch = await run_db(self.store.pending, self.fts_consumer, TICK_BATCH)
+        seen += len(batch)
+        for row in batch:
             done[self.fts_consumer] += int(await self._apply_fts(row["memory_id"]))
+        # Lagging until a tick finds nothing left to apply.
+        self._lagging = seen > 0
         self.last_tick = datetime.now(timezone.utc)
         return done
 
