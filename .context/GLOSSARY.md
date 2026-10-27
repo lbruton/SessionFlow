@@ -93,12 +93,44 @@ The catch-up scope selector: `recent` | `incremental` | `full`.
 Backfill progress saved to `index_state.json` every 100 files; restart resumes from it.
 _Avoid_: save state
 
+## Memory
+
+**Memory**:
+A curated note an agent stores on purpose: a session summary, decision, handoff, fact or another of the 12 memory types. It is stored verbatim, with fixed metadata and no LLM step.
+_Avoid_: turn, note, observation
+
+**Canonical Store**:
+The Postgres database that holds every memory, its versions and its index acknowledgements. A write succeeds when it commits there.
+_Avoid_: memory database, the DB
+
+**Memory Index**:
+A derived copy of the canonical store for search: the Milvus `memories` collection and the local `memories_fts.db` file. It is rebuilt from the canonical store, never written directly.
+_Avoid_: memory store
+
+**Change Sequence**:
+The `change_seq` number each memory write takes. It orders repair and rebuild work; it does not follow commit order, so it never decides delivery.
+_Avoid_: cursor, offset
+
+**Index Acknowledgement**:
+A row in `memory_index_acks` recording the version and embedding generation one index consumer (`milvus` or `fts:<host>`) holds for one memory. A memory is pending for a consumer until its acknowledgement matches.
+_Avoid_: index state, sync flag
+
+**Embedding Generation**:
+The number in `memory_index_meta` that names the model and dimension of the memory vectors. A re-embed starts a new generation, which makes every older Milvus acknowledgement pending.
+_Avoid_: model version
+
+**Supersede**:
+Mark older memories in the same project as replaced by a new one. A superseded memory keeps its history and is left out of default reads.
+_Avoid_: delete, archive, overwrite
+
 ## Relationships
 
 - A **Provider** has exactly one **Source Kind** per transcript format and exactly one **Provider Adapter**.
 - A **Transcript** is parsed into many **Turns**; each Turn carries a **Source ID** and **Logical Session ID**.
 - **Hybrid Search** merges vector results from **Milvus Standalone** and keyword results from the **FTS Sidecar** via **RRF**, then applies **Recency Boost**.
 - A **Backfill Job** runs under the shared **Embedding Budget** in a given **Backfill Mode**, recording progress to a **Checkpoint**.
+- A **Memory** commits to the **Canonical Store** first; each **Memory Index** follows through its **Index Acknowledgement**, in **Change Sequence** order, at the current **Embedding Generation**.
+- A **Memory** is never a **Turn**: turns come from transcripts, memories from agents that write them.
 
 ## Flagged Ambiguities
 
