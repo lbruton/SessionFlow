@@ -281,3 +281,141 @@ def test_memory_sync_cancellation_propagates_from_reconcile():
     state = http_server.MemorySyncState(index=_Cancelled(), clock=lambda: 0.0)
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+
+# ---------------------------------------------------------------------------
+# A tick or reconcile that never returns is bounded, reported in /health, and
+# leaves a log of where it was waiting. The loop goes on.
+# ---------------------------------------------------------------------------
+
+
+async def _waits_forever_inner():
+    await asyncio.Event().wait()
+
+
+class _StuckTick(_FakeMemoryIndex):
+    async def tick(self):
+        self.calls.append("tick")
+        await _waits_forever_inner()
+
+
+def test_memory_sync_tick_timeout_is_recorded_and_the_loop_goes_on():
+    index = _StuckTick()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, tick_timeout=0.05)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert "timed out" in state.last_error
+    assert "tick" in state.last_error
+
+
+def test_memory_sync_clears_the_timeout_error_after_a_good_tick():
+    index = _StuckTick()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, tick_timeout=0.05)
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+    state.index = _FakeMemoryIndex()
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert state.last_error is None
+
+
+def test_memory_sync_timeout_logs_where_the_tick_was_waiting(caplog):
+    import logging
+
+    state = http_server.MemorySyncState(index=_StuckTick(), clock=lambda: 0.0, tick_timeout=0.05)
+
+    with caplog.at_level(logging.WARNING, logger="sessionflow"):
+        asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    text = caplog.text
+    assert "_waits_forever_inner" in text, text
+    assert "Event.wait" in text or "wait" in text
+
+
+def test_memory_sync_reconcile_timeout_still_ticks_and_stays_due():
+    class _StuckReconcile(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            await _waits_forever_inner()
+
+    index = _StuckReconcile()
+    state = http_server.MemorySyncState(index=index, clock=lambda: 0.0, tick_timeout=0.05)
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+    assert index.calls == ["reconcile", "tick"]
+    assert state.last_reconcile is None
+    assert "reconcile timed out" in state.last_error
+
+
+def test_format_async_tasks_follows_the_await_chain():
+    async def middle():
+        await _waits_forever_inner()
+
+    async def run():
+        task = asyncio.create_task(middle(), name="probe-task")
+        await asyncio.sleep(0)
+        text = http_server.format_async_tasks()
+        task.cancel()
+        return text
+
+    text = asyncio.run(run())
+    assert "probe-task" in text
+    assert "middle" in text and "_waits_forever_inner" in text
+
+
+def test_sigusr1_logs_the_async_tasks(caplog):
+    import logging
+    import signal
+
+    async def run():
+        assert http_server.install_task_dump_handler()
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+            await asyncio.sleep(0.05)
+        finally:
+            asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR1)
+
+    with caplog.at_level(logging.WARNING, logger="sessionflow"):
+        asyncio.run(run())
+    assert "SIGUSR1" in caplog.text
+
+
+class _HealthIndex:
+    def __init__(self, last_tick):
+        self.last_tick = last_tick
+
+    def health(self):
+        return {"host": "minitron", "consumers": ["milvus", "fts:minitron"],
+                "milvus_blocked": None,
+                "last_tick": self.last_tick.isoformat() if self.last_tick else None}
+
+
+@pytest.mark.parametrize("age_s, stale", [(5.0, False), (10_000.0, True)])
+def test_memory_health_flags_a_stale_sync_loop(monkeypatch, age_s, stale):
+    from datetime import datetime, timedelta, timezone
+
+    index = _HealthIndex(datetime.now(timezone.utc) - timedelta(seconds=age_s))
+    state = http_server.MemorySyncState(index=index, tick_timeout=60.0)
+    monkeypatch.setitem(http_server._memory_runtime, "index", index)
+    monkeypatch.setitem(http_server._memory_runtime, "sync", state)
+    monkeypatch.setitem(http_server._memory_status, "ready", False)
+
+    payload = http_server._memory_health_payload()
+
+    assert payload["index"]["stale"] is stale
+    assert payload["index"]["last_tick_age_s"] == pytest.approx(age_s, abs=5.0)
+
+
+def test_memory_health_is_not_stale_before_the_first_tick(monkeypatch):
+    index = _HealthIndex(None)
+    monkeypatch.setitem(http_server._memory_runtime, "index", index)
+    monkeypatch.setitem(http_server._memory_runtime, "sync",
+                        http_server.MemorySyncState(index=index, tick_timeout=60.0))
+    monkeypatch.setitem(http_server._memory_status, "ready", False)
+
+    payload = http_server._memory_health_payload()
+
+    assert payload["index"]["stale"] is False
+    assert payload["index"]["last_tick_age_s"] is None

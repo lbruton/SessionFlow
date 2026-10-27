@@ -352,6 +352,48 @@ def test_running_index_stops_writing_after_the_stored_model_changes(store, milvu
     assert second.memory_id in milvus.rows()
 
 
+def test_fts_is_applied_even_while_the_milvus_embed_hangs(store, milvus, tmp_path):
+    async def hangs(texts):
+        await asyncio.Event().wait()
+
+    idx = _index(store, milvus, tmp_path, embed=hangs)
+    written = store.add(_rec("fts first"))
+
+    async def tick_until_timeout():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(idx.tick(), timeout=2.0)
+
+    asyncio.run(tick_until_timeout())
+
+    assert store.pending("fts:minitron") == []
+    assert [r["memory_id"] for r in store.pending("milvus")] == [written.memory_id]
+
+
+def test_milvus_apply_skips_a_record_another_server_already_indexed(store, milvus, tmp_path):
+    other = _index(store, milvus, tmp_path, host="blue")
+    written = store.add(_rec("indexed by blue"))
+    assert asyncio.run(other.apply(written.memory_id)) == "ok"
+
+    async def forbidden(texts):
+        raise AssertionError("an indexed record must not be embedded again")
+
+    idx = _index(store, milvus, tmp_path, embed=forbidden)
+
+    assert asyncio.run(idx._apply_milvus(written.memory_id)) is True
+
+
+def test_milvus_apply_still_writes_a_newer_version(store, milvus, tmp_path):
+    other = _index(store, milvus, tmp_path, host="blue")
+    written = store.add(_rec("v1 by blue"))
+    asyncio.run(other.apply(written.memory_id))
+    store.update(written.memory_id, {"text": "v2 here",
+                                     "content_hash": hashlib.sha256(b"v2 here").hexdigest()})
+    idx = _index(store, milvus, tmp_path)
+
+    assert asyncio.run(idx._apply_milvus(written.memory_id)) is True
+    assert milvus.rows()[written.memory_id]["version"] == 2
+
+
 def test_mismatched_local_model_runs_no_vector_search(store, milvus, tmp_path):
     _index(store, milvus, tmp_path, host="minitron", model_name="embeddinggemma")
     other = _index(store, milvus, tmp_path, host="blue", model_name="modernbert")

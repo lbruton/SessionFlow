@@ -761,6 +761,16 @@ class MemoryStore:
             ).fetchone()
         return row is not None
 
+    def is_acked(self, consumer: str, memory_id: str, *, version: int, generation: int) -> bool:
+        """Return True when ``consumer`` already holds ``version`` at ``generation`` or later."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM memory_index_acks WHERE consumer = %s AND memory_id = %s "
+                "AND (version, generation) >= (%s, %s)",
+                (consumer, uuid.UUID(str(memory_id)), version, generation),
+            ).fetchone()
+        return row is not None
+
     def reset_acks(self, memory_ids: Optional[Sequence[str]] = None,
                    consumer: Optional[str] = None) -> int:
         """Delete acknowledgements so the records become pending again; returns the count.

@@ -14,6 +14,7 @@ import asyncio
 import concurrent.futures
 import contextlib
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -490,6 +491,12 @@ MEMORY_SYNC_INTERVAL = float(os.getenv("SESSIONFLOW_MEMORY_SYNC_INTERVAL", "5"))
 # The full index-versus-Postgres reconcile runs on the first tick and then at
 # most this often.
 MEMORY_RECONCILE_INTERVAL = 6 * 3600
+# A tick or reconcile still running after this many seconds is cancelled and
+# reported. A full batch of 256 Milvus embeds fits well inside it.
+MEMORY_TICK_TIMEOUT = float(os.getenv("SESSIONFLOW_MEMORY_TICK_TIMEOUT", "600"))
+# /health calls the loop stale once its last tick is older than the tick
+# timeout plus this many sync intervals.
+MEMORY_STALE_INTERVALS = 3
 
 
 @dataclass
@@ -501,12 +508,83 @@ class MemorySyncState:
         clock: Monotonic clock, injectable for tests.
         last_reconcile: Clock value of the last full reconcile, or None.
         last_error: Text of the last tick or reconcile failure, or None.
+        tick_timeout: Seconds a tick or reconcile may run before it is cancelled.
     """
 
     index: object
     clock: object = field(default=time.monotonic)
     last_reconcile: float | None = None
     last_error: str | None = None
+    tick_timeout: float = MEMORY_TICK_TIMEOUT
+
+
+def _await_chain(task: asyncio.Task) -> list[str]:
+    """Return the coroutine frames a task is suspended in, outermost first, ending at its future."""
+    lines = []
+    obj = task.get_coro()
+    while obj is not None:
+        frame = (getattr(obj, "cr_frame", None) or getattr(obj, "gi_frame", None)
+                 or getattr(obj, "ag_frame", None))
+        if frame is None:
+            lines.append(f"    awaiting {type(obj).__name__}: {repr(obj)[:160]}")
+            break
+        code = frame.f_code
+        lines.append(f"    {code.co_qualname} ({os.path.basename(code.co_filename)}:{frame.f_lineno})")
+        obj = (getattr(obj, "cr_await", None) or getattr(obj, "gi_yieldfrom", None)
+               or getattr(obj, "ag_await", None))
+    return lines
+
+
+def format_async_tasks() -> str:
+    """Return every pending asyncio task on the running loop with the chain it is awaiting.
+
+    Thread profilers cannot see suspended coroutines; this can.
+    """
+    out = []
+    for task in sorted(asyncio.all_tasks(), key=lambda t: t.get_name()):
+        out.append(f"Task {task.get_name()}:")
+        out.extend(_await_chain(task))
+    return "\n".join(out)
+
+
+def log_async_tasks(reason: str) -> None:
+    """Log every pending asyncio task and what it awaits, at WARNING."""
+    logger.warning("Asyncio tasks (%s):\n%s", reason, format_async_tasks())
+
+
+def install_task_dump_handler() -> bool:
+    """Log the asyncio tasks on SIGUSR1 (`kill -USR1 <pid>`); returns False where unsupported."""
+    sig = getattr(signal, "SIGUSR1", None)
+    if sig is None:
+        return False
+    try:
+        asyncio.get_running_loop().add_signal_handler(sig, log_async_tasks, "SIGUSR1")
+    except (NotImplementedError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+async def _run_bounded(awaitable, timeout: float, what: str):
+    """Await ``awaitable`` for at most ``timeout`` seconds.
+
+    On timeout, log where every task is waiting before cancelling the work, then
+    raise TimeoutError. Cancelling the caller cancels the work too.
+    """
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _ = await asyncio.wait({task}, timeout=timeout)
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    if done:
+        return task.result()
+    message = f"memory sync {what} timed out after {timeout:g} s"
+    log_async_tasks(message)
+    task.cancel()
+    await asyncio.wait({task}, timeout=5)
+    if task.done() and not task.cancelled():
+        task.exception()
+    raise TimeoutError(message)
 
 
 def _scrub(exc: BaseException) -> str:
@@ -519,8 +597,8 @@ async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> 
     """Run one memory sync tick: the reconcile when due, then the pending-acknowledgement pass.
 
     The tick runs even when the reconcile fails, and a failed reconcile stays
-    due for the next pass. A failure is recorded on ``state`` and never ends
-    the loop.
+    due for the next pass. Each step is bounded by ``state.tick_timeout``. A
+    failure or timeout is recorded on ``state`` and never ends the loop.
     """
     now = state.clock()
     errors: list[str] = []
@@ -528,7 +606,7 @@ async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> 
         now - state.last_reconcile >= MEMORY_RECONCILE_INTERVAL
     ):
         try:
-            reset = await state.index.reconcile()
+            reset = await _run_bounded(state.index.reconcile(), state.tick_timeout, "reconcile")
             state.last_reconcile = now
             if reset:
                 logger.info("Memory reconcile reset %d acknowledgements", reset)
@@ -538,7 +616,7 @@ async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> 
             errors.append(_scrub(exc))
             logger.warning("Memory reconcile failed: %s", errors[-1])
     try:
-        await state.index.tick()
+        await _run_bounded(state.index.tick(), state.tick_timeout, "tick")
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -630,6 +708,16 @@ def jsonable(value):
     return value
 
 
+def _sync_staleness(last_tick: str | None, sync: MemorySyncState | None) -> dict:
+    """Return the age of the last finished tick and whether the loop counts as stale."""
+    if not last_tick:
+        return {"last_tick_age_s": None, "stale": False}
+    age = (datetime.now(timezone.utc) - datetime.fromisoformat(last_tick)).total_seconds()
+    timeout = sync.tick_timeout if sync is not None else MEMORY_TICK_TIMEOUT
+    limit = timeout + MEMORY_STALE_INTERVALS * MEMORY_SYNC_INTERVAL
+    return {"last_tick_age_s": round(age, 1), "stale": age > limit}
+
+
 def _memory_health_payload() -> dict:
     """Return memory readiness, the start-up error, acknowledgement lag and dump status."""
     payload = {"ready": _memory_status["ready"], "error": _memory_status["error"],
@@ -639,6 +727,7 @@ def _memory_health_payload() -> dict:
     sync = _memory_runtime.get("sync")
     if index is not None:
         payload["index"] = index.health()
+        payload["index"].update(_sync_staleness(payload["index"].get("last_tick"), sync))
     if sync is not None:
         payload["sync_error"] = sync.last_error
     if store is not None and _memory_status["ready"]:
@@ -1235,6 +1324,8 @@ async def lifespan(app: Starlette):
     heartbeat = HeartbeatThread(HEARTBEAT_FILE)
     heartbeat.start()
     print(f"[HTTP] Heartbeat thread started ({HEARTBEAT_FILE})", file=sys.stderr)
+    if install_task_dump_handler():
+        print(f"[HTTP] kill -USR1 {os.getpid()} logs the asyncio task stacks", file=sys.stderr)
 
     # Own executor, not the loop default: shutdown must not wait on a model
     # load that is still running when the server is stopped mid-startup.
