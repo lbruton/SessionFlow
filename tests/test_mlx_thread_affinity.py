@@ -125,3 +125,37 @@ def test_search_tools_do_not_search_on_event_loop(monkeypatch, tool_name):
     assert calls["kwargs"]["issue_id"] == "SESF-72"
     if tool_name == "search_all_sessions":
         assert calls["kwargs"]["date_from"] == "2026-10-01"
+
+
+# ---------------------------------------------------------------------------
+# Memory index embeds share the one mlx-embed thread and the waiting throttle,
+# and never consult the transcript embedding budget (which drops work).
+# ---------------------------------------------------------------------------
+
+
+def test_memory_embeds_run_on_mlx_embed_behind_the_throttle(monkeypatch, mlx_executor):
+    import embedding_control
+    import memory_index
+
+    seen = _record_thread(monkeypatch)
+    waits = []
+
+    class _Throttle:
+        async def wait(self):
+            waits.append("wait")
+
+        def done(self):
+            waits.append("done")
+
+    monkeypatch.setattr(embedding_control, "get_embed_throttle", lambda: _Throttle())
+
+    def no_budget():
+        raise AssertionError("memory embeds must not use the transcript budget")
+
+    monkeypatch.setattr(embedding_control, "get_embedding_budget", no_budget)
+
+    out = asyncio.run(memory_index.embed_for_index(["memory text"]))
+
+    assert out == [[0.0]]
+    assert seen and all(name.startswith("mlx-embed") for name in seen)
+    assert waits == ["wait", "done"]

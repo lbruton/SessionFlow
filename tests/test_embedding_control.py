@@ -89,3 +89,84 @@ def test_embedding_budget_records_cooldown_after_batch():
     assert decision.retry_after_seconds > 0
     time.sleep(decision.retry_after_seconds)
     assert budget.before_batch(batch_size=4, estimated_chars=100).allowed is True
+
+
+# ---------------------------------------------------------------------------
+# Identity per collection, and the waiting throttle memory embeds share with
+# transcripts. The throttle never denies work; it waits out the cooldown.
+# ---------------------------------------------------------------------------
+
+
+def test_identity_records_the_collection_it_describes():
+    from embedding_control import EmbeddingIdentity
+
+    assert EmbeddingIdentity.current_local().collection_name == "sessions"
+    assert EmbeddingIdentity.current_local(collection="memories").collection_name == "memories"
+
+
+def test_throttle_keeps_the_200ms_floor():
+    from embedding_control import EmbedThrottle
+
+    assert EmbedThrottle(cooldown_ms=50).cooldown_ms == 200
+    assert EmbedThrottle(cooldown_ms=350).cooldown_ms == 350
+
+
+def test_throttle_waits_instead_of_dropping():
+    import asyncio
+
+    from embedding_control import EmbedThrottle
+
+    clock = [100.0]
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+        clock[0] += seconds
+
+    throttle = EmbedThrottle(cooldown_ms=200, clock=lambda: clock[0], sleep=fake_sleep)
+
+    async def two_batches():
+        await throttle.wait()
+        throttle.done()
+        clock[0] += 0.05
+        await throttle.wait()
+        throttle.done()
+
+    asyncio.run(two_batches())
+
+    assert slept == [_approx(0.15)]
+
+
+def test_throttle_does_not_wait_after_the_cooldown():
+    import asyncio
+
+    from embedding_control import EmbedThrottle
+
+    clock = [0.0]
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    throttle = EmbedThrottle(cooldown_ms=200, clock=lambda: clock[0], sleep=fake_sleep)
+
+    async def batches():
+        await throttle.wait()
+        throttle.done()
+        clock[0] += 1.0
+        await throttle.wait()
+
+    asyncio.run(batches())
+    assert slept == []
+
+
+def test_shared_throttle_is_one_instance():
+    from embedding_control import get_embed_throttle
+
+    assert get_embed_throttle() is get_embed_throttle()
+
+
+def _approx(value):
+    import pytest
+
+    return pytest.approx(value, abs=1e-9)
