@@ -366,7 +366,8 @@ def isolated_memory(monkeypatch, tmp_path):
     state_dir.mkdir()
     memories_fts = state_dir / "memories_fts.db"
     import sqlite3
-    with sqlite3.connect(memories_fts) as conn:
+    from contextlib import closing
+    with closing(sqlite3.connect(memories_fts)) as conn, conn:
         conn.execute("CREATE TABLE marker (i int)")
         conn.execute("INSERT INTO marker VALUES (1)")
 
@@ -399,10 +400,11 @@ def isolated_memory(monkeypatch, tmp_path):
 
 def _assert_memory_untouched(env):
     import sqlite3
+    from contextlib import closing
 
     assert "memories" not in env["client"].touched()
     assert env["memories_fts"].exists()
-    with sqlite3.connect(env["memories_fts"]) as conn:
+    with closing(sqlite3.connect(env["memories_fts"])) as conn, conn:
         assert conn.execute("SELECT count(*) FROM marker").fetchone()[0] == 1
 
 

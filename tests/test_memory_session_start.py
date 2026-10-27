@@ -101,6 +101,7 @@ class FakeMCP:
 
     def close(self):
         self.server.shutdown()
+        self.server.server_close()
 
 
 @pytest.fixture

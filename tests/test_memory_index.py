@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sqlite3
+from contextlib import closing
 import threading
 
 import pytest
@@ -111,7 +112,7 @@ def _index(store, milvus, tmp_path, host="minitron", embed=_embed, model_name="e
 
 
 def _fts_ids(path):
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         return {r[0] for r in conn.execute("SELECT memory_id FROM memories_fts")}
 
 
@@ -252,7 +253,7 @@ def test_each_fts_consumer_converges_on_its_own(store, milvus, tmp_path):
 
 def _snapshot(milvus, path):
     rows = {k: (v["version"], v["generation"], v["project"]) for k, v in milvus.rows().items()}
-    with sqlite3.connect(path) as conn:
+    with closing(sqlite3.connect(path)) as conn, conn:
         fts = sorted(conn.execute("SELECT memory_id, version, text FROM memories_fts").fetchall())
     return rows, fts
 
@@ -333,7 +334,7 @@ def test_reconcile_resets_a_row_that_differs(store, milvus, tmp_path):
     asyncio.run(idx.tick())
     pk = next(k for k, v in milvus.collections["memories"].items() if v["memory_id"] == written.memory_id)
     milvus.collections["memories"][pk]["version"] = 99
-    with sqlite3.connect(idx.fts_path) as conn:
+    with closing(sqlite3.connect(idx.fts_path)) as conn, conn:
         conn.execute("UPDATE memories_fts SET version = 7 WHERE memory_id = ?", (written.memory_id,))
 
     reset = asyncio.run(idx.reconcile())

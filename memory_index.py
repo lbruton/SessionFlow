@@ -86,7 +86,12 @@ class MemoryFTS:
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except BaseException:
+            # A damaged file fails here, before any caller can close the connection.
+            conn.close()
+            raise
         return conn
 
     def _create(self, conn: sqlite3.Connection) -> None:

@@ -540,3 +540,33 @@ def test_store_dump_status_reads_maintenance_runs(memory_pg, store):
         )
     status = store.dump_status(now=datetime(2026, 10, 27, 8, 0, tzinfo=timezone.utc))
     assert status["state"] == "ok"
+
+# --- DSN configuration: the environment variable only ----------------------
+
+DSN = "postgresql://user@db.example/memory"
+
+
+def test_environment_value_is_used(monkeypatch):
+    monkeypatch.setenv("SESSIONFLOW_MEMORY_DSN", f"  {DSN}\n")
+    assert memory_store.fetch_dsn() == DSN
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_unset_or_blank_is_not_configured(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("SESSIONFLOW_MEMORY_DSN", raising=False)
+    else:
+        monkeypatch.setenv("SESSIONFLOW_MEMORY_DSN", value)
+    with pytest.raises(MemoryStoreError) as exc:
+        memory_store.fetch_dsn()
+    assert exc.value.code == "dsn_unavailable"
+    assert "not configured" in str(exc.value) and "SESSIONFLOW_MEMORY_DSN" in str(exc.value)
+
+
+def test_no_file_is_read(monkeypatch, tmp_path):
+    monkeypatch.delenv("SESSIONFLOW_MEMORY_DSN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".sessionflow").mkdir()
+    (tmp_path / ".sessionflow" / "memory_dsn").write_text(DSN)
+    with pytest.raises(MemoryStoreError):
+        memory_store.fetch_dsn()
