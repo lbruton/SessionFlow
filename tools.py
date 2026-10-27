@@ -4,6 +4,7 @@ MCP tool definitions and project context for SessionFlow.
 
 import asyncio
 import contextvars
+import json
 import os
 from pathlib import Path
 from mcp.server import Server
@@ -310,16 +311,259 @@ def build_search_all_sessions_schema() -> dict:
                 "type": "string",
                 "description": "Return only turns tagged with this issue ID, for example 'SESF-25'. Case-insensitive.",
             },
+            "format": {
+                "type": "string",
+                "enum": ["markdown", "json"],
+                "default": "markdown",
+                "description": "Output format: 'markdown' (default) or 'json'.",
+            },
         },
         "required": [],
     }
+
+# --- Memory tools ---
+
+# Set by the HTTP server once the memory store has started; None until then.
+_memory_service = None
+
+MEMORY_AGENTS = ["antigravity", "claude-code", "codex", "gemini", "opencode"]
+MEMORY_TYPES = ["blocker", "contact", "decision", "discovery", "fact", "guardrail", "handoff",
+                "milestone", "open-item", "preference", "session-summary", "workflow"]
+MEMORY_TOOL_NAMES = frozenset({"add_memory", "search_memories", "list_memories", "get_memory",
+                               "update_memory", "delete_memory", "get_memory_context"})
+
+_FORMAT_PROP = {"type": "string", "enum": ["markdown", "json"], "default": "markdown",
+                "description": "Output format: 'markdown' (default) or 'json'."}
+_PROJECT_PROP = {"type": "string",
+                 "description": "Project slug, for example 'sessionflow'. Reads accept '*' for every project."}
+_ID_PROP = {"type": "string", "description": "Memory ID returned by add_memory or a listing."}
+_PROVENANCE_PROPS = {
+    "source_session_id": {"type": "string", "description": "Session ID that produced the memory."},
+    "source_provider": {"type": "string", "description": "Provider of that session, for example 'claude_code_cli'."},
+    "source_project_root": {"type": "string", "description": "Project root of that session."},
+    "source_started_at": {"type": "string", "description": "Session start, ISO 8601 with offset."},
+    "source_ended_at": {"type": "string", "description": "Session end, ISO 8601 with offset."},
+}
+_FILTER_PROPS = {
+    "type": {"type": "string", "enum": MEMORY_TYPES, "description": "Only this memory type."},
+    "agent_id": {"type": "string", "description": "Only memories written by this agent."},
+    "status": {"type": "string", "enum": ["active", "superseded", "any"],
+               "description": "Record status; default 'active'."},
+    "issue_id": {"type": "string", "description": "Only memories that mention this issue ID."},
+    "source": {"type": "string", "description": "Only memories whose extra.source matches."},
+    "category": {"type": "string", "description": "Only memories whose extra.category matches."},
+    "created_from": {"type": "string", "description": "First America/Chicago day, YYYY-MM-DD."},
+    "created_to": {"type": "string", "description": "Last America/Chicago day, YYYY-MM-DD."},
+    "user_id": {"type": "string", "description": "Owner; default 'lbruton'."},
+}
+_FILTER_KEYS = tuple(_FILTER_PROPS) + ("source_session_id",)
+
+
+def set_memory_service(service) -> None:
+    """Install the memory service the memory tools call, or None to mark memory unavailable."""
+    global _memory_service
+    _memory_service = service
+
+
+def build_memory_tools() -> list[types.Tool]:
+    """Return the seven memory tool definitions."""
+    def tool(name, description, props, required):
+        return types.Tool(name=name, description=description, inputSchema={
+            "type": "object", "properties": {**props, "format": _FORMAT_PROP}, "required": required,
+        })
+
+    return [
+        tool("add_memory",
+             "Store one memory verbatim: a session summary, decision, handoff or fact. A record "
+             "with the same topic_key in the project is replaced; the same text is deduplicated.",
+             {"text": {"type": "string", "description": "Memory text, at most 65,536 UTF-8 bytes."},
+              "agent_id": {"type": "string", "enum": MEMORY_AGENTS, "description": "Harness writing the memory."},
+              "project": _PROJECT_PROP,
+              "type": {"type": "string", "enum": MEMORY_TYPES, "description": "Memory type."},
+              "user_id": {"type": "string", "description": "Owner; default 'lbruton'."},
+              "topic_key": {"type": "string", "description": "Stable key; a later add with it replaces the record."},
+              "extra": {"type": "object", "description": "Free-form metadata, kept as given."},
+              "supersedes": {"type": "array", "items": {"type": "string"},
+                             "description": "IDs in the same project that this memory replaces."},
+              **_PROVENANCE_PROPS},
+             ["text", "agent_id", "project", "type"]),
+        tool("search_memories",
+             "Search memories by meaning and keywords, validated against the canonical store.",
+             {"query": {"type": "string", "description": "What to find."},
+              "project": _PROJECT_PROP,
+              "n": {"type": "integer", "default": 10, "description": "Number of results."},
+              "sort_by": {"type": "string", "enum": sorted(LEGAL_SORT_BY), "default": "hybrid",
+                          "description": "Ranking strategy."},
+              **_FILTER_PROPS},
+             ["query", "project"]),
+        tool("list_memories",
+             "List memories newest first. Pass the returned cursor to read the next page.",
+             {"project": _PROJECT_PROP,
+              "limit": {"type": "integer", "default": 20, "description": "Page size."},
+              "cursor": {"type": "string", "description": "Cursor from the previous page."},
+              "source_session_id": {"type": "string", "description": "Only memories from this session."},
+              **_FILTER_PROPS},
+             ["project"]),
+        tool("get_memory", "Return one memory in full.",
+             {"memory_id": _ID_PROP, "project": _PROJECT_PROP}, ["memory_id"]),
+        tool("update_memory",
+             "Change fields of one memory. Omitted fields keep their values; a new text replaces the old one.",
+             {"memory_id": _ID_PROP, "project": _PROJECT_PROP,
+              "text": {"type": "string", "description": "New full text."},
+              "agent_id": {"type": "string", "enum": MEMORY_AGENTS, "description": "New writer."},
+              "type": {"type": "string", "enum": MEMORY_TYPES, "description": "New type."},
+              "topic_key": {"type": "string", "description": "New topic key; empty clears it."},
+              "extra": {"type": "object", "description": "New metadata object (replaces the old one)."},
+              **_PROVENANCE_PROPS},
+             ["memory_id"]),
+        tool("delete_memory", "Delete one memory. Its history is kept.",
+             {"memory_id": _ID_PROP, "project": _PROJECT_PROP}, ["memory_id"]),
+        tool("get_memory_context",
+             "Return a memory with the conversation that produced it and other sessions about its issues.",
+             {"memory_id": _ID_PROP, "project": _PROJECT_PROP,
+              "limit": {"type": "integer", "default": 10, "description": "Items per section."}},
+             ["memory_id"]),
+    ]
+
+
+def _json_text(payload) -> str:
+    return json.dumps(payload, default=_json_default, ensure_ascii=False, indent=2)
+
+
+def _json_default(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _memory_error(code: str, message: str, fmt: str, details: dict | None = None) -> types.CallToolResult:
+    if fmt == "json":
+        body = {"error": {"code": code, "message": message, **({"details": details} if details else {})}}
+        text = _json_text(body)
+    else:
+        text = f"Error ({code}): {message}"
+    return types.CallToolResult(content=[types.TextContent(type="text", text=text)], isError=True)
+
+
+def _when(value) -> str:
+    return value.isoformat() if hasattr(value, "isoformat") else str(value or "")
+
+
+def _format_memory(row: dict, heading: str = "") -> str:
+    meta = " · ".join(str(x) for x in (row.get("type"), row.get("project"), row.get("agent_id"),
+                                        row.get("status"), _when(row.get("created_at"))) if x)
+    lines = [f"{heading}`{row['memory_id']}`" + (f" · {meta}" if meta else "")]
+    if row.get("issue_ids"):
+        lines.append(f"Issues: {', '.join(row['issue_ids'])}")
+    if row.get("text"):
+        lines.append("")
+        lines.append(row["text"])
+    return "\n".join(lines)
+
+
+def _format_write(result: dict) -> str:
+    lines = [f"Memory `{result['memory_id']}` {result['outcome']} (version {result.get('version')}). "
+             f"Index: {result.get('index', 'ok')}."]
+    similar = result.get("similar") or []
+    if similar:
+        lines.append("")
+        lines.append("Similar memories:")
+        for s in similar:
+            lines.append(f"- `{s['memory_id']}` ({s.get('score', 0):.2f}): {s.get('text', '')}")
+    if result.get("similar_state") == "pending":
+        lines.append("Similarity check is pending: some vectors are not indexed yet.")
+    return "\n".join(lines)
+
+
+def _format_memory_list(payload: dict) -> str:
+    rows = payload.get("results") or []
+    if not rows:
+        parts = ["No memories found."]
+    else:
+        parts = [_format_memory(r, f"### {i}. ") for i, r in enumerate(rows, 1)]
+    if payload.get("next_cursor"):
+        parts.append(f"Next page cursor: `{payload['next_cursor']}`")
+    if payload.get("channels") is not None:
+        parts.append(f"Channels: {', '.join(payload['channels']) or 'none'}")
+    if payload.get("incomplete"):
+        parts.append("Results may be incomplete: the indexes are catching up.")
+    return "\n\n".join(parts)
+
+
+def _format_context(payload: dict) -> str:
+    parts = [_format_memory(payload["memory"], "## Memory ")]
+    source = payload.get("source_session")
+    if source:
+        parts.append(f"## Source session `{source.get('session_id', '')}`")
+        for t in source.get("turns") or []:
+            parts.append(f"- turn {t.get('turn_index')}: {t.get('content', '')}")
+    related = payload.get("related_sessions") or []
+    parts.append("## Related sessions")
+    parts.extend(f"- `{s.get('session_id')}` ({s.get('provider', '')}, {s.get('last_timestamp', '')})"
+                 for s in related)
+    if not related:
+        parts.append("None found.")
+    if payload.get("note"):
+        parts.append(payload["note"])
+    return "\n\n".join(parts)
+
+
+async def _call_memory_tool(name: str, arguments: dict):
+    args = dict(arguments or {})
+    fmt = args.pop("format", "markdown")
+    service = _memory_service
+    if service is None:
+        return _memory_error("memory_unavailable",
+                             "The memory store has not started; see /health for the reason.", fmt)
+    project = args.get("project")
+    try:
+        if name == "add_memory":
+            payload = await service.add(args)
+            text = _format_write(payload)
+        elif name == "get_memory":
+            payload = await service.get(args["memory_id"], project)
+            text = _format_memory(payload)
+        elif name == "update_memory":
+            memory_id = args.pop("memory_id")
+            payload = await service.update(memory_id, args)
+            text = _format_write(payload)
+        elif name == "delete_memory":
+            payload = await service.delete(args["memory_id"], project)
+            text = _format_write(payload)
+        elif name == "list_memories":
+            filters = {k: args[k] for k in ("project", *_FILTER_KEYS) if k in args}
+            payload = await service.list(filters, args.get("limit", 20), args.get("cursor"))
+            text = _format_memory_list(payload)
+        elif name == "search_memories":
+            filters = {k: args[k] for k in ("project", *_FILTER_KEYS) if k in args}
+            if args.get("sort_by") not in (None, "hybrid"):
+                payload = await service.search(args.get("query") or "", filters, args.get("n", 10),
+                                               sort_by=args["sort_by"])
+            else:
+                payload = await service.search(args.get("query") or "", filters, args.get("n", 10))
+            text = _format_memory_list(payload)
+        else:  # get_memory_context
+            payload = await service.context(args["memory_id"], project=project,
+                                            limit=args.get("limit", 10))
+            text = _format_context(payload)
+    except KeyError as exc:
+        return _memory_error("missing_field", f"{exc.args[0]} is required", fmt)
+    except Exception as exc:  # noqa: BLE001 - every failure becomes a structured tool error
+        code = getattr(exc, "code", None) or "internal_error"
+        message = getattr(exc, "message", None) or str(exc) or type(exc).__name__
+        details = getattr(exc, "details", None)
+        return _memory_error(code, message, fmt, details if isinstance(details, dict) else None)
+    if fmt == "json":
+        text = _json_text(payload)
+    return [types.TextContent(type="text", text=text)]
+
 
 def register_tools(server: Server):
     """Register SessionFlow MCP tools."""
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        return [
+        return build_memory_tools() + [
             types.Tool(
                 name="search_session",
                 description=(
@@ -528,6 +772,8 @@ def register_tools(server: Server):
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+        if name in MEMORY_TOOL_NAMES:
+            return await _call_memory_tool(name, arguments)
         db = get_db_path()
         current_project = get_current_project_root()
 
@@ -596,6 +842,8 @@ def register_tools(server: Server):
                     issue_id=issue_id_arg,
                     db_path=db,
                 )
+                if arguments.get("format") == "json":
+                    return [types.TextContent(type="text", text=_json_text({"results": results}))]
                 return [types.TextContent(type="text", text=format_results(results))]
 
             elif name == "get_turns":
