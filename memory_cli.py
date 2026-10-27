@@ -115,6 +115,7 @@ def _open_service():
     return memory_service.MemoryService(
         store=_open_store(), index=_DeferredIndex(), embed_query=no_query_embedding,
         allowlist=rag_engine.load_allowlist(allowlist_path),
+        project_inventory=memory_service.project_inventory(),
     )
 
 
@@ -159,6 +160,10 @@ def cmd_audit(args: argparse.Namespace) -> int:
     if index is None or index.unavailable:
         _err("Similar-memory clusters are unavailable: Milvus could not be read. "
              "Stale items and counts are still reported.")
+    if report.get("inventory_checked") is False:
+        _err("Unknown-project check skipped: no known project root has a readable "
+             ".claude/project.json. Open one session in each project so its "
+             "SessionStart hook registers the root, then run the audit again.")
     if args.format == "json":
         print(_json(report))
         return 0

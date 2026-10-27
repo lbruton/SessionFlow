@@ -115,6 +115,59 @@ def test_audit_prints_the_report_and_changes_nothing(monkeypatch, capsys):
     assert '"unknown_projects"' in capsys.readouterr().out
 
 
+def _project_root(tmp_path, name, config):
+    import json
+
+    root = tmp_path / name
+    (root / ".claude").mkdir(parents=True)
+    (root / ".claude" / "project.json").write_text(json.dumps(config), encoding="utf-8")
+    return str(root)
+
+
+def test_project_inventory_reads_each_known_root(monkeypatch, tmp_path):
+    import file_watcher
+    import memory_service
+
+    roots = [
+        _project_root(tmp_path, "a", {"memory": {"project": "sessionflow"}, "tag": "ignored"}),
+        _project_root(tmp_path, "b", {"tag": "DevOps"}),
+        str(tmp_path / "no-config"),
+    ]
+    monkeypatch.setattr(file_watcher, "known_project_roots", lambda: roots)
+
+    assert memory_service.project_inventory() == {"sessionflow", "devops"}
+
+
+def test_cli_audit_reports_projects_missing_from_the_inventory(
+        cli_store, no_embedding, monkeypatch, tmp_path, capsys):
+    import file_watcher
+
+    root = _project_root(tmp_path, "sf", {"memory": {"project": "sessionflow"}})
+    monkeypatch.setattr(file_watcher, "known_project_roots", lambda: [root])
+    monkeypatch.setattr(memory_cli, "_open_neighbour_index", lambda: None)
+    cli_store.add(_rec("known project"))
+    cli_store.add(_rec("typo project", project="sesionflow"))
+
+    assert memory_cli.main(["audit"]) == 0
+
+    assert "Unknown projects: sesionflow" in capsys.readouterr().out
+
+
+def test_cli_audit_says_when_no_inventory_is_available(
+        cli_store, no_embedding, monkeypatch, capsys):
+    import file_watcher
+
+    monkeypatch.setattr(file_watcher, "known_project_roots", lambda: [])
+    monkeypatch.setattr(memory_cli, "_open_neighbour_index", lambda: None)
+    cli_store.add(_rec("any project", project="sesionflow"))
+
+    assert memory_cli.main(["audit", "--format", "json"]) == 0
+
+    captured = capsys.readouterr()
+    assert '"inventory_checked": false' in captured.out
+    assert "Unknown-project check skipped" in captured.err
+
+
 class _StoredVectorMilvus:
     """A Milvus stand-in holding one stored vector and answering the threshold search."""
 

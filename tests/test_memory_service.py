@@ -319,6 +319,18 @@ def test_milvus_error_falls_back_to_keyword_search(svc, index):
     assert [r["memory_id"] for r in out["results"]] == [written["memory_id"]]
 
 
+def test_model_mismatch_falls_back_to_keyword_search(svc, index):
+    import memory_index
+
+    written = _add(svc, "keyword under another model")
+    index.vector_error = memory_index.MemoryModelMismatch("local model modernbert differs")
+    index.vector_hits = [{"memory_id": written["memory_id"], "version": 1, "generation": 1}]
+    index.fts_hits = [{"memory_id": written["memory_id"], "version": 1, "generation": 1}]
+    out = asyncio.run(svc.search("keyword", {"project": "sessionflow"}, 5))
+    assert out["channels"] == ["fts"]
+    assert [r["memory_id"] for r in out["results"]] == [written["memory_id"]]
+
+
 def test_canonical_filters_are_rechecked(svc, index):
     decision = _add(svc, "a decision", type="decision", agent_id="codex",
                     extra={"source": "wrap", "category": "infra"})
