@@ -319,10 +319,18 @@ class MemoryService:
 
     async def list(self, filters: Dict[str, Any], limit: int = 20,
                    cursor: Optional[str] = None) -> Dict[str, Any]:
-        """Return one page of memories newest first and the cursor for the next page."""
+        """Return one page newest first, the next cursor, and the nightly dump status.
+
+        ``dump`` carries the dump state so the session-start hook can report a
+        failed or missing run; a failed status read reports ``unknown``.
+        """
         parsed = self._filters(filters)
         rows, next_cursor = await run_db(self.store.list, parsed, limit, cursor)
-        return {"results": rows, "next_cursor": next_cursor}
+        try:
+            dump = await run_db(self.store.dump_status)
+        except Exception:  # noqa: BLE001 - the listing stays useful without it
+            dump = {"state": "unknown"}
+        return {"results": rows, "next_cursor": next_cursor, "dump": dump}
 
     # --- Search -------------------------------------------------------------
 

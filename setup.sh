@@ -214,6 +214,50 @@ with open(settings_file, "w") as f:
 print("  Settings saved")
 PYEOF
 
+# --- Memory session-start hook (Claude Code and Codex) ---
+# One file serves both harnesses. Codex is registered here; the Claude Code
+# entry is printed for the user to add, so this script never rewrites that
+# hook list on its own.
+echo ""
+echo "Installing the memory session-start hook..."
+MEMORY_HOOK="$SCRIPT_DIR/hooks/memory-session-start.py"
+for harness_dir in "$HOME/.claude" "$HOME/.codex"; do
+    if [ -d "$harness_dir" ]; then
+        mkdir -p "$harness_dir/hooks"
+        install -m 755 "$MEMORY_HOOK" "$harness_dir/hooks/memory-session-start.py"
+        echo "  Copied to $harness_dir/hooks/memory-session-start.py"
+    fi
+done
+
+if [ -d "$HOME/.codex" ]; then
+    python3 - "$HOME/.codex/hooks.json" "$HOME/.codex/hooks/memory-session-start.py" << 'PYEOF'
+import json
+import os
+import sys
+
+path, hook = sys.argv[1], sys.argv[2]
+data = {}
+if os.path.exists(path):
+    with open(path) as fh:
+        data = json.load(fh)
+groups = data.setdefault("hooks", {}).setdefault("SessionStart", [])
+command = f"python3 '{hook}'"
+if any(h.get("command") == command for g in groups for h in g.get("hooks", [])):
+    print("  Codex SessionStart: already registered")
+else:
+    groups.append({"matcher": "", "hooks": [{"type": "command", "command": command}]})
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    print("  Codex SessionStart: registered in ~/.codex/hooks.json")
+PYEOF
+fi
+
+if [ -d "$HOME/.claude" ]; then
+    echo "  Claude Code: add this entry to hooks.SessionStart in ~/.claude/settings.json:"
+    echo "    {\"matcher\": \"\", \"hooks\": [{\"type\": \"command\", \"command\": \"python3 $HOME/.claude/hooks/memory-session-start.py\"}]}"
+fi
+
 # --- Install global MCP server (user scope) ---
 echo ""
 echo "Installing global MCP server..."
