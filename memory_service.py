@@ -9,11 +9,12 @@ other names where a transcript came from.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Pattern
 
 import memory_store
 import secret_redaction
+from embedding_control import _env_float, _env_int
 from memory_store import (
     MemoryFilters,
     MemoryNotFound,
@@ -55,6 +56,15 @@ MAX_MEMORY_BYTES = 65536
 """Largest accepted memory text, counted in UTF-8 bytes."""
 
 DEFAULT_USER_ID = memory_store.DEFAULT_USER_ID
+
+# Types the audit lists when they stay active longer than the audit age.
+STALE_TYPES = frozenset({"open-item", "blocker"})
+
+# Calibrated on the local backup with the transcript model: duplicate wordings of
+# one fact score 0.88 and up, while distinct facts on one topic score below it.
+SIMILAR_THRESHOLD = 0.88
+# Open items and blockers older than this are listed by the audit.
+AUDIT_AGE_DAYS = 21
 
 _PROVENANCE_TEXT = ("source_session_id", "source_provider", "source_project_root")
 _PROVENANCE_TIME = ("source_started_at", "source_ended_at")
@@ -125,8 +135,8 @@ class MemoryService:
         index: Any,
         embed_query: Callable[[str], Awaitable[List[float]]],
         allowlist: Optional[List[Pattern[str]]] = None,
-        similar_threshold: float = 0.9,
-        audit_age_days: int = 30,
+        similar_threshold: Optional[float] = None,
+        audit_age_days: Optional[int] = None,
         project_inventory: Optional[Iterable[str]] = None,
     ) -> None:
         """Wire the store, the index channels and the query embedder.
@@ -138,8 +148,10 @@ class MemoryService:
         self.index = index
         self.embed_query = embed_query
         self.allowlist = list(allowlist or [])
-        self.similar_threshold = similar_threshold
-        self.audit_age_days = audit_age_days
+        self.similar_threshold = similar_threshold if similar_threshold is not None else _env_float(
+            "SESSIONFLOW_MEMORY_SIMILAR_THRESHOLD", SIMILAR_THRESHOLD, 0.0, 1.0)
+        self.audit_age_days = audit_age_days if audit_age_days is not None else _env_int(
+            "SESSIONFLOW_MEMORY_AUDIT_AGE_DAYS", AUDIT_AGE_DAYS, minimum=1)
         self.project_inventory = set(project_inventory or ())
 
     # --- Validation ---------------------------------------------------------
@@ -331,6 +343,54 @@ class MemoryService:
         except Exception:  # noqa: BLE001 - the listing stays useful without it
             dump = {"state": "unknown"}
         return {"results": rows, "next_cursor": next_cursor, "dump": dump}
+
+    # --- Audit --------------------------------------------------------------
+
+    async def audit(self, user_id: str = DEFAULT_USER_ID) -> Dict[str, Any]:
+        """Report likely duplicates, aged open items and blockers, counts and unknown projects.
+
+        Read-only: nothing is written. Clusters join active records whose
+        vectors are at least the similarity threshold apart, per project.
+        """
+        rows = await run_db(self.store.audit_rows, user_id)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.audit_age_days)
+        projects: Dict[str, Dict[str, Any]] = {}
+        parent: Dict[str, str] = {}
+
+        def find(x: str) -> str:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        by_project: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            by_project.setdefault(row["project"], []).append(row)
+        for project, items in sorted(by_project.items()):
+            counts: Dict[str, Dict[str, int]] = {}
+            for row in items:
+                bucket = counts.setdefault(row["type"], {})
+                bucket[row["status"]] = bucket.get(row["status"], 0) + 1
+            active = [r for r in items if r["status"] == "active"]
+            ids = {r["memory_id"] for r in active}
+            for mid in ids:
+                parent[mid] = mid
+            for mid in sorted(ids):
+                for other in await self.index.neighbours(mid, threshold=self.similar_threshold):
+                    if other in ids:
+                        parent[find(other)] = find(mid)
+            groups: Dict[str, List[str]] = {}
+            for mid in ids:
+                groups.setdefault(find(mid), []).append(mid)
+            clusters = sorted(sorted(g) for g in groups.values() if len(g) > 1)
+            stale = sorted(r["memory_id"] for r in active
+                           if r["type"] in STALE_TYPES and r["created_at"] < cutoff)
+            projects[project] = {"clusters": clusters, "stale": stale, "counts": counts}
+        unknown = sorted(p for p in projects if self.project_inventory
+                         and p not in self.project_inventory)
+        return {"projects": projects, "unknown_projects": unknown,
+                "similar_threshold": self.similar_threshold,
+                "audit_age_days": self.audit_age_days}
 
     # --- Search -------------------------------------------------------------
 

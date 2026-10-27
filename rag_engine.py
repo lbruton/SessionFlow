@@ -1773,6 +1773,41 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
     return ranked[:n]
 
 
+MEMORY_RANGE_LIMIT = 16384
+"""Milvus caps one search at this many hits; a range search returns at most this many."""
+
+
+def memory_threshold_search(client, vector: List[float], *, project: str, user_id: str,
+                            generation: int, threshold: float,
+                            collection: str = "memories",
+                            exclude_memory_id: Optional[str] = None) -> List[Dict]:
+    """Return every active memory in one project whose vector is at least ``threshold`` similar.
+
+    A COSINE range search, not a top-N search, so no match above the threshold
+    is dropped. Only vectors of the current ``generation`` are compared.
+
+    Returns:
+        ``{"memory_id", "score"}`` dicts, most similar first.
+    """
+    parts = [
+        f'project == "{_escape_filter_scalar(project)}"',
+        f'user_id == "{_escape_filter_scalar(user_id)}"',
+        'status == "active"',
+        f"generation == {int(generation)}",
+    ]
+    if exclude_memory_id:
+        parts.append(f'memory_id != "{_escape_filter_scalar(exclude_memory_id)}"')
+    results = client.search(
+        collection_name=collection, data=[vector], limit=MEMORY_RANGE_LIMIT,
+        filter=" and ".join(parts), output_fields=["memory_id"],
+        search_params={"metric_type": "COSINE",
+                       "params": {"radius": float(threshold), "range_filter": 1.0}},
+    )
+    hits = [{"memory_id": h["entity"]["memory_id"], "score": float(h["distance"])}
+            for h in (results[0] if results else []) if h["distance"] >= threshold]
+    return sorted(hits, key=lambda h: h["score"], reverse=True)
+
+
 def get_turns(session_id: str, turn_index: int, context: int = 2,
               db_path: Optional[str] = None) -> List[Dict]:
     """Retrieve turns around a specific turn_index within a session.

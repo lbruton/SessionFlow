@@ -436,6 +436,48 @@ class MemoryIndex:
         return await run_db(self.fts.search, query, project=filters.get("project", "*"),
                             limit=limit, filters=rest)
 
+    async def similar(self, text: str, *, project: str, user_id: str,
+                      threshold: float) -> tuple[List[Dict[str, Any]], str]:
+        """List every active same-project memory at least ``threshold`` similar to ``text``.
+
+        Each hit is checked against Postgres. The state is ``ok`` when every
+        active record in the project has a current-generation vector, and
+        ``pending`` otherwise, so an empty list never hides missing vectors.
+        """
+        state = "pending" if self.milvus_blocked or await run_db(
+            self.store.vectors_pending, project, user_id) else "ok"
+        if self.milvus_blocked:
+            return [], state
+        vector = (await self.embed([text]))[0]
+        meta = await run_db(self.store.index_meta)
+        hits = await run_db(lambda: rag_engine.memory_threshold_search(
+            self.milvus, vector, project=project, user_id=user_id,
+            generation=meta["generation"], threshold=threshold, collection=self.spec.name))
+        rows = await run_db(self.store.get_many, [h["memory_id"] for h in hits])
+        found = []
+        for hit in hits:
+            row = rows.get(hit["memory_id"])
+            if row is None or row["status"] != "active" or row["project"] != project:
+                continue
+            found.append({"memory_id": hit["memory_id"], "score": hit["score"],
+                          "text": row["text"][:200]})
+        return found, state
+
+    async def neighbours(self, memory_id: str, *, threshold: float) -> List[str]:
+        """Return IDs of active same-project memories at least ``threshold`` similar to this one."""
+        pk = rag_engine._pk_from_doc_id(memory_id)
+        rows = await run_db(lambda: self.milvus.query(
+            collection_name=self.spec.name, filter=f"id == {pk}",
+            output_fields=["vector", "project", "user_id", "generation"], limit=1))
+        if not rows:
+            return []
+        row = rows[0]
+        hits = await run_db(lambda: rag_engine.memory_threshold_search(
+            self.milvus, row["vector"], project=row["project"], user_id=row["user_id"],
+            generation=row["generation"], threshold=threshold, collection=self.spec.name,
+            exclude_memory_id=memory_id))
+        return [h["memory_id"] for h in hits]
+
     def lagging(self) -> bool:
         """Return whether the last tick left records pending on this machine."""
         return self._lagging

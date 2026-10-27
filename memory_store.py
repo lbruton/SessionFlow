@@ -844,6 +844,29 @@ class MemoryStore:
             ).fetchall()
         return [_row(r) for r in rows]
 
+    def audit_rows(self, user_id: str = DEFAULT_USER_ID) -> List[Dict[str, Any]]:
+        """Return ID, project, type, status and created_at of every live record, for the audit."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT memory_id, project, type, status, created_at FROM memories "
+                "WHERE user_id = %s AND deleted_at IS NULL ORDER BY project, created_at",
+                (user_id,),
+            ).fetchall()
+        return [_row(r) for r in rows]
+
+    def vectors_pending(self, project: str, user_id: str = DEFAULT_USER_ID) -> bool:
+        """Return whether any active record in the project lacks a current-generation vector."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM memories m CROSS JOIN memory_index_meta meta "
+                "LEFT JOIN memory_index_acks a ON a.consumer = 'milvus' AND a.memory_id = m.memory_id "
+                "WHERE m.user_id = %s AND m.project = %s AND m.deleted_at IS NULL "
+                "AND m.status = 'active' AND (a.memory_id IS NULL OR a.version < m.version "
+                "OR a.generation < meta.generation)) AS pending",
+                (user_id, project),
+            ).fetchone()
+        return bool(row["pending"])
+
     def ack_lag(self) -> Dict[str, int]:
         """Return how many records each known consumer still has to apply."""
         with self._pool.connection() as conn:
