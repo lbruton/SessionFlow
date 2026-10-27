@@ -447,12 +447,15 @@ _embed_semaphore: Optional[asyncio.Semaphore] = None
 # state is not safe to migrate across threads.
 _embed_executor: Optional[ThreadPoolExecutor] = None
 _server_mode = False
+# Milvus path given to init_server_mode; the default for memory-context lookups.
+_server_db_path: Optional[str] = None
 
 
 def init_server_mode(db_path: Optional[str] = None):
     """Initialize async concurrency primitives for HTTP server mode."""
-    global _write_lock, _embed_semaphore, _embed_executor, _server_mode
+    global _write_lock, _embed_semaphore, _embed_executor, _server_mode, _server_db_path
     _check_model_identity(db_path=db_path)
+    _server_db_path = db_path
     _write_lock = asyncio.Lock()
     _embed_semaphore = asyncio.Semaphore(1)
     _embed_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mlx-embed")
@@ -1365,6 +1368,8 @@ def _timeline_entry(row: Dict) -> Dict:
         "chunk_type": row.get("chunk_type", role),
         "text": row.get("text", row.get("document", row.get("content", ""))),
         "issue_ids": row.get("issue_ids", ""),
+        "project_root": row.get("project_root", ""),
+        "logical_session_id": row.get("logical_session_id", ""),
     }
 
 
@@ -1553,7 +1558,8 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     )
 
     output_fields = ["document", "doc_id", "session_id", "timestamp",
-                     "chunk_type", "provider", "issue_ids"]
+                     "chunk_type", "provider", "issue_ids", "project_root",
+                     "logical_session_id"]
 
     # Per-entry filters, hoisted so they run during the stream over each source
     # row rather than over a fully-materialized list — only survivors reach the
@@ -1771,6 +1777,136 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
             r.pop(key, None)
 
     return ranked[:n]
+
+
+_CHICAGO = None
+# Timeline rows read per issue when grouping sessions for a memory's context.
+SESSION_SCAN_LIMIT = 500
+# Characters of each source-session turn returned with a memory's context.
+SESSION_TURN_CHARS = 2000
+
+
+def chicago_day_bounds(day) -> tuple:
+    """Return the half-open UTC interval ``[start, end)`` of one America/Chicago day."""
+    global _CHICAGO
+    if _CHICAGO is None:
+        from zoneinfo import ZoneInfo
+
+        _CHICAGO = ZoneInfo("America/Chicago")
+    start = datetime(day.year, day.month, day.day, tzinfo=_CHICAGO)
+    nxt = day + timedelta(days=1)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=_CHICAGO)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
+
+
+def _session_key(row: Dict) -> tuple:
+    # Codex rows of one thread carry per-payload session ids; the thread id
+    # lives in logical_session_id, so Codex groups on it.
+    provider = row.get("provider") or ""
+    if provider == "codex":
+        return provider, row.get("logical_session_id") or row.get("session_id") or ""
+    return provider, row.get("session_id") or ""
+
+
+def _root_matches(root: str, roots: List[str]) -> bool:
+    return any(root == r or root.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def _rows_on_day(day, project_roots: List[str], db_path: Optional[str]) -> List[Dict]:
+    start, end = chicago_day_bounds(day)
+    # String bounds a day wide on each side; the exact Chicago bounds apply after parsing.
+    lo = (start - timedelta(days=1)).strftime("%Y-%m-%d")
+    hi = (end + timedelta(days=1)).strftime("%Y-%m-%d")
+    roots = " or ".join(f'project_root like "{_escape_filter_scalar(r.rstrip("/"))}%"'
+                        for r in project_roots)
+    filter_expr = f'timestamp >= "{lo}" and timestamp < "{hi}" and ({roots})'
+    fields = ["doc_id", "session_id", "logical_session_id", "provider", "timestamp",
+              "project_root", "issue_ids"]
+    rows: List[Dict] = []
+    for batch in _query_batches(fields, filter_expr=filter_expr, db_path=db_path):
+        rows.extend(batch)
+    return rows
+
+
+def sessions_by_issue(issue_ids: List[str], *, limit: int,
+                      project_roots: Optional[List[str]] = None, day=None,
+                      exclude_session: Optional[str] = None,
+                      db_path: Optional[str] = None) -> List[Dict]:
+    """Group transcript turns into sessions, newest first, for a memory's context.
+
+    Rows come from each issue's timeline; with no issue IDs and a ``day``, from
+    that day's turns in ``project_roots``. ``project_roots`` keeps a root and its
+    subfolders (worktrees). ``day`` keeps one America/Chicago day.
+
+    Returns:
+        Dicts of ``session_id``, ``provider``, ``turns``, ``first_timestamp``,
+        ``last_timestamp`` and ``issue_ids``, at most ``limit``.
+    """
+    db_path = db_path or _server_db_path
+    rows: List[Dict] = []
+    if issue_ids:
+        for issue in issue_ids:
+            rows.extend(get_issue_timeline(issue, limit=SESSION_SCAN_LIMIT, db_path=db_path))
+    elif day is not None and project_roots:
+        rows = _rows_on_day(day, project_roots, db_path)
+    bounds = chicago_day_bounds(day) if day is not None else None
+    sessions: Dict[tuple, Dict] = {}
+    seen_docs = set()
+    for row in rows:
+        doc = row.get("doc_id")
+        if doc in seen_docs:
+            continue
+        seen_docs.add(doc)
+        if project_roots and not _root_matches(row.get("project_root") or "", project_roots):
+            continue
+        ts = _parse_timestamp_utc(row.get("timestamp", ""))
+        if bounds is not None and (ts is None or not bounds[0] <= ts < bounds[1]):
+            continue
+        key = _session_key(row)
+        if not key[1] or key[1] == exclude_session:
+            continue
+        entry = sessions.setdefault(key, {
+            "session_id": key[1], "provider": key[0], "turns": 0, "issue_ids": set(),
+            "first_timestamp": row.get("timestamp", ""), "last_timestamp": row.get("timestamp", ""),
+            "_first": ts, "_last": ts,
+        })
+        entry["turns"] += 1
+        entry["issue_ids"].update(i for i in (row.get("issue_ids") or "").split(",") if i)
+        if ts is not None and (entry["_first"] is None or ts < entry["_first"]):
+            entry["_first"], entry["first_timestamp"] = ts, row.get("timestamp", "")
+        if ts is not None and (entry["_last"] is None or ts > entry["_last"]):
+            entry["_last"], entry["last_timestamp"] = ts, row.get("timestamp", "")
+    _epoch = datetime.min.replace(tzinfo=timezone.utc)
+    ordered = sorted(sessions.values(), key=lambda s: s["_last"] or _epoch, reverse=True)
+    out = []
+    for s in ordered[:limit]:
+        s.pop("_first")
+        s.pop("_last")
+        s["issue_ids"] = sorted(s["issue_ids"])
+        out.append(s)
+    return out
+
+
+def session_turns(session_id: str, provider: Optional[str], *, limit: int,
+                  db_path: Optional[str] = None) -> List[Dict]:
+    """Return the last ``limit`` turns of one session in order, each trimmed for display.
+
+    Codex sessions are matched on ``logical_session_id``, others on ``session_id``.
+    """
+    db_path = db_path or _server_db_path
+    column = "logical_session_id" if provider == "codex" else "session_id"
+    parts = [f'{column} == "{_escape_filter_scalar(session_id)}"']
+    if provider:
+        parts.append(f'provider == "{_escape_filter_scalar(provider)}"')
+    fields = ["turn_index", "timestamp", "chunk_type", "document"]
+    rows: List[Dict] = []
+    for batch in _query_batches(fields, filter_expr=" and ".join(parts), db_path=db_path):
+        rows.extend(batch)
+    rows.sort(key=lambda r: (r.get("turn_index") or 0))
+    return [{"turn_index": r.get("turn_index"), "timestamp": r.get("timestamp", ""),
+             "chunk_type": r.get("chunk_type", ""),
+             "content": (r.get("document") or "")[:SESSION_TURN_CHARS]}
+            for r in rows[-limit:]]
 
 
 MEMORY_RANGE_LIMIT = 16384

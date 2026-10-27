@@ -105,6 +105,40 @@ def _matches(row: Dict[str, Any], f: MemoryFilters) -> bool:
     return all(checks)
 
 
+def _memory_day(row: Dict[str, Any]):
+    """Return the memory's day: ``extra.date`` when set, else its America/Chicago creation day."""
+    raw = (row.get("extra") or {}).get("date")
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw)[:10]).date()
+        except ValueError:
+            pass
+    return row["created_at"].astimezone(memory_store.CHICAGO).date()
+
+
+def resolve_project_roots(project: str) -> List[str]:
+    """Return the known project roots whose ``.claude/project.json`` names ``project``.
+
+    The roots are the ones the server has registered from transcripts, so no
+    folder layout is assumed. The project is ``memory.project``, else ``tag``.
+    """
+    import json
+    from pathlib import Path
+
+    import file_watcher
+
+    roots = []
+    for root in file_watcher.known_project_roots():
+        try:
+            data = json.loads((Path(root) / ".claude" / "project.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        slug = (data.get("memory") or {}).get("project") or str(data.get("tag") or "").lower()
+        if slug == project:
+            roots.append(root)
+    return roots
+
+
 def _parse_time(name: str, value: Any) -> Optional[datetime]:
     if value is None or value == "":
         return None
@@ -391,6 +425,58 @@ class MemoryService:
         return {"projects": projects, "unknown_projects": unknown,
                 "similar_threshold": self.similar_threshold,
                 "audit_age_days": self.audit_age_days}
+
+    # --- Related conversations ---------------------------------------------
+
+    async def context(self, memory_id: str, project: Optional[str] = None,
+                      limit: int = 10) -> Dict[str, Any]:
+        """Return a memory, the session that produced it, and related sessions.
+
+        With a source session: its last ``limit`` turns, and other sessions that
+        share the memory's issue IDs, newest first. Without one: the union of
+        sessions sharing its issue IDs and sessions in the project on its day,
+        with a note that no source session is linked.
+        """
+        import asyncio
+
+        import rag_engine
+
+        row = await self.get(memory_id, project)
+        issue_ids = list(row.get("issue_ids") or [])
+        limit = max(1, int(limit))
+        source_id = row.get("source_session_id")
+        if source_id:
+            provider = row.get("source_provider")
+            turns = await asyncio.to_thread(
+                lambda: rag_engine.session_turns(source_id, provider, limit=limit))
+            related = []
+            if issue_ids:
+                related = await asyncio.to_thread(lambda: rag_engine.sessions_by_issue(
+                    issue_ids, limit=limit, project_roots=None, exclude_session=source_id))
+            return {"memory": row,
+                    "source_session": {"session_id": source_id, "provider": provider,
+                                       "project_root": row.get("source_project_root"),
+                                       "turns": turns},
+                    "related_sessions": related, "note": None}
+
+        found: List[Dict[str, Any]] = []
+        if issue_ids:
+            found += await asyncio.to_thread(
+                lambda: rag_engine.sessions_by_issue(issue_ids, limit=limit))
+        day = _memory_day(row)
+        roots = await asyncio.to_thread(resolve_project_roots, row["project"])
+        if roots:
+            found += await asyncio.to_thread(lambda: rag_engine.sessions_by_issue(
+                [], limit=limit, project_roots=roots, day=day))
+        merged: Dict[tuple, Dict[str, Any]] = {}
+        for s in found:
+            merged.setdefault((s.get("provider"), s.get("session_id")), s)
+        related = sorted(merged.values(), key=lambda s: str(s.get("last_timestamp") or ""),
+                         reverse=True)[:limit]
+        return {"memory": row, "source_session": None, "related_sessions": related,
+                "note": "No source session is linked to this memory; showing sessions that "
+                        "share its issue IDs and sessions in its project on "
+                        f"{day.isoformat()}."}
 
     # --- Search -------------------------------------------------------------
 
