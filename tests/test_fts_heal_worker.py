@@ -325,6 +325,39 @@ def test_memory_sync_clears_the_timeout_error_after_a_good_tick():
     assert state.last_error is None
 
 
+def test_memory_sync_retry_delay_starts_when_a_slow_reconcile_ends():
+    clock = [0.0]
+
+    class _SlowBroken(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            clock[0] += http_server.MEMORY_RECONCILE_RETRY_INTERVAL + 1
+            raise RuntimeError("reconcile gave up")
+
+    index = _SlowBroken()
+    state = http_server.MemorySyncState(index=index, clock=lambda: clock[0])
+
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=False))
+
+    assert index.calls == ["reconcile", "tick", "tick"]
+
+
+def test_memory_sync_success_marks_attempt_and_reconcile_together():
+    clock = [100.0]
+
+    class _Slow(_FakeMemoryIndex):
+        async def reconcile(self):
+            self.calls.append("reconcile")
+            clock[0] += 50
+            return 0
+
+    state = http_server.MemorySyncState(index=_Slow(), clock=lambda: clock[0])
+    asyncio.run(http_server._memory_sync_run_once(state, first_tick=True))
+
+    assert state.last_reconcile == state.last_reconcile_attempt == 150.0
+
+
 def test_memory_sync_pauses_while_store_workers_are_still_busy(monkeypatch):
     # A timed-out store call keeps its memory-db thread; the loop must not keep
     # adding work until search has no worker left.

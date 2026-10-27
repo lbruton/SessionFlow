@@ -627,9 +627,10 @@ async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> 
     if not retry_wait and (first_tick or state.last_reconcile is None or (
         now - state.last_reconcile >= MEMORY_RECONCILE_INTERVAL
     )):
+        reconciled = False
         try:
             reset = await _run_bounded(state.index.reconcile(), state.tick_timeout, "reconcile")
-            state.last_reconcile = now
+            reconciled = True
             if reset:
                 logger.info("Memory reconcile reset %d acknowledgements", reset)
         except asyncio.CancelledError:
@@ -638,7 +639,11 @@ async def _memory_sync_run_once(state: MemorySyncState, *, first_tick: bool) -> 
             errors.append(_scrub(exc))
             logger.warning("Memory reconcile failed: %s", errors[-1])
         finally:
-            state.last_reconcile_attempt = now
+            # Stamped when the attempt ends: a timeout can take longer than the retry delay.
+            # On success both stamps are equal, which is how retry_wait tells success from failure.
+            state.last_reconcile_attempt = state.clock()
+            if reconciled:
+                state.last_reconcile = state.last_reconcile_attempt
     try:
         await _run_bounded(state.index.tick(), state.tick_timeout, "tick")
     except asyncio.CancelledError:
