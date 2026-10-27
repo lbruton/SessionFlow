@@ -641,6 +641,38 @@ def _memory_health_payload() -> dict:
     return payload
 
 
+async def restore_check_endpoint(request: Request) -> JSONResponse:
+    """Index a restored memory database into temporary targets and compare it with its manifest.
+
+    ``memory_cli restore-check`` calls this after restoring a dump. The
+    production collection, FTS file, rows and acknowledgements are not touched.
+    """
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return JSONResponse({"ok": False, "error": "loopback only"}, status_code=403)
+    index = _memory_runtime.get("index")
+    if not _memory_status["ready"] or index is None:
+        return JSONResponse({"ok": False, "error": "memory store not ready"}, status_code=503)
+    body = await request.json()
+    try:
+        target_dsn, manifest = body["target_dsn"], body["manifest"]
+        timeout_s = float(body.get("timeout_s", 600))
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "target_dsn and manifest are required"},
+                            status_code=400)
+    import memory_index
+
+    try:
+        result = await memory_index.run_restore_check(
+            target_dsn=target_dsn, manifest=manifest, milvus=index.milvus,
+            fts_dir=_SERVER_DIR, embed=memory_index.embed_for_index,
+            model_name=rag_engine.get_model_name(), timeout_s=timeout_s,
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": _scrub(exc)}, status_code=500)
+    return JSONResponse(jsonable(result))
+
+
 async def _memory_sync_worker(state: MemorySyncState) -> None:
     """Run the memory sync loop for the life of the server."""
     first_tick = True
@@ -1312,6 +1344,7 @@ app = Starlette(
         Route("/index", index_endpoint, methods=["POST"]),
         Route("/watch", watch_endpoint, methods=["POST"]),
         Route("/timeline", timeline_endpoint, methods=["GET"]),
+        Route("/memory/restore-check", restore_check_endpoint, methods=["POST"]),
         Mount("/mcp", app=ProjectMiddleware(session_manager.handle_request)),
     ],
     lifespan=lifespan,

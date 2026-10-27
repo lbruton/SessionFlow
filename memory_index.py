@@ -259,6 +259,7 @@ class MemoryIndex:
         embed: Callable[[List[str]], Awaitable[List[List[float]]]] = embed_for_index,
         model_name: Optional[str] = None,
         milvus_uri: str = "",
+        spec: Optional[Any] = None,
     ) -> None:
         """Bind the store, the Milvus client and this machine's FTS file."""
         self.store = store
@@ -268,7 +269,7 @@ class MemoryIndex:
         self.embed = embed
         self.model_name = model_name or rag_engine.get_model_name()
         self.milvus_uri = milvus_uri
-        self.spec = rag_engine.MEMORIES_SPEC
+        self.spec = spec or rag_engine.MEMORIES_SPEC
         self.fts: Optional[MemoryFTS] = None
         self.milvus_blocked: Optional[str] = None
         self.last_tick: Optional[datetime] = None
@@ -533,3 +534,81 @@ class MemoryIndex:
         if not self.milvus_blocked:
             pending[MILVUS_CONSUMER] = len(await run_db(self.store.pending, MILVUS_CONSUMER))
         return {"records": len(state), "pending": pending}
+
+
+# --- Restore check ------------------------------------------------------------
+
+RESTORE_COLLECTION = "memories_restore"
+RESTORE_HOST = "restore"
+
+
+def _compare_restore(manifest: List[Dict[str, Any]], milvus_rows: Dict[str, Dict[str, Any]],
+                     fts_rows: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    expected = {m["memory_id"]: m for m in manifest if not m.get("deleted")}
+    missing, extra, changed = [], [], []
+    for name, rows in (("milvus", milvus_rows), ("fts", fts_rows)):
+        for mid, want in expected.items():
+            held = rows.get(mid)
+            if held is None:
+                missing.append(f"{name}:{mid}")
+            elif held["version"] != want["version"] or (
+                "content_hash" in held and held["content_hash"] != want["content_hash"]
+            ):
+                changed.append(f"{name}:{mid}")
+        extra.extend(f"{name}:{mid}" for mid in rows if mid not in expected)
+    return {"ok": not (missing or extra or changed), "expected": len(expected),
+            "missing": sorted(missing), "extra": sorted(extra), "changed": sorted(changed)}
+
+
+async def run_restore_check(*, target_dsn: str, manifest: List[Dict[str, Any]], milvus: Any,
+                            fts_dir: Path, embed: Callable[[List[str]], Awaitable[List[List[float]]]],
+                            model_name: str, timeout_s: float) -> Dict[str, Any]:
+    """Index a restored database into temporary targets and compare it with the dump manifest.
+
+    The rows are indexed into the ``memories_restore`` collection and a
+    temporary FTS file, never the production ones; both are removed
+    afterwards. The result is ``ok`` only when every live manifest record is
+    present in both with the same version and hash, with nothing extra,
+    before ``timeout_s`` passes.
+    """
+    import dataclasses
+
+    spec = dataclasses.replace(rag_engine.MEMORIES_SPEC, name=RESTORE_COLLECTION)
+    fts_path = Path(fts_dir) / f"{RESTORE_HOST}-memories_fts.db"
+    store = await run_db(MemoryStore, target_dsn)
+    index = MemoryIndex(store=store, milvus=milvus, fts_path=fts_path, host=RESTORE_HOST,
+                        embed=embed, model_name=model_name, spec=spec)
+    try:
+        await run_db(store.reset_acks)
+        try:
+            await asyncio.wait_for(_restore_index(index), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            return {"ok": False, "error": f"indexing did not finish within {timeout_s:g}s"}
+        if index.milvus_blocked:
+            return {"ok": False, "error": index.milvus_blocked}
+        milvus_rows = {
+            mid: {"version": r["version"]} for mid, r in (await run_db(index._milvus_rows)).items()
+        }
+        fts_rows = await run_db(index.fts.rows)
+        return _compare_restore(manifest, milvus_rows, fts_rows)
+    finally:
+        await run_db(_drop_quietly, milvus, RESTORE_COLLECTION)
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(f"{fts_path}{suffix}")
+            except FileNotFoundError:
+                pass
+        await run_db(store.close)
+
+
+async def _restore_index(index: MemoryIndex) -> None:
+    await index.start()
+    await index.rebuild()
+
+
+def _drop_quietly(milvus: Any, name: str) -> None:
+    try:
+        if milvus.has_collection(name):
+            milvus.drop_collection(name)
+    except Exception as exc:  # noqa: BLE001 - cleanup must not hide the check result
+        logger.warning("Could not drop %s: %s", name, rag_engine._scrub_exception(exc))
