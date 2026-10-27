@@ -252,3 +252,77 @@ def test_ensure_collection_persistent_drift_message_is_honest(monkeypatch):
         "restart (non-destructive) must be offered before the destructive "
         f"migrate-schema step; message was: {msg!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Drift compares field types and the vector dimension, not only names, and
+# works for any CollectionSpec. A same-named field whose type or dimension
+# changed rejects every insert, exactly like a missing field.
+# ---------------------------------------------------------------------------
+
+
+def _typed_fields(spec):
+    """describe_collection-shaped field dicts for every field of ``spec``."""
+    out = []
+    for f in spec.fields:
+        params = {}
+        if f.max_length is not None:
+            params["max_length"] = f.max_length
+        if f.dim is not None:
+            params["dim"] = f.dim
+        out.append({"name": f.name, "type": f.dtype, "params": params})
+    return out
+
+
+def test_no_drift_when_types_and_dim_match():
+    import rag_engine
+
+    client = MagicMock()
+    client.has_collection.return_value = True
+    client.describe_collection.return_value = {"fields": _typed_fields(rag_engine.SESSIONS_SPEC)}
+
+    assert rag_engine.detect_schema_drift(client) == []
+
+
+def test_drift_reports_changed_field_type():
+    from pymilvus import DataType
+
+    import rag_engine
+
+    fields = _typed_fields(rag_engine.SESSIONS_SPEC)
+    for f in fields:
+        if f["name"] == "turn_index":
+            f["type"] = DataType.VARCHAR
+            f["params"] = {"max_length": 64}
+    client = MagicMock()
+    client.has_collection.return_value = True
+    client.describe_collection.return_value = {"fields": fields}
+
+    assert rag_engine.detect_schema_drift(client) == ["type:turn_index"]
+
+
+def test_drift_reports_changed_vector_dimension():
+    import rag_engine
+
+    fields = _typed_fields(rag_engine.SESSIONS_SPEC)
+    for f in fields:
+        if f["name"] == "vector":
+            f["params"] = {"dim": 1024}
+    client = MagicMock()
+    client.has_collection.return_value = True
+    client.describe_collection.return_value = {"fields": fields}
+
+    assert rag_engine.detect_schema_drift(client) == ["dim:vector"]
+
+
+def test_drift_checks_the_spec_it_is_given():
+    import rag_engine
+
+    spec = rag_engine.MEMORIES_SPEC
+    fields = [f for f in _typed_fields(spec) if f["name"] != "generation"]
+    client = MagicMock()
+    client.has_collection.return_value = True
+    client.describe_collection.return_value = {"fields": fields}
+
+    assert rag_engine.detect_schema_drift(client, spec=spec) == ["missing:generation"]
+    client.describe_collection.assert_called_with("memories")

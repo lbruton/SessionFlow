@@ -84,3 +84,18 @@ def test_migrate_schema_invalidates_cache(monkeypatch):
     rag_engine.migrate_schema(client, db_path="/tmp/whatever.db")
 
     assert GlobalCache.schema.get(_ENDPOINT, "", rag_engine.COLLECTION_NAME) is None
+
+
+def test_invalidate_is_keyed_per_collection():
+    """Invalidating the memories schema leaves the sessions entry alone, and the reverse."""
+    import rag_engine
+
+    GlobalCache.schema.set(_ENDPOINT, "", "sessions", {"fields": []})
+    GlobalCache.schema.set(_ENDPOINT, "", "memories", {"fields": []})
+
+    rag_engine._invalidate_schema_cache(
+        _client_with_endpoint(_ENDPOINT), spec=rag_engine.MEMORIES_SPEC
+    )
+
+    assert GlobalCache.schema.get(_ENDPOINT, "", "memories") is None
+    assert GlobalCache.schema.get(_ENDPOINT, "", "sessions") is not None
