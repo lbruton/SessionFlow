@@ -55,6 +55,19 @@ def test_stored_metadata_by_provider_reads_both_stores(fake_milvus, fts_db):  # 
     assert 'provider == "codex"' in fake_milvus["queries"][0]["filter"]
 
 
+def test_stored_metadata_by_provider_raises_when_fts_read_fails(
+    fake_milvus, fts_db, monkeypatch,  # noqa: F811
+):
+    fake_milvus["add"](_row("c1::a", "/repo", provider="codex"))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic FTS failure")
+
+    monkeypatch.setattr(rag_engine._fts, "select_where", boom)
+    with pytest.raises(RuntimeError):
+        rag_engine.stored_metadata_by_provider("codex", ["timestamp"], db_path=fts_db)
+
+
 # --- cleanup.py restamp-codex -------------------------------------------------
 
 
@@ -123,8 +136,21 @@ def test_restamp_codex_dry_run_writes_nothing(cleanup_mod, restamp, capsys):
     assert _run(cleanup_mod, ["restamp-codex"]) == 0
     assert restamp["provider"] == "codex"
     assert restamp["update"] == []
-    out = capsys.readouterr().out.lower()
-    assert "dry run" in out and "1" in out
+    out = capsys.readouterr().out
+    assert "Indexed turns to rewrite:     1\n" in out
+    assert "dry run" in out.lower()
+
+
+def test_restamp_codex_fails_when_stored_metadata_read_fails(
+    cleanup_mod, restamp, monkeypatch, capsys,
+):
+    def boom(provider, fields, *, db_path=None):
+        raise RuntimeError("synthetic FTS failure")
+
+    monkeypatch.setattr(rag_engine, "stored_metadata_by_provider", boom)
+    assert _run(cleanup_mod, ["restamp-codex", "--apply", "--yes"]) == 1
+    assert restamp["update"] == []
+    assert "FTS" in capsys.readouterr().err
 
 
 def test_restamp_codex_apply_without_yes_refuses_before_any_read(cleanup_mod, restamp, capsys):

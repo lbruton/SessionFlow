@@ -591,9 +591,14 @@ def cmd_restamp_codex(args) -> int:
                 wanted[turn["doc_id"]] = values
 
     db_path = get_db_path()
-    stored = rag_engine.stored_metadata_by_provider(
-        "codex", ["timestamp", "git_branch"], db_path=db_path,
-    )
+    try:
+        stored = rag_engine.stored_metadata_by_provider(
+            "codex", ["timestamp", "git_branch"], db_path=db_path,
+        )
+    except RuntimeError as e:
+        print(f"{e}. Nothing written; re-run once the FTS sidecar is readable.",
+              file=sys.stderr)
+        return 1
     changes = {
         doc_id: values for doc_id, values in wanted.items()
         if doc_id in stored and any(

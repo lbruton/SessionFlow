@@ -2524,8 +2524,8 @@ def stored_metadata_by_provider(provider: str, fields: List[str], *,
     """Read ``fields`` for every turn of one provider from Milvus and the FTS sidecar.
 
     Each store contributes its own values, so a caller can tell when a prior
-    rewrite reached Milvus but failed in FTS. An FTS read failure is logged and
-    the Milvus values are returned.
+    rewrite reached Milvus but failed in FTS. An FTS read failure raises, since
+    Milvus values alone cannot show a stale FTS row.
 
     Args:
         provider: Provider whose turns to read.
@@ -2538,6 +2538,7 @@ def stored_metadata_by_provider(provider: str, fields: List[str], *,
 
     Raises:
         ValueError: ``fields`` names a column outside ``RETAGGABLE_FIELDS``.
+        RuntimeError: The FTS sidecar could not be read.
     """
     unknown = set(fields) - RETAGGABLE_FIELDS
     if unknown:
@@ -2561,7 +2562,7 @@ def stored_metadata_by_provider(provider: str, fields: List[str], *,
                 stored.setdefault(doc_id, []).append(
                     {field: value or "" for field, value in zip(fields, values)})
         except Exception as e:
-            logger.warning("FTS metadata read failed: %s", _scrub_exception(e))
+            raise RuntimeError(f"FTS metadata read failed: {_scrub_exception(e)}") from e
         finally:
             if conn is not None:
                 _fts.close_ephemeral(conn)
