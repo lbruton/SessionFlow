@@ -158,6 +158,10 @@ class CodexAdapter:
             except OSError:
                 continue
             pending_user = ""
+            # Codex Desktop can rewrite a rollout and restamp every line's
+            # top-level timestamp; event_msg started_at keeps the turn's real start.
+            task_started = ""
+            session_branch = ""
             for index, line in enumerate(lines):
                 try:
                     entry = json.loads(line)
@@ -165,6 +169,15 @@ class CodexAdapter:
                     continue
                 payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
                 record = payload if payload else entry
+                if entry.get("type") == "session_meta":
+                    git = payload.get("git") if isinstance(payload.get("git"), dict) else {}
+                    session_branch = git.get("branch") or session_branch
+                    continue
+                if entry.get("type") == "event_msg":
+                    started_at = payload.get("started_at")
+                    if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
+                        task_started = normalize_timestamp(started_at) or task_started
+                    continue
                 role = record.get("role")
                 content = _content_to_text(record.get("content") or record.get("text") or "")
                 if role == "user" and content:
@@ -195,10 +208,12 @@ class CodexAdapter:
                         "source_path": path,
                         "transcript_file": Path(path).name,
                         "turn_index": index,
-                        "timestamp": normalize_timestamp(
+                        "timestamp": task_started or normalize_timestamp(
                             entry.get("timestamp") or record.get("timestamp")
                         ) or source.timestamp,
-                        "git_branch": entry.get("git_branch") or record.get("git_branch", ""),
+                        "git_branch": (
+                            entry.get("git_branch") or record.get("git_branch") or session_branch
+                        ),
                         "chunk_type": "turn",
                         "project_root": source.project_root,
                     })
