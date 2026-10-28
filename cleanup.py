@@ -15,6 +15,7 @@ Usage:
     cleanup.py reembed     {plan|run|drive|status|verify}    # Re-embed every stored vector in place
     cleanup.py retag-project --from <old> --to <new> [--provider P] [--apply --yes]
                                                              # Move turns to a new project root
+    cleanup.py restamp-codex [--apply --yes]                 # Rewrite Codex turn times and branches
 """
 
 import argparse
@@ -549,6 +550,84 @@ def cmd_retag_project(args) -> int:
     return 0
 
 
+def _codex_adapter():
+    from provider_codex import CodexAdapter
+
+    return CodexAdapter()
+
+
+def cmd_restamp_codex(args) -> int:
+    """Rewrite ``timestamp`` and ``git_branch`` on indexed Codex turns, without re-embedding.
+
+    Re-parses every Codex rollout on disk from the start, compares each turn's
+    values with Milvus and the FTS sidecar, and rewrites the turns that differ
+    via ``rag_engine.update_row_metadata``. Turns whose rollout is gone are left
+    alone. Dry run by default; ``--apply`` refuses without ``--yes`` before any read.
+
+    Args:
+        args: Parsed argparse namespace with ``apply`` and ``yes``.
+
+    Returns:
+        ``0`` on success, ``1`` when the confirmation gate refuses or any turn
+        failed to rewrite.
+    """
+    if args.apply and not args.yes:
+        print(
+            "Refusing to apply: confirmation required. Re-run with --yes to "
+            "rewrite the affected turns.",
+            file=sys.stderr,
+        )
+        return 1
+
+    adapter = _codex_adapter()
+    wanted: dict = {}
+    for source in adapter.discover_sources():
+        for turn in adapter.parse_source(source, cursor=None).turns:
+            values = {
+                field: turn.get(field) or ""
+                for field in ("timestamp", "git_branch") if turn.get(field)
+            }
+            if values:
+                wanted[turn["doc_id"]] = values
+
+    db_path = get_db_path()
+    stored = rag_engine.stored_metadata_by_provider(
+        "codex", ["timestamp", "git_branch"], db_path=db_path,
+    )
+    changes = {
+        doc_id: values for doc_id, values in wanted.items()
+        if doc_id in stored and any(
+            store.get(field) != value
+            for store in stored[doc_id] for field, value in values.items()
+        )
+    }
+
+    print(f"Codex turns parsed from disk: {len(wanted)}")
+    print(f"Indexed Codex turns:          {len(stored)}")
+    print(f"Indexed turns to rewrite:     {len(changes)}")
+
+    if not args.apply:
+        print("\nDry run: nothing written. Re-run with --apply --yes to rewrite.")
+        return 0
+
+    milvus_failed = fts_failed = 0
+    for count, (doc_id, values) in enumerate(sorted(changes.items()), start=1):
+        result = rag_engine.update_row_metadata(doc_id, db_path=db_path, **values)
+        if not result.milvus_ok:
+            milvus_failed += 1
+        elif not result.fts_ok:
+            fts_failed += 1
+        if count % 1000 == 0:
+            print(f"  {count}/{len(changes)}", flush=True)
+
+    print(f"\nRewritten: {len(changes) - milvus_failed - fts_failed}")
+    if milvus_failed or fts_failed:
+        print(f"Milvus failures:     {milvus_failed}")
+        print(f"FTS-only failures:   {fts_failed} (re-run to converge)")
+        return 1
+    return 0
+
+
 def cmd_reembed(args) -> int:
     """Drive the in-place re-embed (see :mod:`reembed`).
 
@@ -732,6 +811,16 @@ def build_parser():
     p_retag.add_argument("--yes", "-y", action="store_true",
                          help="Confirm an --apply run (required; no interactive prompt)")
 
+    # restamp-codex
+    p_restamp = subparsers.add_parser(
+        "restamp-codex",
+        help="Rewrite Codex turn times and branches from the rollouts (dry-run by default)",
+    )
+    p_restamp.add_argument("--apply", action="store_true",
+                           help="Rewrite the turns; requires --yes")
+    p_restamp.add_argument("--yes", "-y", action="store_true",
+                           help="Confirm an --apply run (required; no interactive prompt)")
+
     # status
     p_status = subparsers.add_parser("status", help="Show provider/backfill/embedding status")
     p_status.add_argument("--project", help="Filter to a specific project root")
@@ -813,6 +902,7 @@ def main():
         "migrate-schema": cmd_migrate_schema,
         "sanitize": cmd_sanitize,
         "retag-project": cmd_retag_project,
+        "restamp-codex": cmd_restamp_codex,
         "status": cmd_status,
         "backfill": cmd_backfill,
         "reembed": cmd_reembed,

@@ -2407,7 +2407,7 @@ def _rewrite_fts_row(doc_id: str, row: dict, db_path: Optional[str]) -> bool:
 
 
 # Metadata a caller may rewrite in place without re-embedding.
-RETAGGABLE_FIELDS = frozenset({"project_root", "issue_ids"})
+RETAGGABLE_FIELDS = frozenset({"project_root", "issue_ids", "timestamp", "git_branch"})
 
 
 def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
@@ -2517,6 +2517,56 @@ def find_doc_ids_by_project_root(prefix: str, *, provider: Optional[str] = None,
                 _fts.close_ephemeral(conn)
 
     return dict(sorted(found.items()))
+
+
+def stored_metadata_by_provider(provider: str, fields: List[str], *,
+                                db_path: Optional[str] = None) -> Dict[str, List[dict]]:
+    """Read ``fields`` for every turn of one provider from Milvus and the FTS sidecar.
+
+    Each store contributes its own values, so a caller can tell when a prior
+    rewrite reached Milvus but failed in FTS. An FTS read failure is logged and
+    the Milvus values are returned.
+
+    Args:
+        provider: Provider whose turns to read.
+        fields: Column names held by both stores, such as ``timestamp``.
+        db_path: Optional Milvus DB path; also derives the FTS sidecar path.
+
+    Returns:
+        ``{doc_id: [values, ...]}`` with one ``{field: value}`` dict per store
+        that holds the turn.
+
+    Raises:
+        ValueError: ``fields`` names a column outside ``RETAGGABLE_FIELDS``.
+    """
+    unknown = set(fields) - RETAGGABLE_FIELDS
+    if unknown:
+        raise ValueError(f"Fields not readable here: {', '.join(sorted(unknown))}")
+
+    stored: Dict[str, List[dict]] = {}
+    filter_expr = f'provider == "{_escape_filter_scalar(provider)}"'
+    for batch in _query_batches(["doc_id", "provider", *fields],
+                                filter_expr=filter_expr, db_path=db_path):
+        for row in batch:
+            if row.get("provider") == provider:
+                stored.setdefault(row["doc_id"], []).append(
+                    {field: row.get(field) or "" for field in fields})
+
+    if db_path:
+        conn = None
+        try:
+            conn = _fts.connection(db_path)
+            for doc_id, *values in _fts.select_where(
+                    conn, ["doc_id", *fields], "provider = ?", (provider,)):
+                stored.setdefault(doc_id, []).append(
+                    {field: value or "" for field, value in zip(fields, values)})
+        except Exception as e:
+            logger.warning("FTS metadata read failed: %s", _scrub_exception(e))
+        finally:
+            if conn is not None:
+                _fts.close_ephemeral(conn)
+
+    return stored
 
 
 def get_rows_by_ids(ids: List[int], db_path: Optional[str] = None) -> List[dict]:
