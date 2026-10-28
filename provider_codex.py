@@ -193,6 +193,8 @@ class CodexAdapter:
                     ).hexdigest()[:16]
                     doc_id = f"codex:{source.logical_session_id}:{doc_hash}"
                     if doc_id in emitted:
+                        # A skipped turn still consumes its user message.
+                        pending_user = ""
                         continue
                     emitted.add(doc_id)
                     turns.append({
