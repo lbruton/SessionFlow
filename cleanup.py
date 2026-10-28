@@ -16,6 +16,7 @@ Usage:
     cleanup.py retag-project --from <old> --to <new> [--provider P] [--apply --yes]
                                                              # Move turns to a new project root
     cleanup.py restamp-codex [--apply --yes]                 # Rewrite Codex turn times and branches
+    cleanup.py prune-codex   [--apply --yes]                 # Delete Codex turns their rollout no longer yields
 """
 
 import argparse
@@ -633,6 +634,73 @@ def cmd_restamp_codex(args) -> int:
     return 0
 
 
+def cmd_prune_codex(args) -> int:
+    """Delete indexed Codex turns that a full parse of their rollout no longer produces.
+
+    Only sessions whose rollout is still on disk are touched; turns of a deleted
+    rollout stay searchable. The index is read before the rollouts, so a turn
+    indexed during the run is always in the parse. Dry run by default;
+    ``--apply`` refuses without ``--yes`` before any read.
+
+    Args:
+        args: Parsed argparse namespace with ``apply`` and ``yes``.
+
+    Returns:
+        ``0`` on success, ``1`` when the confirmation gate refuses, the FTS read
+        fails, or any delete failed in either store.
+    """
+    if args.apply and not args.yes:
+        print(
+            "Refusing to apply: confirmation required. Re-run with --yes to "
+            "delete the orphan turns.",
+            file=sys.stderr,
+        )
+        return 1
+
+    db_path = get_db_path()
+    try:
+        stored = rag_engine.stored_metadata_by_provider("codex", ["timestamp"], db_path=db_path)
+    except RuntimeError as e:
+        print(f"{e}. Nothing deleted; re-run once the FTS sidecar is readable.",
+              file=sys.stderr)
+        return 1
+
+    adapter = _codex_adapter()
+    parsed: set = set()
+    sessions: set = set()
+    for source in adapter.discover_sources():
+        sessions.add(source.logical_session_id)
+        for turn in adapter.parse_source(source, cursor=None).turns:
+            parsed.add(turn["doc_id"])
+
+    orphans = sorted(
+        doc_id for doc_id in stored
+        if doc_id not in parsed
+        and doc_id.removeprefix("codex:").rsplit(":", 1)[0] in sessions
+    )
+
+    print(f"Codex turns parsed from disk: {len(parsed)}")
+    print(f"Indexed Codex turns:          {len(stored)}")
+    print(f"Orphan turns to delete:       {len(orphans)}")
+
+    if not args.apply:
+        print("\nDry run: nothing deleted. Re-run with --apply --yes to delete.")
+        return 0
+
+    fts_failed = 0
+    for count, doc_id in enumerate(orphans, start=1):
+        if not rag_engine.delete_by_doc_id(doc_id, db_path=db_path).fts_ok:
+            fts_failed += 1
+        if count % 1000 == 0:
+            print(f"  {count}/{len(orphans)}", flush=True)
+
+    print(f"\nDeleted: {len(orphans) - fts_failed}")
+    if fts_failed:
+        print(f"FTS delete failures: {fts_failed} (re-run to converge)")
+        return 1
+    return 0
+
+
 def cmd_reembed(args) -> int:
     """Drive the in-place re-embed (see :mod:`reembed`).
 
@@ -826,6 +894,16 @@ def build_parser():
     p_restamp.add_argument("--yes", "-y", action="store_true",
                            help="Confirm an --apply run (required; no interactive prompt)")
 
+    # prune-codex
+    p_prune = subparsers.add_parser(
+        "prune-codex",
+        help="Delete Codex turns their rollout no longer yields (dry-run by default)",
+    )
+    p_prune.add_argument("--apply", action="store_true",
+                         help="Delete the turns; requires --yes")
+    p_prune.add_argument("--yes", "-y", action="store_true",
+                         help="Confirm an --apply run (required; no interactive prompt)")
+
     # status
     p_status = subparsers.add_parser("status", help="Show provider/backfill/embedding status")
     p_status.add_argument("--project", help="Filter to a specific project root")
@@ -908,6 +986,7 @@ def main():
         "sanitize": cmd_sanitize,
         "retag-project": cmd_retag_project,
         "restamp-codex": cmd_restamp_codex,
+        "prune-codex": cmd_prune_codex,
         "status": cmd_status,
         "backfill": cmd_backfill,
         "reembed": cmd_reembed,

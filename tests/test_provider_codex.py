@@ -126,6 +126,26 @@ def test_codex_turns_carry_session_meta_git_branch(tmp_path):
     assert turns and all(t["git_branch"] == "feature/x" for t in turns)
 
 
+def test_codex_resumed_parse_does_not_pair_skipped_user_with_next_answer(tmp_path):
+    """A turn skipped via the cursor must still consume its user message."""
+    from provider_codex import CodexAdapter
+
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _msg("user", "q1"),
+        _msg("assistant", "a1"),
+        _msg("assistant", "a2"),
+    ])
+    adapter = CodexAdapter(home=home)
+    source = adapter.discover_sources()[0]
+    full = adapter.parse_source(source, cursor=None).turns
+    assert [t["text"] for t in full] == ["User: q1\n\nAssistant: a1", "a2"]
+
+    resumed = adapter.parse_source(source, cursor={"emitted_ids": [full[0]["doc_id"]]}).turns
+
+    assert [(t["doc_id"], t["text"]) for t in resumed] == [(full[1]["doc_id"], "a2")]
+
+
 def test_codex_turns_fall_back_to_line_time_without_task_events(tmp_path):
     from provider_codex import CodexAdapter
 
