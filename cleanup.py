@@ -18,6 +18,7 @@ Usage:
                                                              # Move turns to a new project root
     cleanup.py restamp-codex [--apply --yes]                 # Rewrite Codex turn times and branches
     cleanup.py prune-codex   [--apply --yes]                 # Delete Codex turns their rollout no longer yields
+    cleanup.py dedupe-turns  [--apply --yes]                 # Repair Claude turns indexed mid-write
 """
 
 import argparse
@@ -702,6 +703,51 @@ def cmd_prune_codex(args) -> int:
     return 0
 
 
+def cmd_dedupe_turns(args) -> int:
+    """Repair Claude Code turns indexed mid-write (see :mod:`dedupe_turns`).
+
+    Dry run by default: prints the affected groups and writes nothing. ``--apply``
+    refuses without ``--yes`` before any read. Rebuilt turns are embedded in this
+    process, through the same embedding budget as ingestion.
+
+    Args:
+        args: Parsed argparse namespace with ``apply`` and ``yes``.
+
+    Returns:
+        ``0`` on success, ``1`` when the confirmation gate refuses or any delete
+        failed in FTS.
+    """
+    import dedupe_turns
+
+    if args.apply and not args.yes:
+        print(
+            "Refusing to apply: confirmation required. Re-run with --yes to "
+            "rebuild and delete the affected turns.",
+            file=sys.stderr,
+        )
+        return 1
+
+    db_path = get_db_path()
+    plan = dedupe_turns.plan(db_path=db_path)
+    print(f"Duplicate turn groups: {plan.duplicate_groups}")
+    print(f"User-only turns:       {plan.user_only_rows}")
+    print(f"Affected sessions:     {len(plan.affected_sessions)}")
+
+    if not args.apply:
+        print("\nDry run: nothing written. Re-run with --apply --yes to repair.")
+        return 0
+
+    result = dedupe_turns.apply(plan, db_path=db_path)
+    print(f"\nSessions with a transcript: {result.sessions_on_disk}")
+    print(f"Sessions without one:       {result.sessions_missing}")
+    print(f"Turns rebuilt:              {result.rebuilt_turns}")
+    print(f"Rows deleted (keep longest): {result.deleted_rows}")
+    if result.fts_failed:
+        print(f"FTS delete failures: {result.fts_failed} (re-run to converge)")
+        return 1
+    return 0
+
+
 def cmd_reembed(args) -> int:
     """Drive the in-place re-embed (see :mod:`reembed`).
 
@@ -974,6 +1020,16 @@ def build_parser():
     p_prune.add_argument("--yes", "-y", action="store_true",
                          help="Confirm an --apply run (required; no interactive prompt)")
 
+    # dedupe-turns
+    p_dedupe = subparsers.add_parser(
+        "dedupe-turns",
+        help="Repair Claude turns indexed mid-write (dry-run by default)",
+    )
+    p_dedupe.add_argument("--apply", action="store_true",
+                          help="Rebuild and delete the turns; requires --yes")
+    p_dedupe.add_argument("--yes", "-y", action="store_true",
+                          help="Confirm an --apply run (required; no interactive prompt)")
+
     # status
     p_status = subparsers.add_parser("status", help="Show provider/backfill/embedding status")
     p_status.add_argument("--project", help="Filter to a specific project root")
@@ -1069,6 +1125,7 @@ def main():
         "retag-project": cmd_retag_project,
         "restamp-codex": cmd_restamp_codex,
         "prune-codex": cmd_prune_codex,
+        "dedupe-turns": cmd_dedupe_turns,
         "status": cmd_status,
         "backfill": cmd_backfill,
         "reembed": cmd_reembed,
