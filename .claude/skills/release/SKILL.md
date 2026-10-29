@@ -2,7 +2,7 @@
 name: release
 description: Release workflow — version lock, worktree, bump, commit, PR, GitHub Release. Delegates to project overrides.
 allowed-tools: Bash, Read, Write, Edit, Grep, Glob
-library-version: ce6718eb297b
+library-version: 4e36a5fd51a7
 ---
 
 # Release — Universal Version Lock Workflow
@@ -269,9 +269,14 @@ git push origin patch/VERSION
 
 Create the PR targeting the appropriate branch.
 
-**Reviews (patch/release PRs):** apply the `codacy-review` and `coderabbit-review` labels.
-Small chore PRs (config/tooling, no runtime code) skip both and rely on the Copilot/Codex
-auto-reviews alone.
+**Reviews are on demand.** Copilot and CodeRabbit review a PR only when asked, and each
+review costs credits that scale with the diff size. Codacy runs static analysis on every push
+without a label.
+
+- **Patch/release PRs:** apply the `coderabbit-review` label, and request Copilot once the PR
+  is out of draft (Step 2).
+- **Chore PRs** (config, tooling, skill-library deploys, no runtime code): request neither.
+  Codex reviews them automatically. Request a bot review only when the user asks.
 
 CodeRabbit is **label-triggered**: the `coderabbit-review` label starts a review. A public
 repo with fewer than 10 stars is on the free OSS plan, which skips labelled PRs too ("fewer
@@ -280,8 +285,12 @@ PR comment once the PR is out of draft. A skipped PR still passes its required `
 check, so a green check is not evidence of a review. When CodeRabbit pauses on a busy branch
 ("Reviews paused"), comment `@coderabbitai resume`.
 
+Copilot does not answer an `@copilot` comment. Request it as a reviewer:
+`gh pr edit <number> --add-reviewer "@copilot"`. A repo ruleset with the
+`copilot_code_review` rule requests it on every PR; check before requesting it twice.
+
 ```bash
-gh pr create --base $TARGET_BRANCH --head patch/VERSION --draft --label "codacy-review" --label "coderabbit-review" \
+gh pr create --base $TARGET_BRANCH --head patch/VERSION --draft --label "coderabbit-review" \
   --title "vNEW_VERSION — [brief description]" \
   --body "$(cat <<'EOF'
 > **Draft — QA preview.** Merge to `$TARGET_BRANCH` after review.
@@ -300,7 +309,8 @@ EOF
 ### Step 2: PR Resolution (MANDATORY)
 
 1. Mark the PR ready (`gh pr ready <number>`); the `coderabbit-review` label requests the
-   CodeRabbit review. Wait for CI/Codacy scans to start
+   CodeRabbit review. Request Copilot with `gh pr edit <number> --add-reviewer "@copilot"`.
+   Wait for CI/Codacy scans to start
 2. Run `/pr-resolve` to monitor and resolve review threads
 3. Confirm the PR is clean — all checks passing, no unresolved threads
 
@@ -327,7 +337,7 @@ Read each referenced issue from Plane (`mcp__plane__workitem` (`action: "retriev
 ### Step 3: Create `dev → main` PR
 
 ```bash
-gh pr create --base main --head dev --label "codacy-review" --label "coderabbit-review" \
+gh pr create --base main --head dev --label "coderabbit-review" \
   --title "vLATEST_VERSION — [comprehensive title]" \
   --body "$(cat <<'EOF'
 ## Summary
