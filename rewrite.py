@@ -360,12 +360,16 @@ def _rewrite_batch(state: dict, rows: List[dict], budget, db_path: Optional[str]
         if not rag_engine._rewrite_fts_row(row["doc_id"], row, db_path):
             state["fts_retry"].append({"op": "rewrite", "id": int(row["id"]),
                                        "doc_id": row["doc_id"]})
-    for row in drop:
-        result = rag_engine.delete_by_doc_id(row["doc_id"], db_path=db_path)
+    # A resumed batch skips rows gone from Milvus, so each delete is checkpointed as
+    # pending before it runs and cleared only once FTS confirms it.
+    pending = [{"op": "delete", "id": int(row["id"]), "doc_id": row["doc_id"]} for row in drop]
+    state["fts_retry"].extend(pending)
+    _save_state(state)
+    for entry in pending:
+        result = rag_engine.delete_by_doc_id(entry["doc_id"], db_path=db_path)
         state["deleted"] += result.deleted
-        if not result.fts_ok:
-            state["fts_retry"].append({"op": "delete", "id": int(row["id"]),
-                                       "doc_id": row["doc_id"]})
+        if result.fts_ok:
+            state["fts_retry"].remove(entry)
     state["done"] += len(updated)
 
 

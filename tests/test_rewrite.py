@@ -310,6 +310,27 @@ def test_rows_gone_mid_run_count_as_missing(env):
     assert report.missing == 1
 
 
+def test_delete_interrupted_after_milvus_is_finished_next_run(env, monkeypatch):
+    rw = env["module"]
+    inner = rag_engine.delete_by_doc_id
+
+    def crash_after_milvus(doc_id, db_path=None):
+        env["rows"].pop(int(doc_id.split("-")[1]), None)
+        raise RuntimeError("process died before FTS delete")
+
+    monkeypatch.setattr(rag_engine, "delete_by_doc_id", crash_after_milvus)
+    first = rw.run(confirmed=True)
+    assert first.status == "error"
+    assert "doc-3" in env["fts"]
+    assert first.fts_pending == 1
+
+    monkeypatch.setattr(rag_engine, "delete_by_doc_id", inner)
+    second = rw.run(confirmed=True)
+    assert second.status == "done"
+    assert second.fts_pending == 0
+    assert "doc-3" not in env["fts"]
+
+
 def test_fts_rewrite_failure_is_retried_next_run(env):
     rw = env["module"]
     env["fts_fail"].add("doc-2")
