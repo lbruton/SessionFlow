@@ -375,17 +375,48 @@ def _key_padding_mask(attention_mask):
     return mx.broadcast_to(keys, (keys.shape[0], 1, length, length))
 
 
-def _embed_gemma(model, input_ids, attention_mask):
-    """Masked bidirectional forward for gemma3_text, mirroring Model.__call__.
+def _attention_masks(attention_mask, window: Optional[int]):
+    """Return ``(global_mask, local_mask)`` boolean SDPA masks for a gemma3 forward.
 
-    Same layers, dense projection, mean pooling and normalization as
-    mlx-embeddings, but padded keys are excluded from attention, so a
-    document's vector no longer depends on the other texts in its batch.
-    A batch of one has an all-True mask and matches the library output.
+    Global layers see every real key. Sliding layers also need ``|q - k| <= window``,
+    the inclusive bidirectional radius Hugging Face applies for EmbeddingGemma. A text
+    that fits inside the window gets one shared mask, so its output is unchanged.
     """
+    import mlx.core as mx
+
+    full = _key_padding_mask(attention_mask)
+    length = attention_mask.shape[-1]
+    if window is None or length - 1 <= window:
+        return full, full
+    positions = mx.arange(length)
+    band = mx.abs(positions[:, None] - positions[None, :]) <= window
+    return full, mx.logical_and(full, band[None, None, :, :])
+
+
+def _sliding_window(model) -> Optional[int]:
+    return getattr(model.model.config, "sliding_window", None)
+
+
+def _embed_gemma(model, input_ids, attention_mask):
+    """Masked bidirectional forward for gemma3_text, mirroring Gemma3Model and Model.__call__.
+
+    mlx-embeddings passes one mask to every layer. Here padded keys are excluded
+    everywhere, so a vector does not depend on its batch, and sliding layers keep
+    only keys inside the window (see ``_attention_masks``).
+    """
+    import mlx.core as mx
     from mlx_embeddings.models.base import mean_pooling, normalize_embeddings
 
-    out = model.model(input_ids, _key_padding_mask(attention_mask))
+    inner = model.model
+    global_mask, local_mask = _attention_masks(attention_mask, _sliding_window(model))
+    pattern = inner.config.sliding_window_pattern
+
+    h = inner.embed_tokens(input_ids)
+    h *= mx.array(inner.config.hidden_size ** 0.5, inner.embed_tokens.weight.dtype).astype(h.dtype)
+    for i, layer in enumerate(inner.layers):
+        is_global = i % pattern == pattern - 1
+        h = layer(h, global_mask if is_global else local_mask, None)
+    out = inner.norm(h)
     for dense in model.dense:
         out = dense(out)
     return normalize_embeddings(mean_pooling(out, attention_mask))
