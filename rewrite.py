@@ -96,6 +96,8 @@ class VerifyReport:
         min_cos: Lowest cosine seen (1.0 when nothing was checked).
         mean_cos: Mean cosine (1.0 when nothing was checked).
         threshold: Pass threshold used.
+        complete: False when the embedding budget stopped the check before the
+            whole sample was read.
     """
 
     checked: int
@@ -104,6 +106,7 @@ class VerifyReport:
     min_cos: float
     mean_cos: float
     threshold: float
+    complete: bool = True
 
 
 # --- Selection ---------------------------------------------------------------
@@ -232,15 +235,19 @@ def status() -> dict:
 
 
 def _append_documents(path: Path, rows: List[dict]) -> None:
-    """Append the old document and ``issue_ids`` of ``rows`` as JSON lines (0600)."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-                         reembed._FILE_MODE)
+    """Append the old document and ``issue_ids`` of ``rows`` as JSON lines (0600).
+
+    The file is synced before returning, so the backup reaches disk before the upsert.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, reembed._FILE_MODE)
     with os.fdopen(fd, "a") as fh:
         for row in rows:
             fh.write(json.dumps({
                 "id": int(row["id"]), "doc_id": row["doc_id"],
                 "document": row["document"], "issue_ids": row.get("issue_ids", ""),
             }) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
     os.chmod(path, reembed._FILE_MODE)
 
 
@@ -494,6 +501,7 @@ def verify(sample: int = 200, threshold: float = 0.9999,
     budget = get_embedding_budget()
     cosines: List[float] = []
     passed = unstripped = 0
+    complete = True
     try:
         for start in range(0, len(picked), 100):
             for row in rag_engine.get_rows_by_ids(picked[start:start + 100], db_path=db_path):
@@ -504,7 +512,7 @@ def verify(sample: int = 200, threshold: float = 0.9999,
                 unstripped += dirty
                 passed += (not dirty) and cos >= threshold
     except reembed._BudgetDenied:
-        pass
+        complete = False
 
     return VerifyReport(
         checked=len(cosines),
@@ -513,4 +521,5 @@ def verify(sample: int = 200, threshold: float = 0.9999,
         min_cos=min(cosines) if cosines else 1.0,
         mean_cos=sum(cosines) / len(cosines) if cosines else 1.0,
         threshold=threshold,
+        complete=complete,
     )

@@ -420,6 +420,34 @@ def test_verify_checks_strip_and_vectors(env):
     assert result.passed == 0
 
 
+def test_verify_reports_incomplete_when_budget_stops_it(env):
+    rw = env["module"]
+    rw.run(confirmed=True)
+    assert rw.verify(sample=10, seed=1).complete is True
+    env["budget"].paused = True
+    result = rw.verify(sample=10, seed=1)
+    assert result.complete is False
+
+
+def test_backups_are_synced_before_the_upsert(env, monkeypatch):
+    events = []
+    real_fsync = os.fsync
+    inner_upsert = rag_engine.upsert_rows
+
+    def fsync(fd):
+        events.append("fsync")
+        real_fsync(fd)
+
+    def upsert(rows, db_path=None):
+        events.append("upsert")
+        return inner_upsert(rows, db_path)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(rag_engine, "upsert_rows", upsert)
+    env["module"].run(confirmed=True, max_turns=2)
+    assert events[:3] == ["fsync", "fsync", "upsert"]
+
+
 # --- CLI ----------------------------------------------------------------------
 
 
@@ -460,6 +488,13 @@ def test_cli_drive_spawns_rewrite_chunks_until_done(env, monkeypatch):
     assert cleanup.cmd_rewrite(args) == 0
     assert len(calls) == 2
     assert calls[0][2:6] == ["rewrite", "run", "--yes", "--max-minutes"]
+
+
+def test_cli_verify_fails_when_incomplete(env):
+    env["module"].run(confirmed=True)
+    env["budget"].paused = True
+    cleanup, args = _parse(["rewrite", "verify"])
+    assert cleanup.cmd_rewrite(args) == 1
 
 
 def test_cli_plan_prints_counts(env, capsys):

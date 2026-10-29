@@ -826,7 +826,11 @@ def cmd_rewrite(args) -> int:
     print(f"Unstripped: {result.unstripped}")
     print(f"Min cos:    {result.min_cos:.6f}")
     print(f"Mean cos:   {result.mean_cos:.6f}")
-    return 0 if result.checked and result.passed == result.checked else 1
+    if not result.complete:
+        print("Note:       the embedding budget stopped the check; the sample is incomplete.",
+              file=sys.stderr)
+    ok = result.complete and result.checked and result.passed == result.checked
+    return 0 if ok else 1
 
 
 def _print_rewrite_report(report) -> None:
