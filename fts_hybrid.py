@@ -23,7 +23,7 @@ import logging
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set, Union
 
 logger = logging.getLogger("fts-hybrid")
 
@@ -241,27 +241,36 @@ class FTSIndex:
             )
         conn.commit()
 
-    def count_rows(self, conn: sqlite3.Connection, project_root: Optional[str] = None) -> int:
+    def count_rows(self, conn: sqlite3.Connection,
+                   project_root: Optional[Union[str, Sequence[str]]] = None) -> int:
         """Return the number of rows in the FTS table.
-
-        Runs `SELECT count(*) FROM {self.table_name}`, adding a
-        `WHERE project_root = ?` filter when `project_root` is supplied (the
-        turns_fts table stores project_root), so callers can read either the
-        global row count or a single project's count.
 
         Args:
             conn: the per-thread sqlite connection for this FTS index.
-            project_root: when provided, count only rows whose project_root matches.
+            project_root: when provided, count only rows whose project_root
+                equals it, or any of its values when it is a list.
 
         Returns:
             int: row count, optionally filtered by project_root.
         """
         sql = f"SELECT count(*) FROM {self.table_name}"
         params: tuple = ()
-        if project_root is not None:
+        if isinstance(project_root, str):
             sql += " WHERE project_root = ?"
             params = (project_root,)
+        elif project_root:
+            sql += f" WHERE project_root IN ({', '.join('?' for _ in project_root)})"
+            params = tuple(project_root)
         return int(conn.execute(sql, params).fetchone()[0])
+
+    def distinct_values(self, conn: sqlite3.Connection, column: str) -> List[str]:
+        """Return the distinct non-null values of a metadata column."""
+        if column not in self.metadata_columns:
+            raise ValueError(f"Unknown FTS column: {column!r}")
+        rows = conn.execute(
+            f"SELECT DISTINCT {column} FROM {self.table_name} WHERE {column} IS NOT NULL"
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def delete(self, conn: sqlite3.Connection, column: str, value):
         """Delete rows where column == value."""
@@ -289,7 +298,8 @@ class FTSIndex:
         Args:
             query: Search text
             n: Max results
-            filters: Dict of column -> value for exact-match filtering
+            filters: Dict of column -> value for exact-match filtering. A value
+                may be ``(op, operand)`` for a comparison or ``("in", values)``.
             db_path: Milvus DB path (used to derive FTS path)
 
         Returns:
@@ -313,7 +323,10 @@ class FTSIndex:
             for key, val in filters.items():
                 if val is None:
                     continue
-                if isinstance(val, tuple) and len(val) == 2:
+                if isinstance(val, tuple) and len(val) == 2 and val[0] == "in":
+                    where_parts.append(f"{key} IN ({', '.join('?' for _ in val[1])})")
+                    params.extend(val[1])
+                elif isinstance(val, tuple) and len(val) == 2:
                     op, operand = val
                     col = key.rsplit("_", 1)[0] if key.endswith(("_gte", "_lte", "_gt", "_lt")) else key
                     where_parts.append(f"{col} {op} ?")

@@ -12,6 +12,7 @@ from mcp import types
 
 import rag_engine
 import sanitize
+from project_scope import ProjectScope, resolve_project_scope
 from provider_adapters import (
     LEGAL_PROVIDERS,
     LEGAL_SORT_BY,
@@ -40,6 +41,22 @@ def get_current_project_root() -> str | None:
 def get_db_path() -> str:
     """Milvus URI — remote Standalone if SESSIONFLOW_MILVUS_URI is set, else local Lite."""
     return os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
+
+
+async def resolve_scope(arg: str | None, header_root: str | None, db_path: str) -> ProjectScope:
+    """Resolve a tool's project argument against the indexed roots.
+
+    The root lookup reads SQLite, so it runs off the event loop. ``'*'`` needs no lookup.
+    """
+    if arg == "*":
+        return ProjectScope(roots=None)
+    known = await asyncio.to_thread(rag_engine.known_project_roots, db_path)
+    return resolve_project_scope(arg, header_root, known)
+
+
+def _scope_line(scope: ProjectScope) -> str:
+    line = f"Scope: {scope.label()}"
+    return f"{line} ({scope.note})" if scope.note else line
 
 
 def _validate_enum_arg(name: str, value, legal_values) -> "types.TextContent | None":
@@ -76,12 +93,12 @@ def _format_signals(r: dict) -> str:
     return " · ".join(parts) if parts else "Listing"
 
 
-def format_results(results: list[dict]) -> str:
-    """Format search results as markdown."""
+def format_results(results: list[dict], scope: ProjectScope | None = None) -> str:
+    """Format search results as markdown, opening with the scope line when ``scope`` is set."""
+    output = [_scope_line(scope), ""] if scope is not None else []
     if not results:
-        return "No results found."
+        return "\n".join(output + ["No results found."])
 
-    output = []
     for i, r in enumerate(results, 1):
         # Header with metadata
         session_id = r.get("session_id", "")
@@ -152,9 +169,10 @@ def format_turns(results: list[dict]) -> str:
     return "\n".join(output)
 
 
-def format_stats(stats: dict, db_path: str) -> str:
-    """Format index statistics."""
-    lines = [
+def format_stats(stats: dict, db_path: str, scope: ProjectScope | None = None) -> str:
+    """Format index statistics, opening with the scope line when ``scope`` is set."""
+    lines = [_scope_line(scope), ""] if scope is not None else []
+    lines += [
         f"**Total Turns:** {stats['total_turns']}",
         f"**Sessions:** {stats['sessions']}",
     ]
@@ -283,7 +301,7 @@ def build_search_all_sessions_schema() -> dict:
             },
             "project_root": {
                 "type": "string",
-                "description": "Project path to search, or '*' for every project. Default: the current project.",
+                "description": "Project to search: a path (its subfolders and worktrees are included), a folder name such as 'CoWork', or '*' for every project. Default: the current project. A name or path with no indexed turns searches every project, and the Scope line says so.",
             },
             "provider": {
                 "type": "string",
@@ -789,29 +807,21 @@ def register_tools(server: Server):
                     return [types.TextContent(
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
+                scope = await resolve_scope(None, current_project, db)
                 # search_async runs on the mlx-embed thread; a blocking search()
                 # here would run MLX on the event loop and race backfill.
                 results = await rag_engine.search_async(
                     arguments.get("query") or "",
                     arguments.get("n", 5),
                     session_id=session_id,
-                    project_root=current_project,
+                    project_root=scope.filter_value(),
                     sort_by=sort_by_arg,
                     issue_id=issue_id_arg,
                     db_path=db,
                 )
-                return [types.TextContent(type="text", text=format_results(results))]
+                return [types.TextContent(type="text", text=format_results(results, scope))]
 
             elif name == "search_all_sessions":
-                # project_root scoping: default=current project, "*"=all projects
-                pr_arg = arguments.get("project_root")
-                if pr_arg == "*":
-                    pr = None  # cross-project search
-                elif pr_arg:
-                    pr = pr_arg  # explicit project
-                else:
-                    pr = current_project  # default: current project
-
                 provider_arg = arguments.get("provider")
                 source_kind_arg = arguments.get("source_kind")
                 sort_by_arg = arguments.get("sort_by", "hybrid")
@@ -829,11 +839,12 @@ def register_tools(server: Server):
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
 
+                scope = await resolve_scope(arguments.get("project_root"), current_project, db)
                 results = await rag_engine.search_async(
                     arguments.get("query") or "",
                     arguments.get("n", 10),
                     git_branch=arguments.get("git_branch"),
-                    project_root=pr,
+                    project_root=scope.filter_value(),
                     sort_by=sort_by_arg,
                     date_from=arguments.get("date_from"),
                     date_to=arguments.get("date_to"),
@@ -843,8 +854,12 @@ def register_tools(server: Server):
                     db_path=db,
                 )
                 if arguments.get("format") == "json":
-                    return [types.TextContent(type="text", text=_json_text({"results": results}))]
-                return [types.TextContent(type="text", text=format_results(results))]
+                    payload = {
+                        "scope": {"roots": scope.filter_value(), "note": scope.note},
+                        "results": results,
+                    }
+                    return [types.TextContent(type="text", text=_json_text(payload))]
+                return [types.TextContent(type="text", text=format_results(results, scope))]
 
             elif name == "get_turns":
                 results = rag_engine.get_turns(
@@ -856,11 +871,12 @@ def register_tools(server: Server):
                 return [types.TextContent(type="text", text=format_turns(results))]
 
             elif name == "get_session_stats":
+                scope = await resolve_scope(None, current_project, db)
                 stats = rag_engine.get_stats(
-                    project_root=current_project,
+                    project_root=scope.filter_value(),
                     db_path=db,
                 )
-                return [types.TextContent(type="text", text=format_stats(stats, db))]
+                return [types.TextContent(type="text", text=format_stats(stats, db, scope))]
 
             elif name == "get_issue_timeline":
                 if not is_valid_issue_token(arguments.get("issue_id")):
