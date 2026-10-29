@@ -59,6 +59,7 @@ from provider_adapters import (
     is_valid_issue_token,
     path_has_prefix,
 )
+import boilerplate
 import secret_redaction
 
 RECENCY_WEIGHT_DEFAULT = 0.3
@@ -881,6 +882,58 @@ def _redaction_status() -> Dict:
     return {"enabled": enabled, "mode": mode, "counts": counts}
 
 
+# Process-lifetime counts of stripped boilerplate blocks per rule, and of turns
+# dropped because nothing searchable was left. Read by get_stats under "boilerplate".
+_boilerplate_counters: Dict[str, int] = {}
+_boilerplate_dropped = 0
+_boilerplate_lock = threading.Lock()
+
+# Same floor as transcript_parser._build_turn: shorter text holds nothing to search.
+MIN_TURN_CHARS = 20
+
+
+def _boilerplate_enabled() -> bool:
+    raw = os.getenv("SESSIONFLOW_STRIP_BOILERPLATE")
+    return True if raw is None else raw.strip().lower() in _REDACT_TRUE
+
+
+def _apply_boilerplate(turns: List[Dict]) -> List[Dict]:
+    """Strip harness boilerplate from ``turns`` in place and return the turns worth keeping.
+
+    Runs before redaction and issue-ID extraction, so neither sees harness text. A turn
+    that stripping leaves under ``MIN_TURN_CHARS`` is dropped; other turns keep their
+    length. ``SESSIONFLOW_STRIP_BOILERPLATE=off`` disables it.
+    """
+    global _boilerplate_dropped
+    if not _boilerplate_enabled():
+        return turns
+    kept: List[Dict] = []
+    rule_counts: Dict[str, int] = {}
+    for turn in turns:
+        clean, removed = boilerplate.strip(turn.get("text", ""))
+        for rule, count in removed.items():
+            rule_counts[rule] = rule_counts.get(rule, 0) + count
+        if removed:
+            turn["text"] = clean
+            if len(clean.strip()) < MIN_TURN_CHARS:
+                continue
+        kept.append(turn)
+    with _boilerplate_lock:
+        for rule, count in rule_counts.items():
+            _boilerplate_counters[rule] = _boilerplate_counters.get(rule, 0) + count
+        _boilerplate_dropped += len(turns) - len(kept)
+    return kept
+
+
+def _boilerplate_status() -> Dict:
+    with _boilerplate_lock:
+        return {
+            "enabled": _boilerplate_enabled(),
+            "counts": dict(_boilerplate_counters),
+            "dropped_turns": _boilerplate_dropped,
+        }
+
+
 def _scrub_exception(exc: BaseException) -> str:
     """Return the exception text with any secret value redacted (AC-17)."""
     redacted, _ = secret_redaction.redact(str(exc), mode="enforce")
@@ -931,6 +984,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
                 logger.warning("Dedup check failed for doc_id %s: %s", doc_id, _scrub_exception(e))
 
     new_turns = [t for t in turns if t["doc_id"] not in existing_ids]
+    new_turns = _apply_boilerplate(new_turns)
     if not new_turns:
         return 0
 
@@ -2050,6 +2104,7 @@ def get_stats(project_root: Optional[ProjectRoots] = None,
                 "by_type": {},
                 "providers": {},
                 "redaction": _redaction_status(),
+                "boilerplate": _boilerplate_status(),
             }
 
     # Query for breakdowns (capped by Milvus offset limit)
@@ -2091,6 +2146,7 @@ def get_stats(project_root: Optional[ProjectRoots] = None,
 
     # Operator-facing redaction status + durable per-rule counts (AC-10).
     stats["redaction"] = _redaction_status()
+    stats["boilerplate"] = _boilerplate_status()
     return stats
 
 
