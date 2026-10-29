@@ -38,6 +38,28 @@ def get_current_project_root() -> str | None:
     return _current_project_root.get()
 
 
+SCOPE_INSTRUCTION = (
+    "Pass your current working directory as 'project_root', or '*' to search "
+    "every project. Without either, the call is refused unless the client names "
+    "the project."
+)
+
+PROJECT_ROOT_PROPERTY = {
+    "type": "string",
+    "description": (
+        "Pass your current working directory. A path covers its subfolders and "
+        "worktrees, a folder name such as 'CoWork' matches by name, and '*' searches "
+        "every project. A name or path with no indexed turns searches every project, "
+        "and the Scope line says so."
+    ),
+}
+
+UNNAMED_SCOPE_ERROR = (
+    "No project named. Pass project_root as your current working directory, "
+    "or '*' to search every project."
+)
+
+
 def get_db_path() -> str:
     """Milvus URI — remote Standalone if SESSIONFLOW_MILVUS_URI is set, else local Lite."""
     return os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
@@ -46,10 +68,13 @@ def get_db_path() -> str:
 async def resolve_scope(arg: str | None, header_root: str | None, db_path: str) -> ProjectScope:
     """Resolve a tool's project argument against the indexed roots.
 
-    The root lookup reads SQLite, so it runs off the event loop. ``'*'`` needs no lookup.
+    The root lookup reads SQLite, so it runs off the event loop. ``'*'`` and an
+    unnamed scope need no lookup.
     """
     if arg == "*":
         return ProjectScope(roots=None)
+    if not (arg or "").strip() and not (header_root or "").strip():
+        return resolve_project_scope(None, None, ())
     known = await asyncio.to_thread(rag_engine.known_project_roots, db_path)
     return resolve_project_scope(arg, header_root, known)
 
@@ -299,10 +324,7 @@ def build_search_all_sessions_schema() -> dict:
                 "type": "string",
                 "description": "Return only turns from this git branch, for example 'develop'.",
             },
-            "project_root": {
-                "type": "string",
-                "description": "Project to search: a path (its subfolders and worktrees are included), a folder name such as 'CoWork', or '*' for every project. Default: the current project. A name or path with no indexed turns searches every project, and the Scope line says so.",
-            },
+            "project_root": PROJECT_ROOT_PROPERTY,
             "provider": {
                 "type": "string",
                 "description": "Return only turns from this provider, for example 'codex', 'opencode' or 'antigravity_cli'.",
@@ -586,9 +608,9 @@ def register_tools(server: Server):
                 name="search_session",
                 description=(
                     "Return past turns (discussions, decisions, code, errors) that match "
-                    "'query', from the current project. Without project context, search "
-                    "every project. Omit 'query' to list the most recent turns, newest "
-                    "first. Call search_all_sessions to search another project or every project."
+                    "'query'. " + SCOPE_INSTRUCTION + " Omit 'query' to list the most "
+                    "recent turns, newest first. Call search_all_sessions for branch, "
+                    "provider, date or issue filters."
                 ),
                 inputSchema={
                     "type": "object",
@@ -604,8 +626,9 @@ def register_tools(server: Server):
                         },
                         "session_id": {
                             "type": "string",
-                            "description": "Session ID from a prior search result. Restricts the search to that one session. The server cannot see the live session ID, so there is no 'current session' value.",
+                            "description": "Session ID from a prior search result. Restricts the search to that one session, so no project is needed. The server cannot see the live session ID, so there is no 'current session' value.",
                         },
+                        "project_root": PROJECT_ROOT_PROPERTY,
                         "sort_by": {
                             "type": "string",
                             "enum": ["relevance", "recency", "hybrid"],
@@ -624,11 +647,10 @@ def register_tools(server: Server):
                 name="search_all_sessions",
                 description=(
                     "Return past turns that match 'query', filtered by project, git "
-                    "branch, provider, date range or issue ID. The default scope is the "
-                    "current project; pass project_root='*' to search every project. Omit "
-                    "'query' to list the most recent turns, newest first, to recall recent "
-                    "context. Call get_turns with a result's session_id and turn_index to "
-                    "read a hit in context."
+                    "branch, provider, date range or issue ID. " + SCOPE_INSTRUCTION + " "
+                    "Omit 'query' to list the most recent turns, newest first, to recall "
+                    "recent context. Call get_turns with a result's session_id and "
+                    "turn_index to read a hit in context."
                 ),
                 inputSchema=build_search_all_sessions_schema(),
             ),
@@ -662,12 +684,12 @@ def register_tools(server: Server):
             types.Tool(
                 name="get_session_stats",
                 description=(
-                    "Return turn, session, branch and provider counts for the current "
-                    "project, and the index location. Takes no arguments."
+                    "Return turn, session, branch and provider counts for a project, "
+                    "and the index location. " + SCOPE_INSTRUCTION
                 ),
                 inputSchema={
                     "type": "object",
-                    "properties": {},
+                    "properties": {"project_root": PROJECT_ROOT_PROPERTY},
                     "required": [],
                 },
             ),
@@ -807,7 +829,9 @@ def register_tools(server: Server):
                     return [types.TextContent(
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
-                scope = await resolve_scope(None, current_project, db)
+                scope = await resolve_scope(arguments.get("project_root"), current_project, db)
+                if scope.unnamed and not session_id:
+                    return [types.TextContent(type="text", text=UNNAMED_SCOPE_ERROR)]
                 # search_async runs on the mlx-embed thread; a blocking search()
                 # here would run MLX on the event loop and race backfill.
                 results = await rag_engine.search_async(
@@ -840,6 +864,8 @@ def register_tools(server: Server):
                         text="issue_id must be a valid issue token like SESF-25")]
 
                 scope = await resolve_scope(arguments.get("project_root"), current_project, db)
+                if scope.unnamed:
+                    return [types.TextContent(type="text", text=UNNAMED_SCOPE_ERROR)]
                 results = await rag_engine.search_async(
                     arguments.get("query") or "",
                     arguments.get("n", 10),
@@ -871,7 +897,9 @@ def register_tools(server: Server):
                 return [types.TextContent(type="text", text=format_turns(results))]
 
             elif name == "get_session_stats":
-                scope = await resolve_scope(None, current_project, db)
+                scope = await resolve_scope(arguments.get("project_root"), current_project, db)
+                if scope.unnamed:
+                    return [types.TextContent(type="text", text=UNNAMED_SCOPE_ERROR)]
                 stats = rag_engine.get_stats(
                     project_root=scope.filter_value(),
                     db_path=db,
