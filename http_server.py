@@ -1456,9 +1456,11 @@ mcp_server = Server(
     "sessionflow",
     instructions=(
         "SessionFlow searches past conversation turns from Claude Code, Codex, OpenCode "
-        "and Antigravity. To recall recent context, call search_all_sessions without "
-        "'query'; it lists the newest turns of the current project first. Pass "
-        "project_root='*' to search every project. Results blend relevance and recency "
+        "and Antigravity. Pass your current working directory as project_root on "
+        "search_all_sessions, search_session and get_session_stats, or '*' to search "
+        "every project; a call that names no project is refused. To recall recent "
+        "context, call search_all_sessions without 'query'; it lists the newest turns "
+        "first. Results blend relevance and recency "
         "by default; pass sort_by='relevance' or 'recency' to change that. To read a hit "
         "in context, call get_turns with its session_id and turn_index. The server cannot "
         "see the live session ID, so pass session_id only to pin a session from a prior result. "

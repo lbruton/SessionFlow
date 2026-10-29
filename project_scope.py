@@ -18,10 +18,12 @@ class ProjectScope:
     Attributes:
         roots: Sorted ``project_root`` values to match, or None for every project.
         note: Why the scope differs from the argument, or an empty string.
+        unnamed: True when neither the argument nor the header names a project.
     """
 
     roots: Optional[Tuple[str, ...]]
     note: str = ""
+    unnamed: bool = False
 
     def filter_value(self) -> Optional[List[str]]:
         """Return the roots as a list for the engine filters, or None for every project."""
@@ -59,7 +61,8 @@ def resolve_project_scope(arg: Optional[str], header_root: Optional[str],
     A path covers its indexed root and subfolders; a path inside a worktree folder
     resolves to its repository first, and an unindexed path to its nearest indexed
     parent. A bare name matches root basenames case-insensitively. A miss covers
-    every project and says why in ``note``.
+    every project and says why in ``note``. With neither an argument nor a header,
+    the scope is ``unnamed``.
 
     Args:
         arg: The caller's ``project_root`` argument.
@@ -73,7 +76,7 @@ def resolve_project_scope(arg: Optional[str], header_root: Optional[str],
         return ProjectScope(roots=None)
     target = (arg or "").strip() or (header_root or "").strip()
     if not target:
-        return ProjectScope(roots=None, note="no current project")
+        return ProjectScope(roots=None, note="no current project", unnamed=True)
     known = sorted(set(known_roots))
 
     if target.startswith("/"):

@@ -117,7 +117,7 @@ def test_tool_default_sort_by_is_hybrid(monkeypatch, tool_name):
         return []
 
     monkeypatch.setattr(tools.rag_engine, "search", _spy)
-    _call_tool(tools, tool_name, {"query": "x"})
+    _call_tool(tools, tool_name, {"query": "x", "project_root": "*"})
     assert captured["sort_by"] == "hybrid"
 
 

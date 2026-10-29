@@ -375,7 +375,8 @@ def test_tool_allows_missing_query(monkeypatch, tool_name):
     monkeypatch.setattr(tools, "get_current_project_root", lambda: None)
 
     _, call_tool = _tool_schemas()
-    result = asyncio.run(call_tool(tool_name, {}))  # no query supplied
+    # No query supplied; '*' names the scope, since an unnamed scope is refused.
+    result = asyncio.run(call_tool(tool_name, {"project_root": "*"}))
 
     # Engine was invoked with an empty (not missing/KeyError) query, and the
     # handler returned a normal text payload rather than an error.
