@@ -87,6 +87,21 @@ def test_claude_home_is_never_sent(claude_home):
     assert headers == {}
 
 
+def test_claude_home_inside_a_git_repo_is_never_sent(tmp_path):
+    home = _git_repo(tmp_path / "home")
+    config = home / "dot-claude"
+    config.mkdir()
+    headers = _run(config, config, SESSIONFLOW_CLAUDE_HOME=str(config))
+    assert headers == {}
+
+
+def test_control_characters_are_json_escaped(tmp_path, claude_home):
+    folder = tmp_path / "tab\there\nline"
+    folder.mkdir()
+    headers = _run(folder.resolve(), claude_home)
+    assert headers == {"X-Project-Root": str(folder.resolve())}
+
+
 def test_path_is_json_escaped(tmp_path, claude_home):
     folder = tmp_path / 'quo"te\\dir'
     folder.mkdir()

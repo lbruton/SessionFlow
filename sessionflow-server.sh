@@ -646,7 +646,8 @@ do_mcp_bridge_status() {
 }
 
 do_install_headers_helper() {
-    install -d "$(dirname "$HEADERS_HELPER_PATH")"
+    # mkdir keeps the mode of an existing folder; GNU install -d resets it.
+    mkdir -p "$(dirname "$HEADERS_HELPER_PATH")"
     install -m 755 "$HEADERS_HELPER_SOURCE" "$HEADERS_HELPER_PATH"
     echo "[sessionflow] Header helper installed at $HEADERS_HELPER_PATH" >&2
     echo "[sessionflow] Re-run after every change to mcp-headers-helper.sh." >&2

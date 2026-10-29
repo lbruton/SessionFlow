@@ -22,14 +22,20 @@ dir="${CLAUDE_PROJECT_DIR:-}"
 [ -n "$dir" ] || dir=$(parent_cwd)
 [ -n "$dir" ] || dir=$(pwd)
 
+# The config folder is never a project, even inside a git repo such as a
+# versioned home folder, so it is checked before the git lookup.
+if [ "$dir" = "$claude_home" ]; then
+    echo "{}"
+    exit 0
+fi
+
 root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || echo "$dir")
 
-# "/" would scope searches to the bucket of sessions with no project, and the
-# config folder is never a project.
+# "/" would scope searches to the bucket of sessions with no project.
 if [ -z "$root" ] || [ "$root" = "/" ] || [ "$root" = "$claude_home" ]; then
     echo "{}"
     exit 0
 fi
 
-escaped=$(printf '%s' "$root" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
-echo "{\"X-Project-Root\": \"$escaped\"}"
+python3 -c 'import json, sys; print(json.dumps({"X-Project-Root": sys.argv[1]}))' "$root" 2>/dev/null \
+    || echo "{}"
