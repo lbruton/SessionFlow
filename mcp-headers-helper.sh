@@ -17,17 +17,29 @@ parent_cwd() {
     printf '%b' "$name"
 }
 
-claude_home="${SESSIONFLOW_CLAUDE_HOME:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"
+strip_slashes() {
+    local path="$1"
+    while [ "$path" != "/" ] && [ "${path%/}" != "$path" ]; do
+        path="${path%/}"
+    done
+    printf '%s' "$path"
+}
+
+claude_home=$(strip_slashes "${SESSIONFLOW_CLAUDE_HOME:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}")
 dir="${CLAUDE_PROJECT_DIR:-}"
 [ -n "$dir" ] || dir=$(parent_cwd)
 [ -n "$dir" ] || dir=$(pwd)
+dir=$(strip_slashes "$dir")
 
 # The config folder is never a project, even inside a git repo such as a
-# versioned home folder, so it is checked before the git lookup.
-if [ "$dir" = "$claude_home" ]; then
-    echo "{}"
-    exit 0
-fi
+# versioned home folder, so it is checked before the git lookup. Claude Desktop
+# starts each session in a spares/ folder and enters the project after this runs.
+case "$dir" in
+    "$claude_home" | "$claude_home/spares" | "$claude_home/spares/"*)
+        echo "{}"
+        exit 0
+        ;;
+esac
 
 root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || echo "$dir")
 

@@ -95,6 +95,65 @@ def test_claude_home_inside_a_git_repo_is_never_sent(tmp_path):
     assert headers == {}
 
 
+def _spare(config: Path) -> Path:
+    spare = config / "spares" / "spare-Qexv1K"
+    spare.mkdir(parents=True)
+    return spare.resolve()
+
+
+def test_desktop_spare_folder_is_never_sent(claude_home):
+    spare = _spare(claude_home)
+    headers = _run(spare, claude_home, SESSIONFLOW_CLAUDE_HOME=str(claude_home))
+    assert headers == {}
+
+
+def test_desktop_spare_folder_as_project_dir_is_never_sent(tmp_path, claude_home):
+    spare = _spare(claude_home)
+    repo = _git_repo(tmp_path / "repo")
+    headers = _run(
+        repo, claude_home, SESSIONFLOW_CLAUDE_HOME=str(claude_home), CLAUDE_PROJECT_DIR=str(spare)
+    )
+    assert headers == {}
+
+
+def test_desktop_spare_folder_inside_a_git_repo_is_never_sent(tmp_path):
+    home = _git_repo(tmp_path / "home")
+    config = home / "dot-claude"
+    spare = _spare(config)
+    headers = _run(spare, config, SESSIONFLOW_CLAUDE_HOME=str(config))
+    assert headers == {}
+
+
+def test_claude_home_with_trailing_slash_matches_spare_folder(claude_home):
+    spare = _spare(claude_home)
+    headers = _run(spare, claude_home, SESSIONFLOW_CLAUDE_HOME=f"{claude_home}//")
+    assert headers == {}
+
+
+def test_project_dir_with_trailing_slash_matches_claude_home(claude_home):
+    headers = _run(
+        claude_home,
+        claude_home,
+        SESSIONFLOW_CLAUDE_HOME=str(claude_home),
+        CLAUDE_PROJECT_DIR=f"{claude_home}/",
+    )
+    assert headers == {}
+
+
+def test_spares_folder_outside_claude_home_is_sent(tmp_path, claude_home):
+    folder = tmp_path / "spares" / "spare-abc"
+    folder.mkdir(parents=True)
+    headers = _run(folder.resolve(), claude_home, SESSIONFLOW_CLAUDE_HOME=str(claude_home))
+    assert headers == {"X-Project-Root": str(folder.resolve())}
+
+
+def test_sibling_of_spares_in_claude_home_prefix_is_sent(tmp_path, claude_home):
+    folder = claude_home / "spares-archive"
+    folder.mkdir()
+    headers = _run(folder.resolve(), claude_home, SESSIONFLOW_CLAUDE_HOME=str(claude_home))
+    assert headers == {"X-Project-Root": str(folder.resolve())}
+
+
 def test_control_characters_are_json_escaped(tmp_path, claude_home):
     folder = tmp_path / "tab\there\nline"
     folder.mkdir()
