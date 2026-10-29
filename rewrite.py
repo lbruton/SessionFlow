@@ -405,7 +405,8 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
         return RewriteReport(status="refused", message="confirmation required (--yes)")
     db_path = db_path or reembed._db_path()
 
-    state = None if restart else _load_state()
+    previous = _load_state() or {}
+    state = None if restart else previous
     if state and state.get("run_id"):
         if state.get("model_name") != rag_engine.get_model_name():
             return _report(state, "refused",
@@ -419,6 +420,9 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
         worklist, counts = _scan(db_path)
         reembed._write_private_atomic(_worklist_path(), json.dumps(worklist))
         state = _new_state(worklist, counts)
+        # A fresh scan reads Milvus only, so an FTS row orphaned by an earlier run is
+        # reachable only through that run's pending retries.
+        state["fts_retry"] = list(previous.get("fts_retry", []))
         state["memory_generation"] = reembed._reembed_memories()
 
     state["status"] = "running"

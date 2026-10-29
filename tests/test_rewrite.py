@@ -331,6 +331,16 @@ def test_delete_interrupted_after_milvus_is_finished_next_run(env, monkeypatch):
     assert "doc-3" not in env["fts"]
 
 
+def test_restart_keeps_pending_fts_retries(env):
+    rw = env["module"]
+    env["delete_fts_fail"].add("doc-3")
+    assert rw.run(confirmed=True).fts_pending == 1
+    env["delete_fts_fail"].clear()
+    report = rw.run(confirmed=True, restart=True)
+    assert report.fts_pending == 0
+    assert "doc-3" not in env["fts"]
+
+
 def test_fts_rewrite_failure_is_retried_next_run(env):
     rw = env["module"]
     env["fts_fail"].add("doc-2")
