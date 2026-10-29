@@ -32,11 +32,11 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 | `search_all_sessions` | Turns that match a query, with `project_root`, `git_branch`, `provider`, `date_from`, `date_to` and `issue_id` filters. |
 | `get_turns` | The turns around one turn of a session. Requires `session_id` and `turn_index` from a search result. |
 | `get_session_stats` | Turn, session, branch and provider counts for one project, or for the index with `"*"`. |
-
-`search_session`, `search_all_sessions` and `get_session_stats` take `project_root`: a path, a folder name such as `CoWork`, or `"*"` for every project. The tool descriptions ask the model to pass its working directory. A client can also name the project in the `X-Project-Root` header. When neither names a project, the tool refuses the call and asks for `project_root`.
 | `get_issue_timeline` | Every turn that mentions an issue ID, oldest first. Requires `issue_id`. |
 | `cleanup_sessions` | Deletes turns by age, session ID or git branch, across every project. |
 | `sanitize_index` | A dry-run report of secrets in the index. Removes them with `apply` and `confirm`. |
+
+`search_session`, `search_all_sessions` and `get_session_stats` take `project_root`: a path, a folder name such as `CoWork`, or `"*"` for every project. The tool descriptions ask the model to pass its working directory. A client can also name the project in the `X-Project-Root` header. When neither names a project, the tool refuses the call and asks for `project_root`.
 
 ### Search examples
 
