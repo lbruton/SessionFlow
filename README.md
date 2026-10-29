@@ -29,7 +29,7 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 | Tool | Returns |
 |------|---------|
 | `search_session` | Turns that match a query, scoped to the current project. Omit `query` to list recent turns. |
-| `search_all_sessions` | Turns that match a query, with `project_root`, `git_branch`, `provider`, `date_from`, `date_to` and `issue_id` filters. |
+| `search_all_sessions` | Turns that match a query, with `project_root`, `git_branch`, `provider`, `date_from`, `date_to` and `issue_id` filters. `project_root` takes a path, a folder name such as `CoWork`, or `"*"`. |
 | `get_turns` | The turns around one turn of a session. Requires `session_id` and `turn_index` from a search result. |
 | `get_session_stats` | Turn, session, branch and provider counts for the index. |
 | `get_issue_timeline` | Every turn that mentions an issue ID, oldest first. Requires `issue_id`. |
