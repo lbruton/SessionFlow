@@ -331,6 +331,25 @@ def test_delete_interrupted_after_milvus_is_finished_next_run(env, monkeypatch):
     assert "doc-3" not in env["fts"]
 
 
+def test_rewrite_interrupted_after_upsert_survives_restart(env, monkeypatch):
+    rw = env["module"]
+    inner = rag_engine._rewrite_fts_row
+
+    def crash(doc_id, row, db_path):
+        raise RuntimeError("process died before FTS rewrite")
+
+    monkeypatch.setattr(rag_engine, "_rewrite_fts_row", crash)
+    first = rw.run(confirmed=True)
+    assert first.status == "error"
+    assert "<task-notification>" not in env["rows"][2]["document"]
+    assert "<task-notification>" in env["fts"]["doc-2"]
+
+    monkeypatch.setattr(rag_engine, "_rewrite_fts_row", inner)
+    second = rw.run(confirmed=True, restart=True)
+    assert second.fts_pending == 0
+    assert env["fts"]["doc-2"] == env["rows"][2]["document"]
+
+
 def test_restart_keeps_pending_fts_retries(env):
     rw = env["module"]
     env["delete_fts_fail"].add("doc-3")

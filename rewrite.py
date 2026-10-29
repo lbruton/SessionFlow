@@ -362,17 +362,21 @@ def _rewrite_batch(state: dict, rows: List[dict], budget, db_path: Optional[str]
     for (row, text), vector in zip(keep, vectors):
         updated.append(dict(row, document=rag_engine._truncate_utf8(text, 65535),
                             vector=vector, issue_ids=rag_engine._extract_issue_ids(text)))
-    rag_engine.upsert_rows(updated, db_path=db_path)
-    for row in updated:
-        if not rag_engine._rewrite_fts_row(row["doc_id"], row, db_path):
-            state["fts_retry"].append({"op": "rewrite", "id": int(row["id"]),
-                                       "doc_id": row["doc_id"]})
-    # A resumed batch skips rows gone from Milvus, so each delete is checkpointed as
-    # pending before it runs and cleared only once FTS confirms it.
-    pending = [{"op": "delete", "id": int(row["id"]), "doc_id": row["doc_id"]} for row in drop]
-    state["fts_retry"].extend(pending)
+
+    # Neither a resumed batch nor a --restart scan can find an FTS row whose Milvus
+    # write already landed, so every FTS write is checkpointed as pending before
+    # Milvus changes and cleared only once FTS confirms it.
+    rewrites = [{"op": "rewrite", "id": int(row["id"]), "doc_id": row["doc_id"]}
+                for row in updated]
+    deletes = [{"op": "delete", "id": int(row["id"]), "doc_id": row["doc_id"]} for row in drop]
+    state["fts_retry"].extend(rewrites + deletes)
     _save_state(state)
-    for entry in pending:
+
+    rag_engine.upsert_rows(updated, db_path=db_path)
+    for row, entry in zip(updated, rewrites):
+        if rag_engine._rewrite_fts_row(row["doc_id"], row, db_path):
+            state["fts_retry"].remove(entry)
+    for entry in deletes:
         result = rag_engine.delete_by_doc_id(entry["doc_id"], db_path=db_path)
         state["deleted"] += result.deleted
         if result.fts_ok:
