@@ -308,23 +308,24 @@ class GlobalTranscriptWatcher:
                     state, transcript_path)
 
                 try:
-                    turns, new_offset = transcript_parser.parse_transcript(
+                    parsed = transcript_parser.parse_transcript_incremental(
                         transcript_path, session_id, start_offset=offset
                     )
 
-                    if turns:
-                        for t in turns:
+                    if parsed.turns:
+                        for t in parsed.turns:
                             t["project_root"] = project_root
                         count = await rag_engine.add_turns_async(
-                            turns, db_path=self.db_path)
+                            parsed.turns, db_path=self.db_path)
                         total_indexed += count
                         _log(f"Indexed {count} turns from "
                              f"{Path(transcript_path).name} "
                              f"(session {session_id[:8]})")
 
                     transcript_parser.set_transcript_offset(
-                        state, transcript_path, new_offset,
-                        project_root=project_root)
+                        state, transcript_path, parsed.resume_offset,
+                        project_root=project_root,
+                        consumed_offset=parsed.consumed_offset)
 
                 except Exception as e:
                     _log(f"Error indexing {Path(transcript_path).name}: {e}")
@@ -379,7 +380,7 @@ class GlobalTranscriptWatcher:
                 file_size = t.stat().st_size
             except OSError:
                 continue
-            if offset < file_size:
+            if transcript_parser.get_consumed_offset(state, path) < file_size:
                 slug = _slug_from_transcript_path(path)
                 project_root = _get_project_root_for_slug(slug) if slug else ""
                 if not project_root:
@@ -400,20 +401,21 @@ class GlobalTranscriptWatcher:
         for i, (transcript_path, session_id, offset, project_root) in enumerate(
                 needs_indexing):
             try:
-                turns, new_offset = transcript_parser.parse_transcript(
+                parsed = transcript_parser.parse_transcript_incremental(
                     transcript_path, session_id, start_offset=offset
                 )
 
-                if turns:
-                    for t in turns:
+                if parsed.turns:
+                    for t in parsed.turns:
                         t["project_root"] = project_root
                     count = await rag_engine.add_turns_async(
-                        turns, db_path=self.db_path)
+                        parsed.turns, db_path=self.db_path)
                     total_indexed += count
 
                 transcript_parser.set_transcript_offset(
-                    state, transcript_path, new_offset,
-                    project_root=project_root)
+                    state, transcript_path, parsed.resume_offset,
+                    project_root=project_root,
+                    consumed_offset=parsed.consumed_offset)
 
             except Exception as e:
                 _log(f"Backfill error {Path(transcript_path).name}: {e}")

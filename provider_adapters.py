@@ -133,6 +133,10 @@ def normalize_timestamp(value: Any) -> str:
 
 PROJECT_PATH_MAP_ENV = "SESSIONFLOW_PROJECT_PATH_MAP"
 
+# Turn key that tells rag_engine.add_turns to drop other rows of the same
+# session and turn_index: a rebuilt open turn gets a new content-hash doc_id.
+REPLACE_SAME_TURN = "replace_same_turn"
+
 
 def parse_project_path_map(raw: Optional[str]) -> List[Tuple[str, str]]:
     """Parse a ``SESSIONFLOW_PROJECT_PATH_MAP`` value into ``(old, new)`` prefixes.

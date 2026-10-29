@@ -133,7 +133,9 @@ def test_parse_source_labels_turns_with_legacy_provider_and_metadata_root(cowork
         assert turn["source_kind"] == "claude_cowork_legacy_jsonl"
         assert turn["project_root"] == "/Users/someone/CoWork"
         assert "someone@example.com" not in json.dumps(turn)
-    assert parsed.cursor["last_byte_offset"] > 0
+    # The fixture ends on its last turn, which stays open: the cursor resumes
+    # there and records the bytes read in consumed_offset.
+    assert parsed.cursor["consumed_offset"] > 0
 
 
 def test_missing_root_reports_missing_without_sources(tmp_path):
