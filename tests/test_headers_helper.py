@@ -124,6 +124,22 @@ def test_desktop_spare_folder_inside_a_git_repo_is_never_sent(tmp_path):
     assert headers == {}
 
 
+def test_claude_home_with_trailing_slash_matches_spare_folder(claude_home):
+    spare = _spare(claude_home)
+    headers = _run(spare, claude_home, SESSIONFLOW_CLAUDE_HOME=f"{claude_home}//")
+    assert headers == {}
+
+
+def test_project_dir_with_trailing_slash_matches_claude_home(claude_home):
+    headers = _run(
+        claude_home,
+        claude_home,
+        SESSIONFLOW_CLAUDE_HOME=str(claude_home),
+        CLAUDE_PROJECT_DIR=f"{claude_home}/",
+    )
+    assert headers == {}
+
+
 def test_spares_folder_outside_claude_home_is_sent(tmp_path, claude_home):
     folder = tmp_path / "spares" / "spare-abc"
     folder.mkdir(parents=True)
