@@ -721,6 +721,22 @@ def cmd_reembed(args) -> int:
     """
     import reembed
 
+    if args.action != "verify":
+        return _chunked_action("reembed", reembed, args, _print_reembed_report)
+    result = reembed.verify(sample=args.sample, threshold=args.threshold,
+                            db_path=get_db_path())
+    print(f"Checked:   {result.checked}")
+    print(f"Passed:    {result.passed} (cos >= {result.threshold})")
+    print(f"Min cos:   {result.min_cos:.6f}")
+    print(f"Mean cos:  {result.mean_cos:.6f}")
+    return 0 if result.checked and result.passed == result.checked else 1
+
+
+def _chunked_action(command: str, module, args, print_report) -> int:
+    """Run the ``plan``, ``status``, ``run`` or ``drive`` action of a chunked command.
+
+    ``run`` and ``drive`` refuse without ``--yes``, before any read or write.
+    """
     action = args.action
     if action in ("run", "drive") and not args.yes:
         print(f"Refusing to {action}: confirmation required. Re-run with --yes.",
@@ -728,34 +744,25 @@ def cmd_reembed(args) -> int:
         return 1
 
     if action == "status":
-        print(json.dumps(reembed.status(), indent=2))
+        print(json.dumps(module.status(), indent=2))
         return 0
 
     if action == "plan":
-        _print_reembed_report(reembed.plan(db_path=get_db_path()))
+        print_report(module.plan(db_path=get_db_path()))
         return 0
 
     if action == "run":
-        report = reembed.run(
+        report = module.run(
             confirmed=True,
             max_minutes=args.max_minutes,
             max_turns=args.max_turns,
             restart=args.restart,
             db_path=get_db_path(),
         )
-        _print_reembed_report(report)
+        print_report(report)
         return 0 if report.status in ("done", "paused") else 1
 
-    if action == "verify":
-        result = reembed.verify(sample=args.sample, threshold=args.threshold,
-                                db_path=get_db_path())
-        print(f"Checked:   {result.checked}")
-        print(f"Passed:    {result.passed} (cos >= {result.threshold})")
-        print(f"Min cos:   {result.min_cos:.6f}")
-        print(f"Mean cos:  {result.mean_cos:.6f}")
-        return 0 if result.checked and result.passed == result.checked else 1
-
-    return _drive_chunks("reembed", reembed.status, args)
+    return _drive_chunks(command, module.status, args)
 
 
 def _drive_chunks(command: str, status, args) -> int:
@@ -810,42 +817,16 @@ def cmd_rewrite(args) -> int:
     """
     import rewrite
 
-    action = args.action
-    if action in ("run", "drive") and not args.yes:
-        print(f"Refusing to {action}: confirmation required. Re-run with --yes.",
-              file=sys.stderr)
-        return 1
-
-    if action == "status":
-        print(json.dumps(rewrite.status(), indent=2))
-        return 0
-
-    if action == "plan":
-        _print_rewrite_report(rewrite.plan(db_path=get_db_path()))
-        return 0
-
-    if action == "run":
-        report = rewrite.run(
-            confirmed=True,
-            max_minutes=args.max_minutes,
-            max_turns=args.max_turns,
-            restart=args.restart,
-            db_path=get_db_path(),
-        )
-        _print_rewrite_report(report)
-        return 0 if report.status in ("done", "paused") else 1
-
-    if action == "verify":
-        result = rewrite.verify(sample=args.sample, threshold=args.threshold,
-                                db_path=get_db_path())
-        print(f"Checked:    {result.checked}")
-        print(f"Passed:     {result.passed} (stripped, cos >= {result.threshold})")
-        print(f"Unstripped: {result.unstripped}")
-        print(f"Min cos:    {result.min_cos:.6f}")
-        print(f"Mean cos:   {result.mean_cos:.6f}")
-        return 0 if result.checked and result.passed == result.checked else 1
-
-    return _drive_chunks("rewrite", rewrite.status, args)
+    if args.action != "verify":
+        return _chunked_action("rewrite", rewrite, args, _print_rewrite_report)
+    result = rewrite.verify(sample=args.sample, threshold=args.threshold,
+                            db_path=get_db_path())
+    print(f"Checked:    {result.checked}")
+    print(f"Passed:     {result.passed} (stripped, cos >= {result.threshold})")
+    print(f"Unstripped: {result.unstripped}")
+    print(f"Min cos:    {result.min_cos:.6f}")
+    print(f"Mean cos:   {result.mean_cos:.6f}")
+    return 0 if result.checked and result.passed == result.checked else 1
 
 
 def _print_rewrite_report(report) -> None:
@@ -1017,77 +998,54 @@ def build_parser():
         help="Comma-separated provider list (default: all enabled providers).",
     )
 
-    # reembed
-    p_reembed = subparsers.add_parser(
-        "reembed",
+    _add_chunked_command(
+        subparsers, "reembed",
         help="Re-embed every stored vector in place with the current padding mask",
+        plan_help="Show what a run would do (read-only)",
+        run_help="Re-embed one chunk in this process",
+        verify_help="Compare stored vectors with fresh single-text embeddings",
     )
-    reembed_sub = p_reembed.add_subparsers(dest="action", required=True)
-    reembed_sub.add_parser("plan", help="Show what a run would do (read-only)")
-    reembed_sub.add_parser("status", help="Print the re-embed checkpoint")
-    p_rrun = reembed_sub.add_parser("run", help="Re-embed one chunk in this process")
-    p_rrun.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
-    p_rrun.add_argument("--max-minutes", type=float, default=None,
-                        help="Stop this chunk after N minutes")
-    p_rrun.add_argument("--max-turns", type=int, default=None,
-                        help="Stop this chunk after N turns")
-    p_rrun.add_argument("--restart", action="store_true",
-                        help="Discard the checkpoint and take a fresh snapshot")
-    p_rdrive = reembed_sub.add_parser(
-        "drive", help="Run chunks in fresh processes with idle gaps until done",
-    )
-    p_rdrive.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
-    p_rdrive.add_argument("--chunk-minutes", type=float, default=35.0,
-                          help="Wall-time cap per chunk process (default 35)")
-    p_rdrive.add_argument("--gap-minutes", type=float, default=10.0,
-                          help="Idle time between chunks (default 10)")
-    p_rdrive.add_argument("--max-failures", type=int, default=3,
-                          help="Consecutive chunk crashes before giving up (default 3)")
-    p_rdrive.add_argument("--restart", action="store_true",
-                          help="Discard the checkpoint on the first chunk")
-    p_rverify = reembed_sub.add_parser(
-        "verify", help="Compare stored vectors with fresh single-text embeddings",
-    )
-    p_rverify.add_argument("--sample", type=int, default=200, help="Rows to check")
-    p_rverify.add_argument("--threshold", type=float, default=0.9999,
-                           help="Minimum cosine to pass")
-
-    # rewrite
-    p_rewrite = subparsers.add_parser(
-        "rewrite",
+    _add_chunked_command(
+        subparsers, "rewrite",
         help="Strip boilerplate from stored rows and re-embed rows over the sliding window",
+        plan_help="Scan and count what a run would do (read-only)",
+        run_help="Rewrite one chunk in this process",
+        verify_help="Check rewritten rows for boilerplate and stale vectors",
     )
-    rewrite_sub = p_rewrite.add_subparsers(dest="action", required=True)
-    rewrite_sub.add_parser("plan", help="Scan and count what a run would do (read-only)")
-    rewrite_sub.add_parser("status", help="Print the rewrite checkpoint")
-    p_wrun = rewrite_sub.add_parser("run", help="Rewrite one chunk in this process")
-    p_wrun.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
-    p_wrun.add_argument("--max-minutes", type=float, default=None,
-                        help="Stop this chunk after N minutes")
-    p_wrun.add_argument("--max-turns", type=int, default=None,
-                        help="Stop this chunk after N turns")
-    p_wrun.add_argument("--restart", action="store_true",
-                        help="Discard the checkpoint and take a fresh snapshot")
-    p_wdrive = rewrite_sub.add_parser(
-        "drive", help="Run chunks in fresh processes with idle gaps until done",
-    )
-    p_wdrive.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
-    p_wdrive.add_argument("--chunk-minutes", type=float, default=35.0,
-                          help="Wall-time cap per chunk process (default 35)")
-    p_wdrive.add_argument("--gap-minutes", type=float, default=10.0,
-                          help="Idle time between chunks (default 10)")
-    p_wdrive.add_argument("--max-failures", type=int, default=3,
-                          help="Consecutive chunk crashes before giving up (default 3)")
-    p_wdrive.add_argument("--restart", action="store_true",
-                          help="Discard the checkpoint on the first chunk")
-    p_wverify = rewrite_sub.add_parser(
-        "verify", help="Check rewritten rows for boilerplate and stale vectors",
-    )
-    p_wverify.add_argument("--sample", type=int, default=200, help="Rows to check")
-    p_wverify.add_argument("--threshold", type=float, default=0.9999,
-                           help="Minimum cosine to pass")
 
     return parser
+
+
+def _add_chunked_command(subparsers, name: str, *, help: str, plan_help: str,
+                         run_help: str, verify_help: str) -> None:
+    """Add a ``{plan|run|drive|status|verify}`` subcommand driven by ``_drive_chunks``."""
+    sub = subparsers.add_parser(name, help=help).add_subparsers(dest="action", required=True)
+    sub.add_parser("plan", help=plan_help)
+    sub.add_parser("status", help=f"Print the {name} checkpoint")
+    p_run = sub.add_parser("run", help=run_help)
+    p_run.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
+    p_run.add_argument("--max-minutes", type=float, default=None,
+                       help="Stop this chunk after N minutes")
+    p_run.add_argument("--max-turns", type=int, default=None,
+                       help="Stop this chunk after N turns")
+    p_run.add_argument("--restart", action="store_true",
+                       help="Discard the checkpoint and take a fresh snapshot")
+    p_drive = sub.add_parser(
+        "drive", help="Run chunks in fresh processes with idle gaps until done",
+    )
+    p_drive.add_argument("--yes", "-y", action="store_true", help="Confirm (required)")
+    p_drive.add_argument("--chunk-minutes", type=float, default=35.0,
+                         help="Wall-time cap per chunk process (default 35)")
+    p_drive.add_argument("--gap-minutes", type=float, default=10.0,
+                         help="Idle time between chunks (default 10)")
+    p_drive.add_argument("--max-failures", type=int, default=3,
+                         help="Consecutive chunk crashes before giving up (default 3)")
+    p_drive.add_argument("--restart", action="store_true",
+                         help="Discard the checkpoint on the first chunk")
+    p_verify = sub.add_parser("verify", help=verify_help)
+    p_verify.add_argument("--sample", type=int, default=200, help="Rows to check")
+    p_verify.add_argument("--threshold", type=float, default=0.9999,
+                          help="Minimum cosine to pass")
 
 
 def main():
