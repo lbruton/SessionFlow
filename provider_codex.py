@@ -37,6 +37,14 @@ def _content_to_text(content) -> str:
     return ""
 
 
+# Codex Desktop marks turns it imported from another harness with this turn_id prefix.
+_IMPORT_TURN_PREFIX = "external-import-"
+
+
+def _is_import_turn(turn_id) -> bool:
+    return isinstance(turn_id, str) and turn_id.startswith(_IMPORT_TURN_PREFIX)
+
+
 class CodexAdapter:
     """Adapter for Codex rollout ``.jsonl`` sessions (active and archived)."""
 
@@ -162,6 +170,9 @@ class CodexAdapter:
             # top-level timestamp; event_msg started_at keeps the turn's real start.
             task_started = ""
             session_branch = ""
+            # Imported turns copy another harness's transcript, which is indexed
+            # from its own source. Only task_started carries the turn id.
+            importing = False
             for index, line in enumerate(lines):
                 try:
                     entry = json.loads(line)
@@ -177,6 +188,13 @@ class CodexAdapter:
                     started_at = payload.get("started_at")
                     if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
                         task_started = normalize_timestamp(started_at) or task_started
+                    if payload.get("type") == "task_started":
+                        now_importing = _is_import_turn(payload.get("turn_id"))
+                        if now_importing != importing:
+                            pending_user = ""
+                        importing = now_importing
+                    continue
+                if importing:
                     continue
                 role = record.get("role")
                 content = _content_to_text(record.get("content") or record.get("text") or "")

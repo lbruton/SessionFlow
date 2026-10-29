@@ -146,6 +146,86 @@ def test_codex_resumed_parse_does_not_pair_skipped_user_with_next_answer(tmp_pat
     assert [(t["doc_id"], t["text"]) for t in resumed] == [(full[1]["doc_id"], "a2")]
 
 
+def _turn_started(turn_id, epoch=1792982930):
+    return {"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn_id, "started_at": epoch}}
+
+
+def test_codex_skips_external_import_turns(tmp_path):
+    """Imported turns copy another harness's transcript, which is indexed from its own source."""
+    from provider_codex import CodexAdapter
+
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _turn_started("external-import-turn-1"),
+        _msg("user", "imported question"),
+        _msg("assistant", "[external_agent_tool_call: Read]\nfile: x\n[/external_agent_tool_call]"),
+        _msg("assistant", "imported answer"),
+        _turn_started("external-import-turn-2"),
+        _msg("user", "second imported question"),
+        _msg("assistant", "second imported answer"),
+    ])
+    adapter = CodexAdapter(home=home)
+    turns = adapter.parse_source(adapter.discover_sources()[0], cursor=None).turns
+
+    assert turns == []
+
+
+def test_codex_keeps_native_turns_after_imported_ones(tmp_path):
+    from provider_codex import CodexAdapter
+
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _turn_started("external-import-turn-1"),
+        _msg("user", "imported question"),
+        _msg("assistant", "imported answer"),
+        _turn_started("01a173b9-8e9e-7373-874e-0a10c4c3f01c"),
+        _msg("user", "native question"),
+        _msg("assistant", "native answer"),
+    ])
+    adapter = CodexAdapter(home=home)
+    turns = adapter.parse_source(adapter.discover_sources()[0], cursor=None).turns
+
+    assert [t["text"] for t in turns] == ["User: native question\n\nAssistant: native answer"]
+
+
+def test_codex_imported_user_message_is_not_paired_with_native_answer(tmp_path):
+    from provider_codex import CodexAdapter
+
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _turn_started("external-import-turn-1"),
+        _msg("user", "imported question"),
+        _turn_started("01a173b9-8e9e-7373-874e-0a10c4c3f01c"),
+        _msg("assistant", "native answer"),
+    ])
+    adapter = CodexAdapter(home=home)
+    turns = adapter.parse_source(adapter.discover_sources()[0], cursor=None).turns
+
+    assert [t["text"] for t in turns] == ["native answer"]
+
+
+def test_codex_resumed_parse_still_skips_external_import_turns(tmp_path):
+    from provider_codex import CodexAdapter
+
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _turn_started("external-import-turn-1"),
+        _msg("user", "imported question"),
+        _msg("assistant", "imported answer"),
+        _turn_started("native-1"),
+        _msg("user", "q"),
+        _msg("assistant", "a"),
+    ])
+    adapter = CodexAdapter(home=home)
+    source = adapter.discover_sources()[0]
+    full = adapter.parse_source(source, cursor=None)
+
+    resumed = adapter.parse_source(source, cursor=full.cursor).turns
+
+    assert [t["text"] for t in full.turns] == ["User: q\n\nAssistant: a"]
+    assert resumed == []
+
+
 def test_codex_turns_fall_back_to_line_time_without_task_events(tmp_path):
     from provider_codex import CodexAdapter
 
