@@ -232,12 +232,17 @@ def _embed_documents(budget, texts: List[str]) -> List[list]:
 
 
 def _append_backup(path: Path, rows: List[dict]) -> None:
-    """Append ``(pk, old vector as float16)`` records for ``rows`` to the backup file."""
+    """Append ``(pk, old vector as float16)`` records for ``rows`` to the backup file.
+
+    The file is synced before returning, so the backup reaches disk before the upsert.
+    """
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _FILE_MODE)
     with os.fdopen(fd, "ab") as fh:
         for row in rows:
             vec = row["vector"]
             fh.write(struct.pack(f"<q{len(vec)}e", int(row["id"]), *vec))
+        fh.flush()
+        os.fsync(fh.fileno())
     os.chmod(path, _FILE_MODE)
 
 
