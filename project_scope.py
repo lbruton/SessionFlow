@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
 
@@ -76,7 +77,8 @@ def resolve_project_scope(arg: Optional[str], header_root: Optional[str],
     known = sorted(set(known_roots))
 
     if target.startswith("/"):
-        path = target.rstrip("/") or "/"
+        # normpath keeps exactly two leading slashes, so collapse them.
+        path = "/" + posixpath.normpath(target).lstrip("/")
         for marker in _WORKTREE_MARKERS:
             path = path.split(marker, 1)[0]
         matched = _with_subfolders(path, known)

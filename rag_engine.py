@@ -2172,23 +2172,43 @@ def fts_lag_status(
     }
 
 
+def _fts_roots_complete(conn, db_path: Optional[str]) -> bool:
+    """Return True when the FTS sidecar holds every indexed turn.
+
+    A set backfill sentinel or an FTS row count below the Milvus turn count
+    means FTS is rebuilding or missed inserts. A failed Milvus count keeps the
+    FTS answer.
+    """
+    if fts_backfill_required():
+        return False
+    try:
+        return _fts.count_rows(conn) >= _count_milvus_turns(db_path=db_path)
+    except Exception as e:
+        logger.warning("Milvus turn count failed, keeping FTS roots: %s", _scrub_exception(e))
+        return True
+
+
 def known_project_roots(db_path: Optional[str] = None) -> List[str]:
     """Return every distinct ``project_root`` in the index.
 
-    Reads the FTS sidecar, which is local, and falls back to a Milvus scan when
-    FTS fails. The result is cached per ``db_path`` for ``KNOWN_ROOTS_TTL_S``.
+    Reads the FTS sidecar, which is local, and reads Milvus instead when FTS
+    fails or is incomplete. The result is cached per ``db_path`` for
+    ``KNOWN_ROOTS_TTL_S``.
     """
     cached = _known_roots_cache.get(db_path)
     if cached and time.monotonic() - cached[0] < KNOWN_ROOTS_TTL_S:
         return cached[1]
+    roots = None
     try:
         conn = _fts.connection(db_path)
         try:
-            roots = _fts.distinct_values(conn, "project_root")
+            if _fts_roots_complete(conn, db_path):
+                roots = _fts.distinct_values(conn, "project_root")
         finally:
             _fts.close_ephemeral(conn)
     except Exception as e:
         logger.warning("FTS project_root scan failed, reading Milvus: %s", _scrub_exception(e))
+    if roots is None:
         found = set()
         for batch in _query_batches(["project_root"], db_path=db_path):
             found.update(row.get("project_root") or "" for row in batch)

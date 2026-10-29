@@ -73,6 +73,27 @@ def test_trailing_slash_is_ignored():
     assert scope.roots == ("/Users/lbruton/Claude/Projects/Finances",)
 
 
+def test_parent_segment_is_collapsed():
+    scope = _resolve("/Users/lbruton/Claude/Projects/CoWork/../Finances")
+    assert scope.roots == ("/Users/lbruton/Claude/Projects/Finances",)
+
+
+def test_dot_and_doubled_slashes_resolve_like_the_clean_path():
+    clean = _resolve("/Users/lbruton/Claude/Projects/Finances")
+    assert _resolve("/Users/lbruton/Claude/./Projects//Finances/.").roots == clean.roots
+
+
+def test_leading_double_slash_resolves_like_a_single_slash():
+    scope = _resolve("//Users/lbruton/Claude/Projects/Finances")
+    assert scope.roots == ("/Users/lbruton/Claude/Projects/Finances",)
+
+
+def test_parent_segment_out_of_a_worktree_keeps_no_marker():
+    scope = _resolve("/Volumes/DATA/GitHub/SessionFlow/.worktrees/x/../../..")
+    assert "/Volumes/DATA/GitHub/StakTrakr" in scope.roots
+    assert "/" not in scope.roots
+
+
 def test_worktree_path_resolves_to_repository():
     scope = _resolve(None, header="/Volumes/DATA/GitHub/SessionFlow/.worktrees/fix-sesf-64")
     assert scope.roots == (
