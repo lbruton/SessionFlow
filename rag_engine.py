@@ -31,7 +31,7 @@ from pymilvus import MilvusClient, CollectionSchema, FieldSchema
 from pymilvus.exceptions import MilvusException
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
-from typing import Iterator, List, Dict, NamedTuple, Optional
+from typing import Iterator, List, Dict, NamedTuple, Optional, Sequence, Union
 import asyncio
 import logging
 import sys
@@ -439,6 +439,11 @@ _fts = FTSIndex("turns_fts", [
     "project_root", "logical_session_id", "provider", "source_kind",
     "source_class", "source_id", "source_path", "issue_ids",
 ])
+# A project filter: one root, or several (a root with its subfolders, or a name match).
+ProjectRoots = Union[str, Sequence[str]]
+# db_path -> (monotonic time, roots); see known_project_roots.
+_known_roots_cache: Dict[Optional[str], tuple] = {}
+KNOWN_ROOTS_TTL_S = 300.0
 _write_lock: Optional[asyncio.Lock] = None
 _embed_semaphore: Optional[asyncio.Semaphore] = None
 # Dedicated single-worker executor so every MLX/Metal call runs on the same OS
@@ -1099,8 +1104,26 @@ def _row_to_result(entity: Dict, defaults: Dict, distance: Optional[float] = Non
     }
 
 
+def _project_root_filter(project_root: Optional[ProjectRoots]) -> Optional[str]:
+    """Milvus clause for one root (``==``) or several (``in``); None when unscoped."""
+    if not project_root:
+        return None
+    if isinstance(project_root, str):
+        project_root = [project_root]
+    if len(project_root) == 1:
+        return f'project_root == "{_escape_filter_scalar(project_root[0])}"'
+    values = ", ".join(f'"{_escape_filter_scalar(r)}"' for r in project_root)
+    return f"project_root in [{values}]"
+
+
+def _fts_project_filter(project_root: ProjectRoots):
+    if isinstance(project_root, str):
+        return project_root
+    return ("in", list(project_root))
+
+
 def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
-                         project_root: Optional[str], provider: Optional[str],
+                         project_root: Optional[ProjectRoots], provider: Optional[str],
                          source_kind: Optional[str], date_from: Optional[str],
                          date_to: Optional[str],
                          issue_id: Optional[str] = None) -> Optional[str]:
@@ -1116,7 +1139,7 @@ def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
     if git_branch:
         filters.append(f'git_branch == "{_escape_filter_scalar(git_branch)}"')
     if project_root:
-        filters.append(f'project_root == "{_escape_filter_scalar(project_root)}"')
+        filters.append(_project_root_filter(project_root))
     if provider:
         filters.append(f'provider == "{provider}"')
     if source_kind:
@@ -1147,7 +1170,7 @@ def _is_identifier_query(query: Optional[str]) -> bool:
 
 
 def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
-           git_branch: Optional[str] = None, project_root: Optional[str] = None,
+           git_branch: Optional[str] = None, project_root: Optional[ProjectRoots] = None,
            sort_by: str = "hybrid",
            date_from: Optional[str] = None, date_to: Optional[str] = None,
            provider: Optional[str] = None, source_kind: Optional[str] = None,
@@ -1160,8 +1183,8 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     ``relevance`` (pure RRF order), ``recency`` (timestamp-descending re-rank),
     or ``hybrid`` (blended semantic + recency score; the default).
 
-    project_root: when set, restricts results to that project. When None,
-    searches across all projects (cross-project search).
+    project_root: when set, restricts results to that root, or to any of a list
+    of roots. When None, searches across all projects (cross-project search).
     date_from/date_to: ISO 8601 date strings (e.g. '2026-04-02') to restrict
     results to a time range. Timestamps are VARCHAR and sort lexicographically.
     issue_id: when set, restricts results to turns tagged with that issue id
@@ -1246,7 +1269,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     if git_branch:
         fts_filters["git_branch"] = git_branch
     if project_root:
-        fts_filters["project_root"] = project_root
+        fts_filters["project_root"] = _fts_project_filter(project_root)
     if provider:
         fts_filters["provider"] = provider
     if source_kind:
@@ -1304,7 +1327,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
 
 def _recent_listing(n: int, session_id: Optional[str] = None,
                     git_branch: Optional[str] = None,
-                    project_root: Optional[str] = None,
+                    project_root: Optional[ProjectRoots] = None,
                     provider: Optional[str] = None,
                     source_kind: Optional[str] = None,
                     date_from: Optional[str] = None,
@@ -2014,8 +2037,9 @@ def get_turns(session_id: str, turn_index: int, context: int = 2,
     return formatted
 
 
-def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None) -> Dict:
-    """Get index statistics. Optionally filter to a specific project."""
+def get_stats(project_root: Optional[ProjectRoots] = None,
+              db_path: Optional[str] = None) -> Dict:
+    """Get index statistics. Optionally filter to one project root or a list of roots."""
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
             # Keep the redaction surface on every return path so
@@ -2031,7 +2055,7 @@ def get_stats(project_root: Optional[str] = None, db_path: Optional[str] = None)
     # Query for breakdowns (capped by Milvus offset limit)
     all_results = _query_all(
         ["session_id", "chunk_type", "git_branch", "project_root", "provider"],
-        filter_expr=f'project_root == "{_escape_filter_scalar(project_root)}"' if project_root else None,
+        filter_expr=_project_root_filter(project_root),
         db_path=db_path,
     )
 
@@ -2087,11 +2111,7 @@ def _count_milvus_turns(db_path=None, project_root=None) -> int:
     Returns:
         int: the number of turn rows (project-scoped when ``project_root`` is set).
     """
-    filter_expr = (
-        f'project_root == "{_escape_filter_scalar(project_root)}"'
-        if project_root
-        else None
-    )
+    filter_expr = _project_root_filter(project_root)
     with milvus_client_for_migration(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
             return 0
@@ -2105,7 +2125,7 @@ def _count_milvus_turns(db_path=None, project_root=None) -> int:
 
 def fts_lag_status(
     db_path: Optional[str] = None,
-    project_root: Optional[str] = None,
+    project_root: Optional[ProjectRoots] = None,
     milvus_turn_count: Optional[int] = None,
 ) -> Dict[str, object]:
     """Return static FTS-vs-Milvus lag data for observability.
@@ -2150,6 +2170,52 @@ def fts_lag_status(
         # via the module-level binding so it stays one patchable seam.
         "fts_backfill_required": fts_backfill_required(),
     }
+
+
+def _fts_roots_complete(conn, db_path: Optional[str]) -> bool:
+    """Return True when the FTS sidecar holds every indexed turn.
+
+    A set backfill sentinel or an FTS row count below the Milvus turn count
+    means FTS is rebuilding or missed inserts. A failed Milvus count keeps the
+    FTS answer.
+    """
+    if fts_backfill_required():
+        return False
+    try:
+        return _fts.count_rows(conn) >= _count_milvus_turns(db_path=db_path)
+    except Exception as e:
+        logger.warning("Milvus turn count failed, keeping FTS roots: %s", _scrub_exception(e))
+        return True
+
+
+def known_project_roots(db_path: Optional[str] = None) -> List[str]:
+    """Return every distinct ``project_root`` in the index.
+
+    Reads the FTS sidecar, which is local, and reads Milvus instead when FTS
+    fails or is incomplete. The result is cached per ``db_path`` for
+    ``KNOWN_ROOTS_TTL_S``.
+    """
+    cached = _known_roots_cache.get(db_path)
+    if cached and time.monotonic() - cached[0] < KNOWN_ROOTS_TTL_S:
+        return cached[1]
+    roots = None
+    try:
+        conn = _fts.connection(db_path)
+        try:
+            if _fts_roots_complete(conn, db_path):
+                roots = _fts.distinct_values(conn, "project_root")
+        finally:
+            _fts.close_ephemeral(conn)
+    except Exception as e:
+        logger.warning("FTS project_root scan failed, reading Milvus: %s", _scrub_exception(e))
+    if roots is None:
+        found = set()
+        for batch in _query_batches(["project_root"], db_path=db_path):
+            found.update(row.get("project_root") or "" for row in batch)
+        roots = list(found)
+    roots = sorted(r for r in roots if r)
+    _known_roots_cache[db_path] = (time.monotonic(), roots)
+    return roots
 
 
 def _query_batches(output_fields: list, batch_size: int = 1000,
@@ -2941,7 +3007,8 @@ def list_sessions(project_root: Optional[str] = None,
 # --- Async wrappers ---
 
 async def search_async(query: str, n: int = 5, session_id: Optional[str] = None,
-                       git_branch: Optional[str] = None, project_root: Optional[str] = None,
+                       git_branch: Optional[str] = None,
+                       project_root: Optional[ProjectRoots] = None,
                        sort_by: str = "hybrid",
                        date_from: Optional[str] = None, date_to: Optional[str] = None,
                        provider: Optional[str] = None, source_kind: Optional[str] = None,
