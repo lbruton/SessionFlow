@@ -262,18 +262,9 @@ fi
 echo ""
 echo "Installing global MCP server..."
 
-# Create headersHelper script
+# Install the headersHelper script (see mcp-headers-helper.sh)
 MCP_HELPERS_DIR="$HOME/.claude/mcp-helpers"
-mkdir -p "$MCP_HELPERS_DIR"
-cat > "$MCP_HELPERS_DIR/sessionflow-headers.sh" << 'HELPEREOF'
-#!/bin/bash
-# Dynamic header helper for SessionFlow MCP server.
-# Outputs JSON with X-Project-Root set to the git repo root (or cwd).
-PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
-echo "{\"X-Project-Root\": \"$PROJECT_ROOT\"}"
-HELPEREOF
-chmod +x "$MCP_HELPERS_DIR/sessionflow-headers.sh"
-echo "  Header helper installed: $MCP_HELPERS_DIR/sessionflow-headers.sh"
+"$SCRIPT_DIR/sessionflow-server.sh" install-headers-helper
 
 # Add MCP server to ~/.claude.json (user scope)
 CLAUDE_JSON="$HOME/.claude.json"

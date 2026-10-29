@@ -3,7 +3,7 @@
 # Starts the server if not running, verifies health.
 # Safe to call multiple times (idempotent).
 #
-# Usage: ./sessionflow-server.sh [start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-mcp-bridge|mcp-bridge-status]
+# Usage: ./sessionflow-server.sh [start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-mcp-bridge|mcp-bridge-status|install-headers-helper|headers-helper-status]
 #
 # Optional macOS LaunchAgent (install-agent / uninstall-agent / agent-status)
 # autostarts SessionFlow at login before any harness hooks run. The LaunchAgent
@@ -59,6 +59,10 @@ BACKFILL_INTERVAL_SECONDS="${SESSIONFLOW_BACKFILL_INTERVAL_SECONDS:-3600}"
 # disk because Desktop's MCP child cannot read the external volume (TCC).
 MCP_BRIDGE_SOURCE="$SCRIPT_DIR/mcp-remote-wait.sh"
 MCP_BRIDGE_PATH="$HOME/.local/bin/sessionflow-mcp-remote"
+
+# Claude Code's headersHelper, which sends X-Project-Root on every MCP request.
+HEADERS_HELPER_SOURCE="$SCRIPT_DIR/mcp-headers-helper.sh"
+HEADERS_HELPER_PATH="$HOME/.claude/mcp-helpers/sessionflow-headers.sh"
 
 mkdir -p "$SERVER_DIR"
 
@@ -641,6 +645,27 @@ do_mcp_bridge_status() {
     fi
 }
 
+do_install_headers_helper() {
+    # mkdir keeps the mode of an existing folder; GNU install -d resets it.
+    mkdir -p "$(dirname "$HEADERS_HELPER_PATH")"
+    install -m 755 "$HEADERS_HELPER_SOURCE" "$HEADERS_HELPER_PATH"
+    echo "[sessionflow] Header helper installed at $HEADERS_HELPER_PATH" >&2
+    echo "[sessionflow] Re-run after every change to mcp-headers-helper.sh." >&2
+}
+
+do_headers_helper_status() {
+    if [ ! -x "$HEADERS_HELPER_PATH" ]; then
+        echo "[sessionflow] Header helper: $HEADERS_HELPER_PATH (missing; run install-headers-helper)" >&2
+        exit 1
+    fi
+    if cmp -s "$HEADERS_HELPER_SOURCE" "$HEADERS_HELPER_PATH"; then
+        echo "[sessionflow] Header helper: $HEADERS_HELPER_PATH (current)" >&2
+    else
+        echo "[sessionflow] Header helper: $HEADERS_HELPER_PATH (differs from $HEADERS_HELPER_SOURCE; run install-headers-helper)" >&2
+        exit 1
+    fi
+}
+
 case "${1:-start}" in
     start)  do_start ;;
     stop)   do_stop ;;
@@ -657,8 +682,10 @@ case "${1:-start}" in
     backfill-agent-status)    do_backfill_agent_status ;;
     install-mcp-bridge)       do_install_mcp_bridge ;;
     mcp-bridge-status)        do_mcp_bridge_status ;;
+    install-headers-helper)   do_install_headers_helper ;;
+    headers-helper-status)    do_headers_helper_status ;;
     *)
-        echo "Usage: $0 {start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-backfill-agent|uninstall-backfill-agent|backfill-agent-status|install-mcp-bridge|mcp-bridge-status}" >&2
+        echo "Usage: $0 {start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-backfill-agent|uninstall-backfill-agent|backfill-agent-status|install-mcp-bridge|mcp-bridge-status|install-headers-helper|headers-helper-status}" >&2
         exit 1
         ;;
 esac
