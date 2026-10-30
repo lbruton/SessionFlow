@@ -56,7 +56,7 @@ Hosted/OpenAI embeddings are **explicitly deferred**. Embedding stays local MLX 
 
 - Embedding model is downloaded via `download-model.sh` — EmbeddingGemma local on Apple Silicon (MLX Metal).
 - **Project scope:** `project_root` takes a path (its indexed subfolders and worktrees are included), a folder name such as `CoWork`, or `"*"`. A name or path with no indexed turns searches every project. Search and stats output opens with a `Scope:` line that names the roots and the reason.
-- **Gotcha:** Claude desktop Code-tab sessions, Desktop chat and Codex send no `X-Project-Root` header, so their searches default to every project. Pass `project_root` explicitly from those clients.
+- **Gotcha:** Claude desktop Code-tab sessions, Desktop chat and Codex send no `X-Project-Root` header. Claude Code clients are scoped by their MCP roots instead. Codex and Desktop chat declare no roots, so pass `project_root` from them.
 - **MLX Metal SIGSEGV under sustained load** — EmbeddingGemma crashes the GPU driver after ~50min continuous compute. Backfill throttle is 200ms between inserts; do not drop below 100ms.
 - **FTS schema migration** writes a sentinel and emits a `WARNING` log line while the keyword index rebuilds — expected, not an error.
 - **LaunchAgent (optional):** `cc.lbruton.sessionflow` user agent autostarts the server at login. Disable via `launchctl unload` if running ad-hoc.

@@ -6,10 +6,12 @@ import asyncio
 import contextvars
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from mcp.server import Server
 from mcp import types
 
+import client_roots
 import rag_engine
 import sanitize
 from project_scope import ProjectScope, resolve_project_scope
@@ -810,6 +812,17 @@ def register_tools(server: Server):
             ),
         ]
 
+    async def _scope(arg: str | None, db: str) -> ProjectScope:
+        """Resolve the scope from the argument, then the client's roots, then the header."""
+        from_roots = None
+        if not (arg or "").strip():
+            from_roots = await client_roots.current_project_root(server)
+        scope = await resolve_scope(arg, from_roots or get_current_project_root(), db)
+        if from_roots:
+            note = "from client roots" + (f"; {scope.note}" if scope.note else "")
+            scope = replace(scope, note=note)
+        return scope
+
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         if name in MEMORY_TOOL_NAMES:
@@ -829,7 +842,7 @@ def register_tools(server: Server):
                     return [types.TextContent(
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
-                scope = await resolve_scope(arguments.get("project_root"), current_project, db)
+                scope = await _scope(arguments.get("project_root"), db)
                 if scope.unnamed and not session_id:
                     return [types.TextContent(type="text", text=UNNAMED_SCOPE_ERROR)]
                 # search_async runs on the mlx-embed thread; a blocking search()
@@ -863,7 +876,7 @@ def register_tools(server: Server):
                         type="text",
                         text="issue_id must be a valid issue token like SESF-25")]
 
-                scope = await resolve_scope(arguments.get("project_root"), current_project, db)
+                scope = await _scope(arguments.get("project_root"), db)
                 if scope.unnamed:
                     return [types.TextContent(type="text", text=UNNAMED_SCOPE_ERROR)]
                 results = await rag_engine.search_async(
@@ -897,7 +910,7 @@ def register_tools(server: Server):
                 return [types.TextContent(type="text", text=format_turns(results))]
 
             elif name == "get_session_stats":
-                scope = await resolve_scope(arguments.get("project_root"), current_project, db)
+                scope = await _scope(arguments.get("project_root"), db)
                 if scope.unnamed:
                     return [types.TextContent(type="text", text=UNNAMED_SCOPE_ERROR)]
                 stats = rag_engine.get_stats(

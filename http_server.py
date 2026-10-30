@@ -3,7 +3,7 @@
 Persistent HTTP server for SessionFlow MCP system.
 
 Runs as a long-lived process serving MCP via StreamableHTTP.
-Projects are identified by the X-Project-Root header in each request.
+The current project comes from the client's MCP roots, else the X-Project-Root header.
 All projects share a single global DB at ~/.sessionflow/milvus.db.
 
 Start: ./sessionflow-server.sh
@@ -35,6 +35,7 @@ from starlette.routing import Mount, Route
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
+import client_roots
 import rag_engine
 import transcript_parser
 import file_watcher
@@ -1475,11 +1476,14 @@ mcp_server = Server(
     ),
 )
 register_tools(mcp_server)
+client_roots.register(mcp_server)
 
+# Stateful, streamed sessions let a tool call ask the client for its roots.
+# An expired or restarted session answers 404, and the client re-initializes.
 session_manager = StreamableHTTPSessionManager(
     app=mcp_server,
-    stateless=True,
-    json_response=True,
+    stateless=False,
+    json_response=False,
 )
 
 

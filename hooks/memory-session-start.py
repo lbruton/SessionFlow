@@ -96,37 +96,78 @@ class ToolFailure(Exception):
     """A tool call that produced no usable result; the message says why."""
 
 
-def _post(body: dict) -> dict:
+PROTOCOL_VERSION = "2025-06-18"
+
+
+def _headers(session_id: str | None) -> dict:
+    headers = {"Content-Type": "application/json",
+               "Accept": "application/json, text/event-stream"}
+    if session_id:
+        headers["Mcp-Session-Id"] = session_id
+        headers["MCP-Protocol-Version"] = PROTOCOL_VERSION
+    return headers
+
+
+def _parse_reply(raw: bytes, content_type: str) -> dict:
+    """Return the JSON-RPC message from a JSON body or the last SSE data event."""
+    if not raw:
+        return {}
+    text = raw.decode("utf-8", "replace")
+    if content_type.startswith("text/event-stream"):
+        events = [line[5:].strip() for line in text.splitlines() if line.startswith("data:")]
+        text = next((e for e in reversed(events) if e), "")
+    try:
+        return json.loads(text)
+    except ValueError:
+        raise ToolFailure("response is not JSON") from None
+
+
+def _post(body: dict, session_id: str | None = None) -> tuple:
+    """POST one JSON-RPC message; return the reply and the server's session ID."""
     timeout = _remaining()
     if timeout <= 0:
         raise ToolFailure("timed out")
-    req = urllib.request.Request(
-        SERVER_URL, data=json.dumps(body).encode(), method="POST",
-        headers={"Content-Type": "application/json",
-                 "Accept": "application/json, text/event-stream"})
+    req = urllib.request.Request(SERVER_URL, data=json.dumps(body).encode(), method="POST",
+                                 headers=_headers(session_id))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
+            ctype = resp.headers.get("Content-Type", "")
+            sid = resp.headers.get("Mcp-Session-Id")
     except urllib.error.HTTPError as exc:
         raise ToolFailure(f"HTTP {exc.code}") from None
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         raise ToolFailure(f"server unreachable ({reason})") from None
-    if not raw:
-        return {}
+    return _parse_reply(raw, ctype), sid
+
+
+def _close_session(session_id: str | None) -> None:
+    """Ask the server to drop the session; the server expires it anyway on failure."""
+    if not session_id:
+        return
+    req = urllib.request.Request(SERVER_URL, method="DELETE", headers=_headers(session_id))
     try:
-        return json.loads(raw)
-    except ValueError:
-        raise ToolFailure("response is not JSON") from None
+        with urllib.request.urlopen(req, timeout=max(_remaining(), 0.5)):
+            pass
+    except (urllib.error.URLError, OSError):
+        pass
 
 
 def _call_tool(name: str, arguments: dict) -> dict:
-    _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-        "protocolVersion": "2025-06-18", "capabilities": {},
+    _, sid = _post({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+        "protocolVersion": PROTOCOL_VERSION, "capabilities": {},
         "clientInfo": {"name": "memory-session-start", "version": "1"}}})
-    _post({"jsonrpc": "2.0", "method": "notifications/initialized"})
-    reply = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-                   "params": {"name": name, "arguments": arguments}})
+    try:
+        _post({"jsonrpc": "2.0", "method": "notifications/initialized"}, sid)
+        reply, _ = _post({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                          "params": {"name": name, "arguments": arguments}}, sid)
+    finally:
+        _close_session(sid)
+    return _tool_result(reply)
+
+
+def _tool_result(reply: dict) -> dict:
     if "error" in reply:
         raise ToolFailure(f"JSON-RPC error {reply['error'].get('code')}")
     result = reply.get("result") or {}
