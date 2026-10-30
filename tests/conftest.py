@@ -449,6 +449,7 @@ def stub_rag_engine(monkeypatch):
         backfill_fts=lambda *args, **kwargs: 0,
         get_model=lambda *args, **kwargs: object(),
         get_model_name=lambda *args, **kwargs: "embeddinggemma",
+        ranking_settings=lambda: {"recency_weight": 0.3, "recency_decay_days": 7},
     )
     before = set(sys.modules)
     monkeypatch.setitem(sys.modules, "rag_engine", module)

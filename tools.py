@@ -14,6 +14,7 @@ from mcp import types
 import client_roots
 import rag_engine
 import sanitize
+import search_log
 from project_scope import ProjectScope, resolve_project_scope
 from provider_adapters import (
     LEGAL_PROVIDERS,
@@ -553,7 +554,7 @@ def _format_context(payload: dict) -> str:
     return "\n\n".join(parts)
 
 
-async def _call_memory_tool(name: str, arguments: dict):
+async def _call_memory_tool(name: str, arguments: dict, client: str | None = None):
     args = dict(arguments or {})
     fmt = args.pop("format", "markdown")
     service = _memory_service
@@ -598,6 +599,12 @@ async def _call_memory_tool(name: str, arguments: dict):
         message = getattr(exc, "message", None) or str(exc) or type(exc).__name__
         details = getattr(exc, "details", None)
         return _memory_error(code, message, fmt, details if isinstance(details, dict) else None)
+    if name == "search_memories":
+        search_log.record_search(name, client=client, project=project,
+                                 sort_by=args.get("sort_by", "hybrid"), query=args.get("query") or "",
+                                 ids=[r.get("memory_id") for r in payload.get("results") or []])
+    elif name == "get_memory":
+        search_log.record_follow_up(name, client=client, item_id=args["memory_id"])
     if fmt == "json":
         text = _json_text(payload)
     return [types.TextContent(type="text", text=text)]
@@ -840,10 +847,23 @@ def register_tools(server: Server):
             scope = replace(scope, note=note)
         return scope
 
+    def _client_key() -> str | None:
+        """Return a key for this tool call's MCP session, so the usage log can pair calls."""
+        try:
+            return f"{id(server.request_context.session):x}"
+        except (LookupError, AttributeError):
+            return None
+
+    def _log_turn_search(name: str, arguments: dict, scope: ProjectScope, results: list) -> None:
+        search_log.record_search(
+            name, client=_client_key(), project=scope.filter_value(),
+            sort_by=arguments.get("sort_by", "hybrid"), query=arguments.get("query") or "",
+            ids=[f"{r.get('session_id')}:{r.get('turn_index')}" for r in results])
+
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         if name in MEMORY_TOOL_NAMES:
-            return await _call_memory_tool(name, arguments)
+            return await _call_memory_tool(name, arguments, client=_client_key())
         db = get_db_path()
         current_project = _header_root()
 
@@ -873,6 +893,7 @@ def register_tools(server: Server):
                     issue_id=issue_id_arg,
                     db_path=db,
                 )
+                _log_turn_search(name, arguments, scope, results)
                 return [types.TextContent(type="text", text=format_results(results, scope))]
 
             elif name == "search_all_sessions":
@@ -909,6 +930,7 @@ def register_tools(server: Server):
                     issue_id=issue_id_arg,
                     db_path=db,
                 )
+                _log_turn_search(name, arguments, scope, results)
                 if arguments.get("format") == "json":
                     payload = {
                         "scope": {"roots": scope.filter_value(), "note": scope.note},
@@ -924,6 +946,9 @@ def register_tools(server: Server):
                     context=arguments.get("context", 2),
                     db_path=db,
                 )
+                search_log.record_follow_up(
+                    name, client=_client_key(),
+                    item_id=f"{arguments['session_id']}:{arguments['turn_index']}")
                 return [types.TextContent(type="text", text=format_turns(results))]
 
             elif name == "get_session_stats":

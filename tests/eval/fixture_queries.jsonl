@@ -1,0 +1,7 @@
+{"id": "q-ident-1", "group": "identifier", "tool": "search_all_sessions", "query": "SYN-12 parser offset", "args": {"project_root": "/tmp/synthetic"}, "expected": ["s1:10"]}
+{"id": "q-para-1", "group": "paraphrase", "tool": "search_memories", "query": "why the queue drains on restart", "args": {"project": "synthetic"}, "expected": ["m-a", "m-b"]}
+{"id": "q-buried-1", "group": "buried-fact", "tool": "search_all_sessions", "query": "the timeout picked at the end of the long debugging turn", "args": {"project_root": "/tmp/synthetic"}, "expected": ["s2:40"]}
+{"id": "q-temporal-1", "group": "temporal", "tool": "search_all_sessions", "query": "what changed in the watcher this week", "args": {"project_root": "/tmp/synthetic"}, "expected": ["s3:5"]}
+{"id": "q-cross-1", "group": "cross-project", "tool": "search_all_sessions", "query": "shared deploy script across repos", "args": {"project_root": "*"}, "expected": ["s4:1"]}
+{"id": "q-none-1", "group": "no-answer", "tool": "search_all_sessions", "query": "kubernetes helm chart for the billing service", "args": {"project_root": "/tmp/synthetic"}, "expected": []}
+{"id": "q-super-1", "group": "superseded", "tool": "search_memories", "query": "which embedding model do we use", "args": {"project": "synthetic"}, "expected": ["m-new"], "superseded": ["m-old"]}

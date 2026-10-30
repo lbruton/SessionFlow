@@ -55,6 +55,15 @@ BACKFILL_AGENT_STDOUT="$SERVER_DIR/backfill-agent.out.log"
 BACKFILL_AGENT_STDERR="$SERVER_DIR/backfill-agent.err.log"
 BACKFILL_INTERVAL_SECONDS="${SESSIONFLOW_BACKFILL_INTERVAL_SECONDS:-3600}"
 
+# Nightly retrieval eval agent. The query set and reports live outside the
+# public repo, so install-eval-agent requires both paths.
+EVAL_AGENT_LABEL="cc.lbruton.sessionflow-eval"
+EVAL_AGENT_PLIST="$LAUNCH_AGENT_DIR/${EVAL_AGENT_LABEL}.plist"
+EVAL_AGENT_STDOUT="$SERVER_DIR/eval-agent.out.log"
+EVAL_AGENT_STDERR="$SERVER_DIR/eval-agent.err.log"
+EVAL_HOUR="${SESSIONFLOW_EVAL_HOUR:-3}"
+EVAL_MINUTE="${SESSIONFLOW_EVAL_MINUTE:-30}"
+
 # Claude Desktop's stdio bridge. Installed as a copy on the internal
 # disk because Desktop's MCP child cannot read the external volume (TCC).
 MCP_BRIDGE_SOURCE="$SCRIPT_DIR/mcp-remote-wait.sh"
@@ -602,6 +611,111 @@ do_backfill_agent_status() {
     fi
 }
 
+write_eval_agent_plist() {
+    mkdir -p "$LAUNCH_AGENT_DIR"
+    cat > "$EVAL_AGENT_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyLists-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${EVAL_AGENT_LABEL}</string>
+    <!-- Calls the running server over MCP; eval_retrieval.py never loads MLX. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PYTHON}</string>
+        <string>${SCRIPT_DIR}/eval_retrieval.py</string>
+        <string>nightly</string>
+        <string>--queries</string>
+        <string>${SESSIONFLOW_EVAL_QUERIES}</string>
+        <string>--out</string>
+        <string>${SESSIONFLOW_EVAL_OUT}</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${EVAL_HOUR}</integer>
+        <key>Minute</key>
+        <integer>${EVAL_MINUTE}</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>${HOME}</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>${EVAL_AGENT_STDOUT}</string>
+    <key>StandardErrorPath</key>
+    <string>${EVAL_AGENT_STDERR}</string>
+    <key>WorkingDirectory</key>
+    <string>${SCRIPT_DIR}</string>
+</dict>
+</plist>
+PLIST
+}
+
+do_install_eval_agent() {
+    if [ -z "${SESSIONFLOW_EVAL_QUERIES:-}" ] || [ -z "${SESSIONFLOW_EVAL_OUT:-}" ]; then
+        echo "[sessionflow] Set SESSIONFLOW_EVAL_QUERIES (query set JSONL) and SESSIONFLOW_EVAL_OUT (report folder)." >&2
+        exit 1
+    fi
+    if [ ! -f "$SESSIONFLOW_EVAL_QUERIES" ]; then
+        echo "[sessionflow] No query set at $SESSIONFLOW_EVAL_QUERIES" >&2
+        exit 1
+    fi
+    local target
+    target=$(launch_agent_target)
+    if launchctl print "${target}/${EVAL_AGENT_LABEL}" >/dev/null 2>&1; then
+        launchctl bootout "$target" "$EVAL_AGENT_PLIST" 2>/dev/null || true
+    fi
+    write_eval_agent_plist
+    if launchctl bootstrap "$target" "$EVAL_AGENT_PLIST" 2>/dev/null; then
+        echo "[sessionflow] Eval LaunchAgent installed at $EVAL_AGENT_PLIST" >&2
+        printf '[sessionflow] Runs daily at %02d:%02d\n' "$EVAL_HOUR" "$EVAL_MINUTE" >&2
+    else
+        launchctl enable "${target}/${EVAL_AGENT_LABEL}" 2>/dev/null || true
+        echo "[sessionflow] Eval plist written at $EVAL_AGENT_PLIST" >&2
+        echo "[sessionflow] launchctl bootstrap reported a soft failure; tried enable." >&2
+    fi
+}
+
+do_uninstall_eval_agent() {
+    local target
+    target=$(launch_agent_target)
+    if [ -f "$EVAL_AGENT_PLIST" ]; then
+        launchctl bootout "$target" "$EVAL_AGENT_PLIST" 2>/dev/null || true
+        rm -f "$EVAL_AGENT_PLIST"
+        echo "[sessionflow] Eval LaunchAgent removed ($EVAL_AGENT_PLIST)" >&2
+    else
+        launchctl bootout "${target}/${EVAL_AGENT_LABEL}" 2>/dev/null || true
+        echo "[sessionflow] No eval plist found at $EVAL_AGENT_PLIST" >&2
+    fi
+}
+
+do_eval_agent_status() {
+    local target
+    target=$(launch_agent_target)
+    if [ -f "$EVAL_AGENT_PLIST" ]; then
+        echo "[sessionflow] Eval plist: $EVAL_AGENT_PLIST (present)" >&2
+    else
+        echo "[sessionflow] Eval plist: $EVAL_AGENT_PLIST (missing)" >&2
+    fi
+    if launchctl print "${target}/${EVAL_AGENT_LABEL}" >/dev/null 2>&1; then
+        echo "[sessionflow] Eval LaunchAgent: loaded in ${target}" >&2
+        launchctl print "${target}/${EVAL_AGENT_LABEL}" \
+            | grep -E '^[[:space:]]*(state|last exit code|pid)[[:space:]]*=' \
+            | sed 's/^[[:space:]]*/  /' >&2 || true
+        exit 0
+    else
+        echo "[sessionflow] Eval LaunchAgent: not loaded in ${target}" >&2
+        exit 1
+    fi
+}
+
 do_agent_status() {
     local target
     target=$(launch_agent_target)
@@ -680,12 +794,15 @@ case "${1:-start}" in
     install-backfill-agent)   do_install_backfill_agent ;;
     uninstall-backfill-agent) do_uninstall_backfill_agent ;;
     backfill-agent-status)    do_backfill_agent_status ;;
+    install-eval-agent)       do_install_eval_agent ;;
+    uninstall-eval-agent)     do_uninstall_eval_agent ;;
+    eval-agent-status)        do_eval_agent_status ;;
     install-mcp-bridge)       do_install_mcp_bridge ;;
     mcp-bridge-status)        do_mcp_bridge_status ;;
     install-headers-helper)   do_install_headers_helper ;;
     headers-helper-status)    do_headers_helper_status ;;
     *)
-        echo "Usage: $0 {start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-backfill-agent|uninstall-backfill-agent|backfill-agent-status|install-mcp-bridge|mcp-bridge-status|install-headers-helper|headers-helper-status}" >&2
+        echo "Usage: $0 {start|stop|status|restart|install-agent|uninstall-agent|agent-status|install-backfill-agent|uninstall-backfill-agent|backfill-agent-status|install-eval-agent|uninstall-eval-agent|eval-agent-status|install-mcp-bridge|mcp-bridge-status|install-headers-helper|headers-helper-status}" >&2
         exit 1
         ;;
 esac
