@@ -11,6 +11,7 @@ Subcommands: ``run``, ``sweep``, ``freshness``, ``usage``, ``nightly``.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -297,7 +299,10 @@ class McpClient:
     """Stateful MCP client for the SessionFlow HTTP endpoint (initialize, call, delete)."""
 
     def __init__(self, url: str = DEFAULT_URL, timeout: float = 60.0):
-        """Store the endpoint; the session opens on the first call."""
+        """Store the endpoint; a base URL such as ``http://127.0.0.1:7102`` gets ``/mcp/``."""
+        parts = urllib.parse.urlsplit(url)
+        if not parts.path.rstrip("/"):
+            url = urllib.parse.urlunsplit(parts._replace(path="/mcp/"))
         self.url = url
         self.timeout = timeout
         self.session_id: Optional[str] = None
@@ -454,16 +459,34 @@ def canary_text(token: str) -> str:
     return f"Freshness canary {token}, written by eval_retrieval.py and deleted after the probe."
 
 
+def default_lock_path() -> Path:
+    """Return the file lock that serializes freshness probes on this host."""
+    return Path.home() / ".sessionflow" / "eval-freshness.lock"
+
+
 def freshness_probe(client, *, project: str = CANARY_PROJECT, agent_id: str = "claude-code",
                     poll_s: float = 1.0, timeout_s: float = 120.0,
                     sleep: Callable[[float], None] = time.sleep,
-                    clock: Callable[[], float] = time.monotonic) -> dict:
+                    clock: Callable[[], float] = time.monotonic,
+                    lock_path: Optional[Path] = None) -> dict:
     """Write a canary memory, poll ``search_memories`` until it appears, then delete it.
 
-    The canary's fixed ``topic_key`` makes a later probe replace one left behind by
-    a failed delete. The result names the host, the time to the first hit (None on
-    timeout), the add's index outcome and the /health memory index state.
+    The ``topic_key`` names the host, so a later probe there replaces a canary a
+    failed delete left behind. ``lock_path`` makes probes on one host wait for each
+    other, and a hit counts only when the record still carries this probe's token.
     """
+    if lock_path is None:
+        return _probe(client, project, agent_id, poll_s, timeout_s, sleep, clock)
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(lock_path, "a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            return _probe(client, project, agent_id, poll_s, timeout_s, sleep, clock)
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _probe(client, project, agent_id, poll_s, timeout_s, sleep, clock) -> dict:
     token = make_token()
     result = {"host": None, "memory_id": None, "add_outcome": None, "add_index": None,
               "time_to_hit_s": None, "polls": 0, "channels": None, "health": None,
@@ -472,7 +495,7 @@ def freshness_probe(client, *, project: str = CANARY_PROJECT, agent_id: str = "c
     try:
         added = client.call("add_memory", {
             "text": canary_text(token), "agent_id": agent_id, "project": project, "type": "fact",
-            "topic_key": CANARY_TOPIC, "extra": {"source": "eval"}})
+            "topic_key": f"{CANARY_TOPIC}:{socket.gethostname()}", "extra": {"source": "eval"}})
     except EvalError as exc:
         result["error"] = str(exc)
         return result
@@ -496,7 +519,8 @@ def freshness_probe(client, *, project: str = CANARY_PROJECT, agent_id: str = "c
                 found = client.call("search_memories", {"query": token, "project": project, "n": 5})
             except EvalError as exc:
                 found, result["search_error"] = {}, str(exc)
-            if result["memory_id"] in result_ids("search_memories", found):
+            if any(r.get("memory_id") == result["memory_id"] and token in (r.get("text") or "")
+                   for r in found.get("results") or []):
                 result["time_to_hit_s"] = clock() - start
                 result["channels"] = found.get("channels")
                 break
@@ -692,7 +716,7 @@ def _cmd_sweep(args) -> int:
 def _cmd_freshness(args) -> int:
     client = McpClient(args.url)
     try:
-        result = freshness_probe(client, timeout_s=args.timeout)
+        result = freshness_probe(client, timeout_s=args.timeout, lock_path=default_lock_path())
     finally:
         client.close()
     print(render_freshness(result))
@@ -721,7 +745,7 @@ def _cmd_nightly(args) -> int:
         for sort_by in ("hybrid", "relevance"):
             reports[sort_by] = evaluate(client, queries, sort_by=sort_by, env={},
                                         queries_file=str(args.queries))
-        freshness = freshness_probe(client)
+        freshness = freshness_probe(client, lock_path=default_lock_path())
     finally:
         client.close()
     if not freshness.get("deleted") or freshness.get("time_to_hit_s") is None:

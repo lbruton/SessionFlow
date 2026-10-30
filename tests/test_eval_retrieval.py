@@ -245,20 +245,23 @@ def test_usage_rollup_empty_window():
 
 
 class FakeClient:
-    def __init__(self, hit_after=3, delete_fails=False):
+    def __init__(self, hit_after=3, delete_fails=False, stored_text=None):
         self.calls = []
         self.hit_after = hit_after
         self.delete_fails = delete_fails
         self.searches = 0
+        self.stored_text = stored_text
 
     def call(self, name, arguments):
         self.calls.append((name, arguments))
         if name == "add_memory":
+            self.stored_text = self.stored_text or arguments["text"]
             return {"memory_id": "canary-1", "outcome": "created", "index": "ok"}
         if name == "search_memories":
             self.searches += 1
             hit = self.hit_after is not None and self.searches >= self.hit_after
-            return {"results": [{"memory_id": "canary-1"}] if hit else [],
+            row = {"memory_id": "canary-1", "text": self.stored_text}
+            return {"results": [row] if hit else [],
                     "channels": ["fts"] if hit else []}
         if name == "delete_memory":
             if self.delete_fails:
@@ -292,11 +295,53 @@ def test_freshness_probe_reports_time_to_hit_and_deletes():
     assert result["health"]["last_tick_age_s"] == 1.5
     assert result["deleted"] is True
     add = client.calls[0][1]
-    assert add["topic_key"] == ev.CANARY_TOPIC
+    # One canary per host, so probes on two machines never share a record.
+    assert add["topic_key"] == f"{ev.CANARY_TOPIC}:{ev.socket.gethostname()}"
     assert add["project"] == "sessionflow" and add["type"] == "fact"
     token = client.calls[1][1]["query"]
     assert token in add["text"]
     assert client.calls[-1][0] == "delete_memory"
+
+
+def test_freshness_probe_ignores_a_record_another_probe_rewrote():
+    client, clock = FakeClient(hit_after=1, stored_text=ev.canary_text("sfcanary1")), FakeClock()
+    result = ev.freshness_probe(client, timeout_s=3, sleep=clock.sleep, clock=clock)
+    assert result["time_to_hit_s"] is None
+
+
+def test_freshness_probes_on_one_host_take_turns(tmp_path):
+    import threading
+
+    lock = tmp_path / "freshness.lock"
+    order = []
+
+    class SlowClient(FakeClient):
+        def call(self, name, arguments):
+            if name == "add_memory":
+                order.append("add")
+            if name == "delete_memory":
+                order.append("delete")
+            return super().call(name, arguments)
+
+    def probe():
+        ev.freshness_probe(SlowClient(hit_after=2), lock_path=lock, poll_s=0.05)
+
+    threads = [threading.Thread(target=probe) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert order == ["add", "delete", "add", "delete"]
+
+
+@pytest.mark.parametrize("given,want", [
+    ("http://127.0.0.1:7102", "http://127.0.0.1:7102/mcp/"),
+    ("http://127.0.0.1:7102/", "http://127.0.0.1:7102/mcp/"),
+    ("http://127.0.0.1:7102/mcp", "http://127.0.0.1:7102/mcp"),
+    ("http://127.0.0.1:7102/mcp/", "http://127.0.0.1:7102/mcp/"),
+])
+def test_server_url_points_at_the_mcp_endpoint(given, want):
+    assert ev.McpClient(given).url == want
 
 
 def test_freshness_probe_times_out_and_still_deletes():
