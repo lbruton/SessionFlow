@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-30
+
+### Fixed
+
+- `list_memories`, `search_memories` and `get_memory` print a `Source: session <id> (<provider>)` line for a memory that names the session that wrote it (SESF-90).
+
 ## [0.8.0] - 2026-10-30
 
 Project scope and index cleanup.
