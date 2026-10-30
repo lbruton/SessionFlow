@@ -38,7 +38,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          if ! [[ "$TITLE" =~ ^(feat|fix)(\([^\)]*\))?!?: ]]; then
+          if ! [[ "$TITLE" =~ ^(feat|fix)(\([^\)]*\))?!?(:|[[:space:]]) ]]; then
             echo "Title is not feat or fix; no version bump needed."
             exit 0
           fi
@@ -51,8 +51,15 @@ jobs:
             exit 1
           fi
           read_version() { git show "$1:version.py" 2>/dev/null | sed -n 's/^__version__ = "\(.*\)"$/\1/p'; }
-          old=$(read_version "$BASE")
+          old=""
+          if git cat-file -e "$BASE:version.py" 2>/dev/null; then
+            old=$(read_version "$BASE")
+          fi
           new=$(read_version "$HEAD")
+          if [[ -z "$new" ]]; then
+            echo "::error::version.py at the head has no parseable __version__."
+            exit 1
+          fi
           echo "Version: ${old:-none} -> $new"
           if [[ -n "$old" ]] && [[ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)" != "$new" || "$old" == "$new" ]]; then
             echo "::error::version.py must raise the version above $old."

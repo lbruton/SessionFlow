@@ -48,10 +48,10 @@ def test_released_headings_carry_an_iso_date():
         assert re.fullmatch(r" - \d{4}-\d{2}-\d{2}", rest), f"{v}: {rest!r}"
 
 
-def test_mcp_server_info_reports_the_version(stub_rag_engine):
+def test_mcp_server_info_reports_the_version(stub_rag_engine, monkeypatch):
     import version
 
-    sys.modules.pop("http_server", None)
+    monkeypatch.delitem(sys.modules, "http_server", raising=False)
     http_server = importlib.import_module("http_server")
 
     options = http_server.mcp_server.create_initialization_options()
@@ -59,10 +59,10 @@ def test_mcp_server_info_reports_the_version(stub_rag_engine):
 
 
 @pytest.mark.anyio
-async def test_health_reports_the_version(stub_rag_engine):
+async def test_health_reports_the_version(stub_rag_engine, monkeypatch):
     import version
 
-    sys.modules.pop("http_server", None)
+    monkeypatch.delitem(sys.modules, "http_server", raising=False)
     http_server = importlib.import_module("http_server")
 
     response = await http_server.health(None)

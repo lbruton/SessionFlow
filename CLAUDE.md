@@ -99,7 +99,7 @@ Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) o
 
 SemVer, with the version in `version.py` and the newest released heading of `CHANGELOG.md` (Keep a Changelog 1.1.0). `/health` and the MCP `serverInfo` report it. No git tags or GitHub Releases.
 
-- **Every `feat` or `fix` PR runs `/release patch|minor|major`** on its own branch before it is marked ready. `.claude/skills/release/SKILL.md` is project-owned (`release` is excluded from skills-deploy) and holds the bump rules and the `devops/version.lock` claim step.
+- **Every** `feat` or `fix` PR runs `/release patch|minor|major` on its own branch before it is marked ready. `.claude/skills/release/SKILL.md` is project-owned (`release` is excluded from skills-deploy) and holds the bump rules and the `devops/version.lock` claim step.
 - `patch`: a fix, a performance fix or a refactor with no interface change. `minor`: a new or changed MCP tool, parameter, provider, CLI command, env var, stored schema or data rewrite, or a change that refuses calls that worked before. `major` (1.0.0): once a new user can install from the README with no edits.
 - `chore`, `docs`, `ci`, `test` and `refactor` PRs do not bump. Add changelog bullets under `[Unreleased]` as you work.
 - Name the bump level and a one-line reason in the PR body; the user confirms it at review.
