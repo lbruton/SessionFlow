@@ -497,6 +497,9 @@ def _format_memory(row: dict, heading: str = "") -> str:
     lines = [f"{heading}`{row['memory_id']}`" + (f" · {meta}" if meta else "")]
     if row.get("issue_ids"):
         lines.append(f"Issues: {', '.join(row['issue_ids'])}")
+    if row.get("source_session_id"):
+        provider = f" ({row['source_provider']})" if row.get("source_provider") else ""
+        lines.append(f"Source: session {row['source_session_id']}{provider}")
     if row.get("text"):
         lines.append("")
         lines.append(row["text"])

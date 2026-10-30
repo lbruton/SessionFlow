@@ -176,3 +176,29 @@ def test_bind_address_and_routes(stub_rag_engine):
     paths = {getattr(r, "path", None) for r in http_server.app.routes}
     assert paths == {"/health", "/backfill", "/index", "/watch", "/timeline", "/mcp",
                      "/memory/restore-check"}
+
+
+_SOURCED = {"memory_id": "m-2", "text": "summary", "source_session_id": "17192d40-aaaa-bbbb-cccc-0123456789ab",
+            "source_provider": "claude_code_cli"}
+
+
+@pytest.mark.parametrize("name,method,args", [
+    ("list_memories", "list", {"project": "sessionflow"}),
+    ("search_memories", "search", {"query": "q", "project": "sessionflow"}),
+])
+def test_listing_names_the_source_session(service, monkeypatch, name, method, args):
+    async def rows(*_a, **_k):
+        return {"results": [dict(_SOURCED), {"memory_id": "m-3", "text": "imported"}], "next_cursor": None}
+    monkeypatch.setattr(service, method, rows)
+    text = _text(_call(name, dict(args)))
+    assert "Source: session 17192d40-aaaa-bbbb-cccc-0123456789ab (claude_code_cli)" in text
+    assert text.count("Source:") == 1
+
+
+def test_get_memory_names_the_source_session(service, monkeypatch):
+    async def row(*_a, **_k):
+        return {**_SOURCED, "source_provider": None}
+    monkeypatch.setattr(service, "get", row)
+    text = _text(_call("get_memory", {"memory_id": "m-2", "project": "sessionflow"}))
+    assert "Source: session 17192d40-aaaa-bbbb-cccc-0123456789ab\n" in text + "\n"
+    assert "()" not in text
