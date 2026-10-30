@@ -22,6 +22,7 @@ Semantic search over Claude Code session transcripts, expanded in SESF-6 to inge
 | Branches | `main` |
 | Issue Tracker | [Plane SESF](https://plane.lbruton.cc/lbruton/projects/3835ead1-4cc4-4f89-8145-4923068f7403/) |
 | PR Target | `main` |
+| Version | SemVer in `version.py` and [CHANGELOG.md](../CHANGELOG.md); every `feat` or `fix` PR bumps it with the `release` skill |
 | Upstream | [mwgreen/claude-code-session-rag](https://github.com/mwgreen/claude-code-session-rag) |
 
 ## Architecture
