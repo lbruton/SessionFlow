@@ -63,6 +63,15 @@ def _run(cleanup, argv):
     return cleanup.cmd_dedupe_turns(cleanup.build_parser().parse_args(argv))
 
 
+def test_row_whose_user_part_was_stripped_counts_as_a_reply(world):
+    world["rows"] = [_row("s::stripped", "s", 7, "Assistant: a reply whose user part was stripped")]
+
+    plan = dedupe_turns.plan(db_path="db")
+
+    assert plan.user_only_rows == 0
+    assert plan.groups == {}
+
+
 def test_plan_finds_duplicates_and_user_only_rows(world):
     world["rows"] = [
         _row("s::partial", "s", 7, PARTIAL), _row("s::full", "s", 7, FULL),

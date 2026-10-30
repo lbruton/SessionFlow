@@ -63,7 +63,9 @@ class DedupeResult:
 
 
 def _has_reply(row: dict) -> bool:
-    return _REPLY_MARKER in (row.get("document") or "")
+    # Boilerplate stripping can remove the whole user part, leaving the reply first.
+    document = row.get("document") or ""
+    return document.startswith(_REPLY_MARKER.lstrip()) or _REPLY_MARKER in document
 
 
 def _longest(rows: List[dict]) -> dict:
