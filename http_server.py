@@ -1117,14 +1117,16 @@ async def index_endpoint(request: Request) -> JSONResponse:
     offset = transcript_parser.get_transcript_offset(state, transcript_path)
 
     # Parse new turns
-    turns, new_offset = transcript_parser.parse_transcript(
+    parsed = transcript_parser.parse_transcript_incremental(
         transcript_path, session_id, start_offset=offset
     )
+    turns = parsed.turns
 
     if not turns:
         # Update offset even if no turns (e.g., only tool_result messages)
         transcript_parser.set_transcript_offset(
-            state, transcript_path, new_offset, project_root=project_root)
+            state, transcript_path, parsed.resume_offset, project_root=project_root,
+            consumed_offset=parsed.consumed_offset)
         transcript_parser.save_index_state(state)
         return JSONResponse({"indexed": 0, "message": "No new turns to index"})
 
@@ -1137,7 +1139,8 @@ async def index_endpoint(request: Request) -> JSONResponse:
 
     # Save state
     transcript_parser.set_transcript_offset(
-        state, transcript_path, new_offset, project_root=project_root)
+        state, transcript_path, parsed.resume_offset, project_root=project_root,
+        consumed_offset=parsed.consumed_offset)
     transcript_parser.save_index_state(state)
 
     print(f"[index] Indexed {count} turns from {os.path.basename(transcript_path)} "

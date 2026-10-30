@@ -14,17 +14,34 @@ Turn assembly:
 4. Summary entries become standalone chunks
 
 Incremental reading:
-- index_state.json tracks last_byte_offset per transcript file
-- On each invocation, seek to offset, read only new lines
+- index_state.json tracks, per transcript file, last_byte_offset (where the
+  next parse resumes) and consumed_offset (how far the file has been read)
+- The last turn stays open until a later user or summary line closes it, so
+  the next parse resumes at its user line and rebuilds it with its reply
 """
 
 import hashlib
 import json
 import os
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, NamedTuple, Optional, Tuple
 
-from provider_adapters import build_source_id, canonicalize_path
+from provider_adapters import REPLACE_SAME_TURN, build_source_id, canonicalize_path
+
+
+class ParseResult(NamedTuple):
+    """Turns parsed from a transcript and the offsets to store for it.
+
+    Attributes:
+        turns: Turn and summary chunks ready for ``rag_engine.add_turns``.
+        consumed_offset: Byte position after the last complete line read.
+        resume_offset: Where the next parse starts: the open last turn's user
+            line, else ``consumed_offset``.
+    """
+
+    turns: List[Dict]
+    consumed_offset: int
+    resume_offset: int
 
 
 def detect_project_root(transcript_path: str, max_lines: int = 30) -> str:
@@ -98,6 +115,22 @@ def parse_transcript(
     start_offset: int = 0,
     max_turn_chars: int = 8000,
 ) -> Tuple[List[Dict], int]:
+    """Parse a transcript and return ``(turns, consumed_offset)``.
+
+    See ``parse_transcript_incremental``, which also returns the resume offset
+    that ingestion must store.
+    """
+    result = parse_transcript_incremental(
+        transcript_path, session_id, start_offset, max_turn_chars)
+    return result.turns, result.consumed_offset
+
+
+def parse_transcript_incremental(
+    transcript_path: str,
+    session_id: str,
+    start_offset: int = 0,
+    max_turn_chars: int = 8000,
+) -> ParseResult:
     """Parse a Claude Code JSONL transcript into indexable turns.
 
     Args:
@@ -107,14 +140,10 @@ def parse_transcript(
         max_turn_chars: Maximum characters per turn text (truncate longer)
 
     Returns:
-        (turns, new_offset) where turns is a list of dicts ready for rag_engine.add_turns()
-        and new_offset is the byte position after the last line read.
-
-        Only newline-terminated lines are consumed. If the file ends in a
-        half-written line (Claude Code mid-write), parsing stops there and
-        new_offset points at its start so the next call re-reads it whole. A
-        user turn still pending at that point is not emitted; new_offset
-        rewinds to its user line so the turn is rebuilt with its reply.
+        A ``ParseResult``. Only newline-terminated lines are consumed. A
+        half-written last line stops the parse, and a turn still open there is
+        not emitted. A turn still open at a complete end of file is emitted, and
+        ``resume_offset`` points at its user line so its reply is picked up.
     """
     turns = []
     current_user_text = None
@@ -125,7 +154,7 @@ def parse_transcript(
 
     file_size = os.path.getsize(transcript_path)
     if start_offset >= file_size:
-        return [], file_size
+        return ParseResult([], file_size, file_size)
 
     transcript_file = os.path.basename(transcript_path)
 
@@ -262,9 +291,10 @@ def parse_transcript(
         # Half-written tail with a turn still open: its reply may be the line
         # being written. Leave the turn unflushed and resume at its user line.
         if truncated_tail and current_user_text is not None:
-            return turns, current_user_start_byte
+            return ParseResult(turns, current_user_start_byte, current_user_start_byte)
 
-        # Flush final pending turn
+        # The last turn is open: its reply may still be written. Emit it so it
+        # is searchable now, and resume at its user line to rebuild it.
         if current_user_text is not None:
             turn = _build_turn(
                 current_user_text, current_assistant_texts,
@@ -275,8 +305,9 @@ def parse_transcript(
             )
             if turn:
                 turns.append(turn)
+            return ParseResult(turns, current_offset, current_user_start_byte)
 
-    return turns, current_offset
+    return ParseResult(turns, current_offset, current_offset)
 
 
 def _build_turn(
@@ -331,6 +362,7 @@ def _build_turn(
         "timestamp": timestamp,
         "git_branch": git_branch,
         "chunk_type": chunk_type,
+        REPLACE_SAME_TURN: True,
     }
 
 
@@ -435,6 +467,8 @@ def _canonicalize_transcript_keys(state: Dict):
             continue
         if entry.get("last_byte_offset", 0) > current.get("last_byte_offset", 0):
             current["last_byte_offset"] = entry["last_byte_offset"]
+            if "consumed_offset" in entry:
+                current["consumed_offset"] = entry["consumed_offset"]
         if not current.get("project_root") and entry.get("project_root"):
             current["project_root"] = entry["project_root"]
     state["transcripts"] = merged
@@ -508,17 +542,25 @@ def save_index_state(state: Dict):
 
 
 def get_transcript_offset(state: Dict, transcript_path: str) -> int:
-    """Get the last indexed byte offset for a transcript file."""
+    """Return the byte offset where the next parse of a transcript resumes."""
     return state.get("transcripts", {}).get(transcript_path, {}).get("last_byte_offset", 0)
 
 
+def get_consumed_offset(state: Dict, transcript_path: str) -> int:
+    """Return how far a transcript has been read; a file larger than this has new lines."""
+    entry = state.get("transcripts", {}).get(transcript_path, {})
+    return entry.get("consumed_offset", entry.get("last_byte_offset", 0))
+
+
 def set_transcript_offset(state: Dict, transcript_path: str, offset: int,
-                          project_root: str = ""):
-    """Update the byte offset for a transcript file."""
+                          project_root: str = "", consumed_offset: Optional[int] = None):
+    """Store the resume offset and, when given, the consumed offset for a transcript."""
     if "transcripts" not in state:
         state["transcripts"] = {}
     if transcript_path not in state["transcripts"]:
         state["transcripts"][transcript_path] = {}
     state["transcripts"][transcript_path]["last_byte_offset"] = offset
+    state["transcripts"][transcript_path]["consumed_offset"] = (
+        offset if consumed_offset is None else consumed_offset)
     if project_root:
         state["transcripts"][transcript_path]["project_root"] = project_root

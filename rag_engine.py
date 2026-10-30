@@ -55,6 +55,7 @@ from provider_adapters import (
     LEGAL_PROVIDERS,
     LEGAL_SORT_BY,
     LEGAL_SOURCE_KINDS,
+    REPLACE_SAME_TURN,
     default_provider_metadata,
     is_valid_issue_token,
     path_has_prefix,
@@ -1014,9 +1015,11 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             except Exception as e:
                 logger.warning("Dedup check failed for doc_id %s: %s", doc_id, _scrub_exception(e))
 
+    already_indexed = [t for t in turns if t["doc_id"] in existing_ids]
     new_turns = [t for t in turns if t["doc_id"] not in existing_ids]
     new_turns = _apply_boilerplate(new_turns)
     if not new_turns:
+        _replace_stale_turns(already_indexed, db_path)
         return 0
 
     # Ingestion-time secret redaction guard. One hook over the deduped
@@ -1061,6 +1064,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
     new_turns = new_turns[:len(all_embeddings)]
     embeddings = all_embeddings
     if not new_turns:
+        _replace_stale_turns(already_indexed, db_path)
         return 0
 
     provider_defaults = default_provider_metadata()
@@ -1122,7 +1126,45 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
         # text before logging so no secret fragment can echo through the warning.
         logger.warning("FTS insert failed (non-fatal): %s", _scrub_exception(e))
 
+    _replace_stale_turns(already_indexed + new_turns, db_path)
     return len(data)
+
+
+def _replace_stale_turns(landed: List[Dict], db_path: Optional[str]) -> int:
+    """Delete other rows of the same session and turn_index as each landed turn.
+
+    Only turns flagged with ``REPLACE_SAME_TURN`` take part, and only rows with
+    ``chunk_type == "turn"`` are deleted, so summaries and other providers' rows
+    stay. Call it after the landed turns are stored, never before.
+    """
+    keep: Dict[str, Dict[int, str]] = {}
+    for t in landed:
+        if t.get(REPLACE_SAME_TURN) and t.get("chunk_type", "turn") == "turn":
+            keep.setdefault(t.get("session_id", ""), {})[int(t.get("turn_index", 0))] = t["doc_id"]
+    if not keep:
+        return 0
+
+    stale: List[str] = []
+    with milvus_client(db_path) as client:
+        for session_id, by_index in keep.items():
+            expr = (
+                f'session_id == "{_escape_filter_scalar(session_id)}" and chunk_type == "turn" '
+                f"and turn_index in {json.dumps(sorted(by_index))}"
+            )
+            try:
+                rows = client.query(collection_name=COLLECTION_NAME, filter=expr,
+                                    output_fields=["doc_id", "turn_index"])
+            except Exception as e:
+                logger.warning("Stale-turn lookup failed: %s", _scrub_exception(e))
+                continue
+            stale.extend(r["doc_id"] for r in rows
+                         if r["doc_id"] != by_index.get(int(r["turn_index"])))
+
+    for doc_id in stale:
+        result = delete_by_doc_id(doc_id, db_path=db_path)
+        if not result.fts_ok:
+            logger.warning("Stale turn %s left in FTS; cleanup.py dedupe-turns removes it", doc_id)
+    return len(stale)
 
 
 def _escape_filter_scalar(value: str) -> str:

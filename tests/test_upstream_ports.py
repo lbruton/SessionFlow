@@ -74,8 +74,9 @@ def test_backfill_keys_state_by_real_path(aliased_projects, monkeypatch):
     state = {"transcripts": {}}
     monkeypatch.setattr(file_watcher.transcript_parser, "load_index_state", lambda: state)
     monkeypatch.setattr(file_watcher.transcript_parser, "save_index_state", lambda s: None)
-    monkeypatch.setattr(file_watcher.transcript_parser, "parse_transcript",
-                        lambda path, sid, start_offset=0: ([], 0))
+    monkeypatch.setattr(file_watcher.transcript_parser, "parse_transcript_incremental",
+                        lambda path, sid, start_offset=0:
+                        file_watcher.transcript_parser.ParseResult([], 0, 0))
     monkeypatch.setattr(file_watcher.transcript_parser, "detect_project_root", lambda p: "")
     (real / "-Users-me-proj" / "abc.jsonl").write_text('{"x": 1}\n')
 
@@ -96,8 +97,9 @@ def test_filtered_backfill_includes_archived_sessions(aliased_projects, monkeypa
     parsed = []
     monkeypatch.setattr(file_watcher.transcript_parser, "load_index_state", lambda: state)
     monkeypatch.setattr(file_watcher.transcript_parser, "save_index_state", lambda s: None)
-    monkeypatch.setattr(file_watcher.transcript_parser, "parse_transcript",
-                        lambda path, sid, start_offset=0: (parsed.append(sid) or [], 0))
+    monkeypatch.setattr(file_watcher.transcript_parser, "parse_transcript_incremental",
+                        lambda path, sid, start_offset=0:
+                        file_watcher.transcript_parser.ParseResult(parsed.append(sid) or [], 0, 0))
     monkeypatch.setattr(file_watcher.transcript_parser, "detect_project_root", lambda p: "")
 
     watcher = file_watcher.GlobalTranscriptWatcher(db_path="unused")

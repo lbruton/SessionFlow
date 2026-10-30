@@ -64,10 +64,16 @@ class ClaudeCodeCliAdapter:
         source: ProviderSource,
         cursor: Optional[Dict],
     ) -> ProviderParseResult:
-        """Parse a transcript into normalized turns, resuming from ``cursor``'s byte offset."""
+        """Parse a transcript into normalized turns, resuming from ``cursor``'s byte offset.
+
+        A file whose size equals the cursor's ``consumed_offset`` has no new lines
+        and is not re-parsed, although its open last turn keeps the resume offset behind.
+        """
         start_offset = int((cursor or {}).get("last_byte_offset", 0))
         try:
-            turns, new_offset = transcript_parser.parse_transcript(
+            if cursor and cursor.get("consumed_offset") == os.path.getsize(source.path):
+                return ProviderParseResult(source=source, turns=[], cursor=cursor)
+            parsed = transcript_parser.parse_transcript_incremental(
                 source.path,
                 source.logical_session_id,
                 start_offset=start_offset,
@@ -80,7 +86,7 @@ class ClaudeCodeCliAdapter:
                 errors=[str(exc)],
             )
         normalized = []
-        for turn in turns:
+        for turn in parsed.turns:
             text = turn.get("text", turn.get("content", ""))
             normalized.append({
                 **turn,
@@ -101,7 +107,8 @@ class ClaudeCodeCliAdapter:
                 "cursor_type": "byte_offset",
                 "logical_session_id": source.logical_session_id,
                 "known_paths": [source.path],
-                "last_byte_offset": new_offset,
+                "last_byte_offset": parsed.resume_offset,
+                "consumed_offset": parsed.consumed_offset,
                 "project_root": source.project_root,
             },
         )
