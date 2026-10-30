@@ -1480,10 +1480,14 @@ client_roots.register(mcp_server)
 
 # Stateful, streamed sessions let a tool call ask the client for its roots.
 # An expired or restarted session answers 404, and the client re-initializes.
+# The idle timeout frees sessions whose client exited without a DELETE.
+MCP_SESSION_IDLE_TIMEOUT_S = 30 * 60
+
 session_manager = StreamableHTTPSessionManager(
     app=mcp_server,
     stateless=False,
     json_response=False,
+    session_idle_timeout=MCP_SESSION_IDLE_TIMEOUT_S,
 )
 
 

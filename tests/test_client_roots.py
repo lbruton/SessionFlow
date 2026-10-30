@@ -306,3 +306,8 @@ def test_no_header_on_the_tool_call_means_no_header(engine, monkeypatch):
     tools.register_tools(server)
     out = asyncio.run(server.captured["call"]("search_all_sessions", {}))
     assert out[0].text == tools.UNNAMED_SCOPE_ERROR
+
+
+def test_abandoned_sessions_expire_after_thirty_minutes():
+    http_server = importlib.import_module("http_server")
+    assert http_server.session_manager.session_idle_timeout == 30 * 60
