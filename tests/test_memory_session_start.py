@@ -29,7 +29,11 @@ def _summary(i, size=200, created="2026-10-2{}T12:00:00+00:00"):
 class FakeMCP:
     """JSON-RPC over HTTP, scripted per tool name."""
 
-    def __init__(self):
+    def __init__(self, stateful=False):
+        self.stateful = stateful
+        self.session_ids: list[str] = []
+        self.deleted: list[str] = []
+        self.missing_session = 0
         self.calls: list[dict] = []
         self.scripts: dict[str, dict] = {
             "list_memories": {"kind": "ok", "payload": {
@@ -46,6 +50,11 @@ class FakeMCP:
             def log_message(self, *args):
                 return None
 
+            def do_DELETE(self):
+                fake.deleted.append(self.headers.get("Mcp-Session-Id"))
+                self.send_response(200)
+                self.end_headers()
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 fake.calls.append(body)
@@ -54,6 +63,15 @@ class FakeMCP:
                     self.end_headers()
                     return
                 method = body.get("method")
+                self._session = None
+                if fake.stateful and method == "initialize":
+                    self._session = f"sid-{len(fake.session_ids) + 1}"
+                    fake.session_ids.append(self._session)
+                elif fake.stateful and self.headers.get("Mcp-Session-Id") not in fake.session_ids:
+                    fake.missing_session += 1
+                    self.send_response(400)
+                    self.end_headers()
+                    return
                 if method == "initialize":
                     return self._send({"jsonrpc": "2.0", "id": body["id"], "result": {
                         "protocolVersion": "2025-06-18", "capabilities": {},
@@ -84,9 +102,18 @@ class FakeMCP:
                     "content": [{"type": "text", "text": text}], "isError": False}})
 
             def _send(self, obj):
-                raw = json.dumps(obj).encode()
+                if fake.stateful:
+                    # The real server streams: a priming event, then the reply.
+                    raw = ("event: message\ndata: \n\n"
+                           f"event: message\ndata: {json.dumps(obj)}\n\n").encode()
+                    ctype = "text/event-stream"
+                else:
+                    raw = json.dumps(obj).encode()
+                    ctype = "application/json"
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
+                if getattr(self, "_session", None):
+                    self.send_header("Mcp-Session-Id", self._session)
+                self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
@@ -294,3 +321,83 @@ def test_hook_is_stdlib_only_and_never_calls_mem0():
         elif isinstance(node, ast.ImportFrom) and node.module:
             modules.add(node.module.split(".")[0])
     assert modules <= set(sys.stdlib_module_names)
+
+
+# --- Stateful MCP sessions ---------------------------------------------------
+
+
+@pytest.fixture
+def stateful_mcp():
+    server = FakeMCP(stateful=True)
+    yield server
+    server.close()
+
+
+def test_stateful_server_gets_the_session_id_and_streamed_replies(stateful_mcp, project, tmp_path):
+    ctx, _ = _run(stateful_mcp, project, tmp_path)
+    assert stateful_mcp.missing_session == 0
+    assert "summary 3" in ctx and "recalled turn one" in ctx
+
+
+def test_each_session_is_closed_after_its_tool_call(stateful_mcp, project, tmp_path):
+    _run(stateful_mcp, project, tmp_path)
+    assert stateful_mcp.session_ids
+    assert sorted(stateful_mcp.deleted) == sorted(stateful_mcp.session_ids)
+
+
+def test_hook_works_against_the_real_stateful_session_manager(project, tmp_path):
+    """Run the hook against the MCP SDK's stateful, streamed transport."""
+    import contextlib
+    import socket
+
+    import uvicorn
+    from mcp import types
+    from mcp.server import Server
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    from starlette.applications import Starlette
+    from starlette.routing import Mount
+
+    payloads = {
+        "list_memories": {"results": [_summary(3)], "next_cursor": None, "dump": {"state": "ok"}},
+        "search_all_sessions": {"results": [
+            {"doc_id": "d1", "content": "recalled turn one", "timestamp": "2026-10-25T10:00:00Z",
+             "session_id": "s", "provider": "codex", "project_root": "/p"}]},
+    }
+    server = Server("fake-sessionflow")
+
+    @server.list_tools()
+    async def _list():
+        return [types.Tool(name=n, inputSchema={"type": "object"}) for n in payloads]
+
+    @server.call_tool()
+    async def _call(name, arguments):
+        return [types.TextContent(type="text", text=json.dumps(payloads[name]))]
+
+    manager = StreamableHTTPSessionManager(app=server, stateless=False, json_response=False)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with manager.run():
+            yield
+
+    app = Starlette(routes=[Mount("/mcp", app=manager.handle_request)], lifespan=lifespan)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    uv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    thread = threading.Thread(target=uv.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not uv.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+
+        class _Url:
+            url = f"http://127.0.0.1:{port}/mcp/"
+
+        ctx, _ = _run(_Url(), project, tmp_path)
+        assert "summary 3" in ctx and "recalled turn one" in ctx
+        assert manager._server_instances == {}
+    finally:
+        uv.should_exit = True
+        thread.join(timeout=10)

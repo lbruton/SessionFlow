@@ -36,7 +36,7 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 | `cleanup_sessions` | Deletes turns by age, session ID or git branch, across every project. |
 | `sanitize_index` | A dry-run report of secrets in the index. Removes them with `apply` and `confirm`. |
 
-`search_session`, `search_all_sessions` and `get_session_stats` take `project_root`: a path, a folder name such as `CoWork`, or `"*"` for every project. The tool descriptions ask the model to pass its working directory. A client can also name the project in the `X-Project-Root` header. When neither names a project, the tool refuses the call and asks for `project_root`.
+`search_session`, `search_all_sessions` and `get_session_stats` take `project_root`: a path, a folder name such as `CoWork`, or `"*"` for every project. The tool descriptions ask the model to pass its working directory. Without the argument, the server asks the client for its MCP roots and uses the first folder. Claude Code answers with its working directory. A client can also name the project in the `X-Project-Root` header. When none of these names a project, the tool refuses the call and asks for `project_root`.
 
 ### Search examples
 
