@@ -4,7 +4,6 @@
 skill start
 skill wrap
 skill issue
-skill release
 skill pr-resolve
 skill pr-cleanup
 skill vault-update

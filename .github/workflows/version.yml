@@ -1,0 +1,67 @@
+name: Version
+
+# A feat or fix PR must raise version.py and add its CHANGELOG.md entry. Other titles (chore, docs, ci,
+# test, refactor) pass. The workflow also runs on title edits, so it stays separate from Tests.
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: version-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bump:
+    name: Version bump
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      # The title goes through env, never into the script text.
+      - name: Check the bump
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if ! [[ "$TITLE" =~ ^(feat|fix)(\([^\)]*\))?!?(:|[[:space:]]) ]]; then
+            echo "Title is not feat or fix; no version bump needed."
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE...$HEAD")
+          missing=()
+          grep -qx 'version.py' <<<"$changed" || missing+=(version.py)
+          grep -qx 'CHANGELOG.md' <<<"$changed" || missing+=(CHANGELOG.md)
+          if (( ${#missing[@]} )); then
+            echo "::error::A feat or fix PR must change ${missing[*]}. Run /release with patch, minor or major."
+            exit 1
+          fi
+          read_version() { git show "$1:version.py" 2>/dev/null | sed -n 's/^__version__ = "\(.*\)"$/\1/p'; }
+          old=""
+          if git cat-file -e "$BASE:version.py" 2>/dev/null; then
+            old=$(read_version "$BASE")
+          fi
+          new=$(read_version "$HEAD")
+          if [[ -z "$new" ]]; then
+            echo "::error::version.py at the head has no parseable __version__."
+            exit 1
+          fi
+          echo "Version: ${old:-none} -> $new"
+          if [[ -n "$old" ]] && [[ "$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)" != "$new" || "$old" == "$new" ]]; then
+            echo "::error::version.py must raise the version above $old."
+            exit 1
+          fi

@@ -53,6 +53,7 @@ from tools import register_tools, set_current_project_root, set_memory_service
 import memory_store
 import secret_redaction
 import socket
+from version import __version__
 
 logger = logging.getLogger("sessionflow")
 
@@ -960,6 +961,7 @@ async def health(request: Request) -> JSONResponse:
         "status": "starting" if starting else "ok",
         "startup": _startup_state,
         "server": "sessionflow",
+        "version": __version__,
         "port": PORT,
         "model_name": rag_engine.get_model_name(),
         "model_loaded": _model_loaded,
@@ -1458,6 +1460,7 @@ async def lifespan(app: Starlette):
 
 mcp_server = Server(
     "sessionflow",
+    version=__version__,
     instructions=(
         "SessionFlow searches past conversation turns from Claude Code, Codex, OpenCode "
         "and Antigravity. Pass your current working directory as project_root on "
