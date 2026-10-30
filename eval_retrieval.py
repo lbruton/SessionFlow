@@ -37,6 +37,8 @@ FETCH_N = 10
 CANARY_TOPIC = "eval:freshness"
 CANARY_PROJECT = "sessionflow"
 REFORMULATION_WINDOW_S = 60
+# MCP clientInfo name of this harness; the usage rollup skips its calls.
+EVAL_CLIENT_NAME = "eval-retrieval"
 
 # Ranking env vars the server reports under /health "ranking", and their keys there.
 RANKING_ENV = {
@@ -333,7 +335,7 @@ class McpClient:
     def _open(self) -> None:
         self.session_id = None
         self._request("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
-                                     "clientInfo": {"name": "eval-retrieval", "version": "1"}})
+                                     "clientInfo": {"name": EVAL_CLIENT_NAME, "version": "1"}})
         self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
     def call(self, name: str, arguments: dict) -> dict:
@@ -552,11 +554,15 @@ def usage_rollup(entries: list[dict], *, now: datetime, days: int = 7) -> dict:
 
     A follow-up counts as top 3 when it opens one of the first three IDs of the
     same client's latest search. A search counts as reformulated when the same
-    client searches again within 60 s with no follow-up in between.
+    client searches again within 60 s with no follow-up in between. Calls from
+    this harness (client ``eval-retrieval:...``) are skipped and counted.
     """
     cutoff = now - timedelta(days=days)
-    timed = []
+    timed, skipped = [], 0
     for e in entries:
+        if str(e.get("client") or "").startswith(f"{EVAL_CLIENT_NAME}:"):
+            skipped += 1
+            continue
         try:
             ts = datetime.fromisoformat(e["ts"])
         except (TypeError, ValueError):
@@ -586,6 +592,7 @@ def usage_rollup(entries: list[dict], *, now: datetime, days: int = 7) -> dict:
         "follow_up_top3": top3, "reformulated_searches": reformulated,
         "follow_up_top3_share": top3 / follow_ups if follow_ups else None,
         "reformulation_share": reformulated / searches if searches else None,
+        "eval_calls_skipped": skipped,
     }
 
 

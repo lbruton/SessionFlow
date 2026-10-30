@@ -221,6 +221,19 @@ def test_usage_rollup_counts_top_three_follow_ups_and_reformulations():
     assert roll["reformulation_share"] == 0.25
 
 
+def test_usage_rollup_skips_eval_clients():
+    eval_client = f"{ev.EVAL_CLIENT_NAME}:1f"
+    entries = [
+        {"ts": _at(i), "kind": "search", "tool": "search_memories", "client": eval_client, "ids": []}
+        for i in range(10)
+    ] + [{"ts": _at(20), "kind": "search", "tool": "search_memories", "client": "claude-code:2a",
+          "ids": ["m1"]}]
+    roll = ev.usage_rollup(entries, now=datetime(2026, 10, 30, 13, 0, tzinfo=timezone.utc), days=7)
+    assert roll["searches"] == 1
+    assert roll["reformulated_searches"] == 0
+    assert roll["eval_calls_skipped"] == 10
+
+
 def test_usage_rollup_empty_window():
     roll = ev.usage_rollup([], now=datetime.now(timezone.utc), days=7)
     assert roll["searches"] == 0

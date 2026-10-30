@@ -848,11 +848,17 @@ def register_tools(server: Server):
         return scope
 
     def _client_key() -> str | None:
-        """Return a key for this tool call's MCP session, so the usage log can pair calls."""
+        """Return ``<client name>:<session>`` for the usage log, which pairs calls by it.
+
+        The client name lets the usage rollup skip the eval harness's own traffic.
+        """
         try:
-            return f"{id(server.request_context.session):x}"
+            session = server.request_context.session
         except (LookupError, AttributeError):
             return None
+        params = getattr(session, "client_params", None)
+        name = getattr(getattr(params, "clientInfo", None), "name", None) or "unknown"
+        return f"{name}:{id(session):x}"
 
     def _log_turn_search(name: str, arguments: dict, scope: ProjectScope, results: list) -> None:
         search_log.record_search(

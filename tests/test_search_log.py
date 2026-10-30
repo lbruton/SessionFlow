@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import json
 import stat
+import types
 
 import pytest
 
@@ -83,10 +84,14 @@ class StubService:
         return {"memory_id": memory_id, "text": "t"}
 
 
-def _call(name, arguments):
+def _call(name, arguments, client_name=None):
     captured = {}
 
     class _Server:
+        if client_name:
+            request_context = types.SimpleNamespace(session=types.SimpleNamespace(
+                client_params=types.SimpleNamespace(clientInfo=types.SimpleNamespace(name=client_name))))
+
         def list_tools(self):
             return lambda fn: fn
 
@@ -123,6 +128,13 @@ def test_get_turns_is_logged_as_a_turn_id(home, monkeypatch):
     _call("get_turns", {"session_id": "abc", "turn_index": 42})
     (line,) = _lines(home)
     assert line["tool"] == "get_turns" and line["id"] == "abc:42"
+
+
+def test_client_key_names_the_mcp_client(home, monkeypatch, service):
+    monkeypatch.setenv("SESSIONFLOW_SEARCH_LOG", "1")
+    _call("get_memory", {"memory_id": "m-1"}, client_name="eval-retrieval")
+    (line,) = _lines(home)
+    assert line["client"].startswith("eval-retrieval:")
 
 
 def test_tools_write_nothing_when_off(home, service):
