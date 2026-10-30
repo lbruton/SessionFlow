@@ -9,6 +9,8 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-30
+
 ### Added
 
 - `eval_retrieval.py` scores a labelled JSONL query set against the running server: recall@5, MRR and nDCG@10 per query group, plus a current-first rate for superseded decisions and the top hit score for no-answer queries. `run`, `sweep` (restarts the LaunchAgent once per env value; needs `--yes`), `freshness` (a canary memory, deleted after the probe), `usage` and `nightly` subcommands (SESF-82).
