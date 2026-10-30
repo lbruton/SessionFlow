@@ -248,3 +248,61 @@ def test_http_server_uses_stateful_streamed_sessions():
     assert manager.stateless is False
     assert manager.json_response is False
     assert types.RootsListChangedNotification in http_server.mcp_server.notification_handlers
+
+
+# ---------------------------------------------------------------------------
+# The header fallback reads the current HTTP request, not the session's context
+# ---------------------------------------------------------------------------
+
+class _Headers(dict):
+    def get(self, key, default=None):
+        return super().get(key.lower(), default)
+
+
+class _StubServer:
+    """A server whose request context carries this call's HTTP request."""
+
+    def __init__(self, header):
+        class _Request:
+            headers = _Headers({"x-project-root": header} if header else {})
+
+        class _Ctx:
+            session = _FakeSession(supports=False)
+            request_id = 1
+            request = _Request()
+
+        self._ctx = _Ctx()
+        self.captured = {}
+
+    @property
+    def request_context(self):
+        return self._ctx
+
+    def list_tools(self):
+        def deco(fn):
+            self.captured["list"] = fn
+            return fn
+        return deco
+
+    def call_tool(self):
+        def deco(fn):
+            self.captured["call"] = fn
+            return fn
+        return deco
+
+
+def test_header_comes_from_the_tool_calls_own_request(engine, monkeypatch):
+    # The ContextVar holds the initialize request's header in a stateful session.
+    monkeypatch.setattr(tools, "get_current_project_root", lambda: ROOT)
+    server = _StubServer(OTHER)
+    tools.register_tools(server)
+    asyncio.run(server.captured["call"]("search_all_sessions", {}))
+    assert engine["search"] == [OTHER]
+
+
+def test_no_header_on_the_tool_call_means_no_header(engine, monkeypatch):
+    monkeypatch.setattr(tools, "get_current_project_root", lambda: ROOT)
+    server = _StubServer(None)
+    tools.register_tools(server)
+    out = asyncio.run(server.captured["call"]("search_all_sessions", {}))
+    assert out[0].text == tools.UNNAMED_SCOPE_ERROR

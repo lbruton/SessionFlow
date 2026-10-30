@@ -812,12 +812,26 @@ def register_tools(server: Server):
             ),
         ]
 
+    def _header_root() -> str | None:
+        """Return this tool call's X-Project-Root header.
+
+        A stateful session task keeps the context of its initialize request, so
+        the middleware's ContextVar is read only when there is no HTTP request.
+        """
+        try:
+            request = server.request_context.request
+        except (LookupError, AttributeError):
+            request = None
+        if request is None:
+            return get_current_project_root()
+        return request.headers.get("x-project-root", "").strip() or None
+
     async def _scope(arg: str | None, db: str) -> ProjectScope:
         """Resolve the scope from the argument, then the client's roots, then the header."""
         from_roots = None
         if not (arg or "").strip():
             from_roots = await client_roots.current_project_root(server)
-        scope = await resolve_scope(arg, from_roots or get_current_project_root(), db)
+        scope = await resolve_scope(arg, from_roots or _header_root(), db)
         if from_roots:
             note = "from client roots" + (f"; {scope.note}" if scope.note else "")
             scope = replace(scope, note=note)
@@ -828,7 +842,7 @@ def register_tools(server: Server):
         if name in MEMORY_TOOL_NAMES:
             return await _call_memory_tool(name, arguments)
         db = get_db_path()
-        current_project = get_current_project_root()
+        current_project = _header_root()
 
         try:
             if name == "search_session":
