@@ -741,11 +741,16 @@ def cmd_dedupe_turns(args) -> int:
     print(f"\nSessions with a transcript: {result.sessions_on_disk}")
     print(f"Sessions without one:       {result.sessions_missing}")
     print(f"Turns rebuilt:              {result.rebuilt_turns}")
-    print(f"Rows deleted (keep longest): {result.deleted_rows}")
+    print(f"Rows deleted:               {result.deleted_rows}")
+    failed = False
+    if result.deferred_turns:
+        print(f"Rebuilds deferred by the embedding budget: {result.deferred_turns} "
+              "(old rows kept; re-run to finish)")
+        failed = True
     if result.fts_failed:
         print(f"FTS delete failures: {result.fts_failed} (re-run to converge)")
-        return 1
-    return 0
+        failed = True
+    return 1 if failed else 0
 
 
 def cmd_reembed(args) -> int:

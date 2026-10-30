@@ -25,12 +25,18 @@ def _turn(doc_id, session, turn_index, text):
 @pytest.fixture
 def world(monkeypatch):
     """Stub the index scan, the transcript parse and both writers."""
-    state = {"rows": [], "parsed": {}, "added": [], "deleted": []}
+    state = {"rows": [], "parsed": {}, "added": [], "deleted": [], "deferred": set()}
 
     monkeypatch.setattr(dedupe_turns, "_indexed_rows", lambda db_path: list(state["rows"]))
     monkeypatch.setattr(dedupe_turns, "_parse_sessions",
                         lambda session_ids: {s: state["parsed"][s]
                                              for s in session_ids if s in state["parsed"]})
+    monkeypatch.setattr(
+        dedupe_turns, "_stored_doc_ids",
+        lambda doc_ids, db_path: {d for d in doc_ids
+                                  if d not in state["deferred"]
+                                  and (d in {t["doc_id"] for t in state["added"]}
+                                       or d in {r["doc_id"] for r in state["rows"]})})
 
     def _add(turns, db_path=None):
         state["added"].extend(turns)
@@ -92,6 +98,27 @@ def test_rebuilt_turn_already_indexed_is_not_deleted(world):
     dedupe_turns.apply(dedupe_turns.plan(db_path="db"), db_path="db")
 
     assert world["deleted"] == ["s::partial"]
+
+
+def test_deferred_rebuild_keeps_its_old_rows(world):
+    world["rows"] = [_row("u::partial", "u", 3, PARTIAL)]
+    world["parsed"] = {"u": [_turn("u::full", "u", 3, FULL)]}
+    world["deferred"] = {"u::full"}
+
+    result = dedupe_turns.apply(dedupe_turns.plan(db_path="db"), db_path="db")
+
+    assert world["deleted"] == []
+    assert result.rebuilt_turns == 0
+    assert result.deferred_turns == 1
+
+
+def test_cli_exits_nonzero_when_rebuilds_are_deferred(world, cleanup):
+    world["rows"] = [_row("u::partial", "u", 3, PARTIAL)]
+    world["parsed"] = {"u": [_turn("u::full", "u", 3, FULL)]}
+    world["deferred"] = {"u::full"}
+
+    assert _run(cleanup, ["dedupe-turns", "--apply", "--yes"]) == 1
+    assert world["deleted"] == []
 
 
 def test_indexed_rows_include_fts_only_rows(monkeypatch):

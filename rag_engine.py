@@ -1141,6 +1141,8 @@ def _replace_stale_turns(landed: List[Dict], db_path: Optional[str]) -> int:
     for t in landed:
         if t.get(REPLACE_SAME_TURN) and t.get("chunk_type", "turn") == "turn":
             keep.setdefault(t.get("session_id", ""), {})[int(t.get("turn_index", 0))] = t["doc_id"]
+    if not keep:
+        return 0
 
     stale: List[str] = []
     with milvus_client(db_path) as client:

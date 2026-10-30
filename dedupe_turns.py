@@ -46,14 +46,16 @@ class DedupeResult:
     """What ``apply`` changed.
 
     Attributes:
-        rebuilt_turns: Turns re-parsed from a transcript and passed to ``add_turns``.
-        deleted_rows: Rows deleted by keep-longest, outside ``add_turns``.
-        fts_failed: Keep-longest deletes that reached Milvus but not FTS.
+        rebuilt_turns: Turns re-parsed from a transcript and confirmed stored.
+        deferred_turns: Rebuilt turns ``add_turns`` did not store; their old rows stay.
+        deleted_rows: Rows deleted by ``apply`` itself, outside ``add_turns``.
+        fts_failed: Deletes that reached Milvus but not FTS.
         sessions_on_disk: Affected sessions whose transcript was found.
         sessions_missing: Affected sessions whose transcript is gone.
     """
 
     rebuilt_turns: int = 0
+    deferred_turns: int = 0
     deleted_rows: int = 0
     fts_failed: int = 0
     sessions_on_disk: int = 0
@@ -87,6 +89,18 @@ def _fts_rows(db_path: Optional[str]) -> List[dict]:
         rag_engine._fts.close_ephemeral(conn)
     return [{"doc_id": d, "session_id": s, "turn_index": int(t), "document": c,
              "project_root": p} for d, s, t, c, p in found]
+
+
+def _stored_doc_ids(doc_ids: List[str], db_path: Optional[str]) -> Set[str]:
+    found: Set[str] = set()
+    with rag_engine.milvus_client(db_path) as client:
+        for start in range(0, len(doc_ids), 500):
+            chunk = doc_ids[start:start + 500]
+            quoted = ", ".join(f'"{rag_engine._escape_filter_scalar(d)}"' for d in chunk)
+            rows = client.query(collection_name=rag_engine.COLLECTION_NAME,
+                                filter=f"doc_id in [{quoted}]", output_fields=["doc_id"])
+            found.update(r["doc_id"] for r in rows)
+    return found
 
 
 def _indexed_rows(db_path: Optional[str]) -> List[dict]:
@@ -166,19 +180,26 @@ def apply(plan: DedupePlan, db_path: Optional[str] = None) -> DedupeResult:
         else:
             result.sessions_missing += 1
 
-        rebuilt, superseded = [], []
+        rebuilt, superseded = [], {}
         for turn_index, rows in sorted(groups.items()):
             turn = turns.get(turn_index)
             if turn is not None:
                 rebuilt.append({**turn, "project_root": _longest(rows).get("project_root", "")})
-                superseded.extend(r for r in rows if r["doc_id"] != turn["doc_id"])
+                superseded[turn["doc_id"]] = [r for r in rows if r["doc_id"] != turn["doc_id"]]
             elif len(rows) > 1:
                 _keep_longest(rows, db_path, result)
-        if rebuilt:
-            rag_engine.add_turns(rebuilt, db_path=db_path)
-            result.rebuilt_turns += len(rebuilt)
-        # add_turns replaces stale rows it finds in Milvus; deleting by doc_id
-        # also clears rows that only FTS still holds.
-        for row in superseded:
-            _delete(row["doc_id"], db_path, result)
+        if not rebuilt:
+            continue
+        rag_engine.add_turns(rebuilt, db_path=db_path)
+        # add_turns may defer turns when the embedding budget refuses a batch,
+        # so a predecessor is deleted only once its replacement is stored.
+        stored = _stored_doc_ids(list(superseded), db_path)
+        for doc_id, old_rows in superseded.items():
+            if doc_id not in stored:
+                result.deferred_turns += 1
+                continue
+            result.rebuilt_turns += 1
+            # Deleting by doc_id also clears rows that only FTS still holds.
+            for row in old_rows:
+                _delete(row["doc_id"], db_path, result)
     return result
