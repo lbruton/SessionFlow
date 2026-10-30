@@ -80,8 +80,29 @@ def test_session_on_disk_is_rebuilt_from_its_transcript(world):
 
     assert [t["doc_id"] for t in world["added"]] == ["u::full"]
     assert world["added"][0]["project_root"] == "/indexed"
-    assert world["deleted"] == []
+    # The partial row is deleted by doc_id too, which also clears an FTS-only copy.
+    assert world["deleted"] == ["u::partial"]
     assert result.rebuilt_turns == 1
+
+
+def test_rebuilt_turn_already_indexed_is_not_deleted(world):
+    world["rows"] = [_row("s::partial", "s", 7, PARTIAL), _row("s::full", "s", 7, FULL)]
+    world["parsed"] = {"s": [_turn("s::full", "s", 7, FULL)]}
+
+    dedupe_turns.apply(dedupe_turns.plan(db_path="db"), db_path="db")
+
+    assert world["deleted"] == ["s::partial"]
+
+
+def test_indexed_rows_include_fts_only_rows(monkeypatch):
+    milvus = [_row("s::full", "s", 7, FULL)]
+    fts = [_row("s::full", "s", 7, FULL), _row("s::orphan", "s", 7, PARTIAL)]
+    monkeypatch.setattr(dedupe_turns, "_milvus_rows", lambda db_path: list(milvus))
+    monkeypatch.setattr(dedupe_turns, "_fts_rows", lambda db_path: list(fts))
+
+    rows = dedupe_turns._indexed_rows("db")
+
+    assert sorted(r["doc_id"] for r in rows) == ["s::full", "s::orphan"]
 
 
 def test_session_without_transcript_keeps_the_longest_row(world):

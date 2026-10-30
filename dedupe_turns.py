@@ -68,11 +68,37 @@ def _longest(rows: List[dict]) -> dict:
     return max(rows, key=lambda r: (_has_reply(r), len(r.get("document") or "")))
 
 
-def _indexed_rows(db_path: Optional[str]) -> List[dict]:
+def _milvus_rows(db_path: Optional[str]) -> List[dict]:
     expr = f'provider == "{PROVIDER}" and chunk_type == "turn"'
     fields = ["doc_id", "session_id", "turn_index", "document", "project_root"]
     return [row for batch in rag_engine._query_batches(fields, filter_expr=expr, db_path=db_path)
             for row in batch]
+
+
+def _fts_rows(db_path: Optional[str]) -> List[dict]:
+    if not db_path:
+        return []
+    conn = rag_engine._fts.connection(db_path)
+    try:
+        found = rag_engine._fts.select_where(
+            conn, ["doc_id", "session_id", "turn_index", "content", "project_root"],
+            "provider = ? AND chunk_type = 'turn'", (PROVIDER,))
+    finally:
+        rag_engine._fts.close_ephemeral(conn)
+    return [{"doc_id": d, "session_id": s, "turn_index": int(t), "document": c,
+             "project_root": p} for d, s, t, c, p in found]
+
+
+def _indexed_rows(db_path: Optional[str]) -> List[dict]:
+    """Return every Claude Code turn row once, from Milvus and from FTS.
+
+    FTS is read too, because a failed FTS delete leaves a row that Milvus no
+    longer holds but keyword search still returns.
+    """
+    rows = {row["doc_id"]: row for row in _milvus_rows(db_path)}
+    for row in _fts_rows(db_path):
+        rows.setdefault(row["doc_id"], row)
+    return list(rows.values())
 
 
 def _parse_sessions(session_ids: Iterable[str]) -> Dict[str, List[dict]]:
@@ -105,15 +131,18 @@ def plan(db_path: Optional[str] = None) -> DedupePlan:
     return result
 
 
+def _delete(doc_id: str, db_path: Optional[str], result: DedupeResult) -> None:
+    outcome = rag_engine.delete_by_doc_id(doc_id, db_path=db_path)
+    result.deleted_rows += 1
+    if not outcome.fts_ok:
+        result.fts_failed += 1
+
+
 def _keep_longest(rows: List[dict], db_path: Optional[str], result: DedupeResult) -> None:
     keep = _longest(rows)
     for row in rows:
-        if row is keep:
-            continue
-        outcome = rag_engine.delete_by_doc_id(row["doc_id"], db_path=db_path)
-        result.deleted_rows += 1
-        if not outcome.fts_ok:
-            result.fts_failed += 1
+        if row is not keep:
+            _delete(row["doc_id"], db_path, result)
 
 
 def apply(plan: DedupePlan, db_path: Optional[str] = None) -> DedupeResult:
@@ -137,14 +166,19 @@ def apply(plan: DedupePlan, db_path: Optional[str] = None) -> DedupeResult:
         else:
             result.sessions_missing += 1
 
-        rebuilt = []
+        rebuilt, superseded = [], []
         for turn_index, rows in sorted(groups.items()):
             turn = turns.get(turn_index)
             if turn is not None:
                 rebuilt.append({**turn, "project_root": _longest(rows).get("project_root", "")})
+                superseded.extend(r for r in rows if r["doc_id"] != turn["doc_id"])
             elif len(rows) > 1:
                 _keep_longest(rows, db_path, result)
         if rebuilt:
             rag_engine.add_turns(rebuilt, db_path=db_path)
             result.rebuilt_turns += len(rebuilt)
+        # add_turns replaces stale rows it finds in Milvus; deleting by doc_id
+        # also clears rows that only FTS still holds.
+        for row in superseded:
+            _delete(row["doc_id"], db_path, result)
     return result
