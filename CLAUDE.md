@@ -94,3 +94,13 @@ Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) o
 - Branch protections: signed commits + PR required
 - Worktree branches for all changes
 - **Request a CodeRabbit review on every code PR.** The repo has fewer than 10 stars, so CodeRabbit does not review automatically. Right after opening a PR that touches code (`.py`, shell scripts, tests, or config the server reads), post a PR comment containing only `@coderabbitai review`. Skip it for chore PRs that only change instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.agents/`, skills) or docs. Copilot and Codex reviews may run too; request CodeRabbit anyway.
+
+## Versioning
+
+SemVer, with the version in `version.py` and the newest released heading of `CHANGELOG.md` (Keep a Changelog 1.1.0). `/health` and the MCP `serverInfo` report it. No git tags or GitHub Releases.
+
+- **Every `feat` or `fix` PR runs `/release patch|minor|major`** on its own branch before it is marked ready. `.claude/skills/release/SKILL.md` is project-owned (`release` is excluded from skills-deploy) and holds the bump rules and the `devops/version.lock` claim step.
+- `patch`: a fix, a performance fix or a refactor with no interface change. `minor`: a new or changed MCP tool, parameter, provider, CLI command, env var, stored schema or data rewrite, or a change that refuses calls that worked before. `major` (1.0.0): once a new user can install from the README with no edits.
+- `chore`, `docs`, `ci`, `test` and `refactor` PRs do not bump. Add changelog bullets under `[Unreleased]` as you work.
+- Name the bump level and a one-line reason in the PR body; the user confirms it at review.
+- The `Version` workflow (`.github/workflows/version.yml`) fails a PR titled `feat` or `fix` that does not raise `version.py` and change `CHANGELOG.md`. `tests/test_version.py` checks that the two agree.

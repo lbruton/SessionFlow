@@ -8,6 +8,9 @@ __pycache__/
 mcp-config-template.json
 .mcp.json
 
+# Version claims shared by local Claude and Codex sessions (.claude/skills/release)
+devops/version.lock
+
 # DocVault (Obsidian) per-machine state
 DocVault/.obsidian/workspace*.json
 DocVault/.obsidian/graph.json

@@ -1,42 +1,185 @@
 # Changelog
 
-All notable changes to this fork are documented here.
-For upstream changes, see [UPSTREAM-README.md](UPSTREAM-README.md).
+All notable changes to SessionFlow are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html). Versions 0.1.0 to 0.8.0 were reconstructed from
+the git history in SESF-87: each one summarizes a phase of work and carries the date of its last merge. They
+have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-README.md](UPSTREAM-README.md).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-30
+
+Project scope and index cleanup.
+
 ### Added
 
-- Memories (DEVS-145): verbatim agent notes (session summaries, decisions, handoffs, facts and 8 more types) stored in Postgres with full version history, and searched through a Milvus `memories` collection and a local `memories_fts.db` that SessionFlow rebuilds from Postgres. Seven MCP tools: `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`, `delete_memory`, `get_memory_context`, each with Markdown or JSON output and structured errors; `search_all_sessions` also takes `format: "json"`. Topic-key replace, content-hash dedupe, same-project supersession, tombstone deletes, per-consumer index acknowledgements with a sync loop and reconcile, embedding generations, similarity warnings, a read-only audit, and related conversations by issue ID and day. `memory_cli.py` adds `rebuild`, `reindex`, `audit`, `import` (mem0 export) and `restore-check`. `hooks/memory-session-start.py` gives Claude Code and Codex the newest session summaries and recent turns at session start, with a local cache. Memory is optional and configured by `SESSIONFLOW_MEMORY_DSN`; transcript search is unaffected when it is unset or unreachable.
-- Schema drift detection compares field types and the vector dimension, and every Milvus collection helper takes a `CollectionSpec` (DEVS-145).
-- Retroactive secret sanitizer for already-indexed data (SESF-42). New `cleanup.py sanitize` CLI subcommand and `sanitize_index` MCP tool remove secrets already persisted in the Milvus `document` field, the FTS5 `content` column, and the embedding vector. Default `--dry-run` reports per-rule counts + affected turns and writes a value-free `0600` audit JSONL (`~/.sessionflow/audit/`) without touching any store; `--apply --yes` redacts in place and re-embeds the redacted text (throttled through the embedding budget, checkpointed/resumable); `--apply --yes --drop` deletes affected turns instead. New primitives: `secret_redaction.scan_spans` (per-occurrence, value-free audit spans, reusing the SESF-41 detector), `rag_engine.upsert_document` (Milvus upsert-by-PK + FTS metadata-preserving rewrite) and `delete_by_doc_id`. Both surfaces refuse to apply without explicit confirmation and never emit a secret value. **Redaction is irreversible and is not a substitute for rotation — rotate any key that was ever indexed.**
-- Issue-ID extraction at ingestion: every turn is scanned for issue references (`[A-Z][A-Z0-9]+-\d+`, with a technical-standard prefix denylist) and tagged into a new `issue_ids` Milvus `VARCHAR(4096)` field + FTS5 metadata column (SESF-25)
-- Optional `issue_id` filter on the `search_all_sessions` and `search_session` MCP tools — structured exact-token pre-filter, combinable with `provider` / `project_root` / `date_from` / `date_to` (SESF-25)
-- `get_issue_timeline` MCP tool and `GET /timeline` HTTP endpoint — cross-harness chronological feed of all turns referencing an issue, merged from the structured field + FTS fallback, deduped by `doc_id`, sorted oldest-first, with `limit` / `provider` / `date_from` / `date_to` (SESF-25, SESF-26)
-- `detect_project_root()` in `transcript_parser.py` — peeks first 30 lines of a transcript for `cwd`, resolves to git root (SR-2)
-- Auto-derive project root from Claude Code slug names via greedy path reconstruction with filesystem verification (SR-2)
-- `date_from` / `date_to` optional parameters on `search_all_sessions` tool for date-range filtering (SR-3)
-- Date filters applied to both Milvus vector search and FTS5 keyword search (SR-3)
-- Progress checkpoints every 100 files during backfill with progress logging (SR-1)
-- Milvus error recovery pause (5s) on GOAWAY/readonly/connection errors during backfill (SR-1)
-- Startup delay (3s) for backfill task so HTTP server can bind before embedding work begins (SR-1)
-- `.claude/project.json` for project onboarding
-
-### Fixed
-- The server no longer SIGSEGVs when a search runs while backfill is embedding (SESF-72). The `search_session` and `search_all_sessions` MCP tools called the blocking `rag_engine.search()` on the event-loop thread, so MLX ran there and on the `mlx-embed` thread at once, and MLX's Metal command encoder is not thread-safe. The tools now `await rag_engine.search_async()`, which also takes `date_from`, `date_to` and `issue_id`. In server mode `embed_texts` hands any off-thread caller (such as `sanitize_index` re-embeds) to `mlx-embed`, and `_mlx_eval_lock` serializes inline callers. Before server mode is up, `search_async` runs in a worker thread instead of raising.
-- Claude Desktop no longer loses the SessionFlow connector after a reboot (SESF-70). The HTTP server now binds port 7102 at once and loads the embedding model, Milvus server mode, workers and watcher in the background; `/health` answers 503 `status: "starting"` until that finishes. `rag_engine.get_model()` is now guarded by a lock so a tool call during startup cannot load the model twice. New `mcp-remote-wait.sh` waits for the port before it runs `npx mcp-remote`, so a client launched at login no longer exits on the first refused connection.
-- The Claude Desktop connector now actually starts (SESF-71). Desktop could not run `mcp-remote-wait.sh` from the external `/Volumes/DATA` volume (macOS TCC, `Operation not permitted`). New `sessionflow-server.sh install-mcp-bridge` copies it to `~/.local/bin/sessionflow-mcp-remote` on the internal disk, and `mcp-bridge-status` reports drift. The bridge no longer gives up after 45s: it waits with no cap, logs to stderr at most once a minute, and nudges the LaunchAgent with `launchctl kickstart` while the port is refused. `SESSIONFLOW_CONNECT_MAX_WAIT` is gone.
-- Backfill silently dying after Milvus-lite gRPC `GOAWAY` / `too_many_pings` under heavy insert load (SR-1)
-- `project_root` empty on 99%+ of indexed rows — slug map wasn't populated during initial bulk index, and unregistered slugs defaulted to `""` (SR-2)
-- Bare `-` slug incorrectly mapping to `/` as project root (SR-2)
-- Server startup health check timeout caused by backfill monopolizing the async event loop (SR-1)
+- `version.py` holds the version. `/health` and the MCP `serverInfo` report it, and this changelog is
+  restored (SESF-87).
+- Project scope resolves `project_root` to indexed roots: a path covers its subfolders and worktrees, a bare
+  name matches a root by folder name, and search and stats output opens with a `Scope:` line (SESF-64).
+- The server takes the current project from the client's MCP roots when a call names none. MCP sessions are
+  stateful and streamed so a tool call can send `roots/list` (SESF-86).
+- Harness boilerplate (task notifications, system reminders, compaction summaries, command output) is
+  stripped from every turn at ingest (SESF-66).
+- `cleanup.py rewrite` strips and re-embeds stored rows in place, with backups, a checkpoint and `verify`
+  (SESF-62, SESF-66). `cleanup.py dedupe-turns` repairs duplicate partial turns (SESF-74).
 
 ### Changed
-- Backfill loop now throttles with 50ms `asyncio.sleep` between transcripts instead of `sleep(0)` (SR-1)
-- `_get_project_root_for_slug()` now attempts path derivation from slug name before returning empty string (SR-2)
 
-## [0.1.0] — 2026-04-16
+- `search_all_sessions`, `search_session` and `get_session_stats` refuse a call that names no project. Pass
+  the working directory or `'*'` (SESF-85).
+- EmbeddingGemma applies its 512-token sliding window on local layers, so long texts embed like the
+  reference model (SESF-62).
+
+### Fixed
+
+- The headers helper sends the project root instead of `~/.claude`, and sends no project from Desktop spare
+  folders (SESF-83, SESF-84).
+- Codex Desktop external-import turns are skipped, because their original Claude Code transcripts are
+  already indexed (SESF-66).
+- The open last turn of a transcript is rebuilt with its reply instead of staying indexed as a user-only
+  turn (SESF-74).
+
+## [0.7.0] - 2026-10-28
+
+Memory store.
 
 ### Added
-- `date_from` / `date_to` filters on `search_all_sessions` (initial implementation before reliability fixes)
-- Fork from upstream at `637e6f4`
+
+- Memories backed by Postgres, with version history, topic-key replace, supersession and tombstone deletes.
+  A Milvus `memories` collection and a local `memories_fts.db` are rebuilt from Postgres by a sync loop
+  (DEVS-145).
+- Seven MCP memory tools: `add_memory`, `search_memories`, `list_memories`, `get_memory`, `update_memory`,
+  `delete_memory` and `get_memory_context`. `search_all_sessions` also takes `format: "json"` (DEVS-145).
+- `memory_cli.py` with `rebuild`, `reindex`, `audit`, `import` and `restore-check`, and a session-start hook
+  that prints the newest session summaries for Claude Code and Codex (DEVS-145).
+- CI runs ruff, pytest against Postgres 17, and Vale (DEVS-147).
+- `cleanup.py prune-codex` deletes orphan Codex turns (SESF-80).
+
+### Fixed
+
+- The memory sync loop is bounded by a timeout and reports a stall in `/health` (SESF-79).
+- Codex turns carry the task start time and the session branch, and resumed parses no longer create orphan
+  turns (SESF-80).
+
+## [0.6.0] - 2026-10-22
+
+Index quality and Desktop reliability.
+
+### Added
+
+- `cleanup.py reembed` rewrites stored vectors in place, chunked under the MLX crash limit, with float16
+  backups (SESF-57).
+- The `claude_cowork_legacy` provider ingests legacy Cowork agent-mode transcripts (SESF-60).
+- `SESSIONFLOW_PROJECT_PATH_MAP` remaps moved project folders at ingest, and `cleanup.py retag-project`
+  fixes indexed rows (SESF-73).
+- Search results print the signals that ranked each row, and identifier queries weight keyword ranks
+  (SESF-77).
+
+### Removed
+
+- The Claude Desktop Cowork probe. Desktop Code-tab sessions are indexed as `claude_code_cli` (SESF-59).
+
+### Fixed
+
+- Batched EmbeddingGemma documents mask their padding, so a batched vector matches the single one (SESF-57).
+- The server binds port 7102 before the model and Milvus finish loading, and the Desktop MCP bridge runs
+  from the internal disk and waits for the port (SESF-70, SESF-71).
+- Every MLX evaluation runs on the `mlx-embed` thread, which stops a SIGSEGV when a search runs during
+  backfill (SESF-72).
+- The relevance score is no longer inverted, half-written transcript lines are not skipped, and index state
+  is saved atomically (SESF-55, SESF-56, SESF-58).
+- Query-less listings print "Listing" instead of "Relevance: 0.00" (SESF-68).
+
+## [0.5.0] - 2026-06-14
+
+Secret safety.
+
+### Added
+
+- Secret redaction at ingest covers the embedding, the Milvus `document` and the FTS `content`. It runs in
+  `report` or `enforce` mode, with an operator allowlist and per-rule counts in `get_stats` (SESF-41).
+- `cleanup.py sanitize` and the `sanitize_index` MCP tool remove secrets that are already indexed. A dry run
+  is the default, and `apply` refuses without confirmation (SESF-42).
+
+### Security
+
+- Redaction is irreversible and is not a substitute for rotation. Rotate any key that was ever indexed.
+
+### Fixed
+
+- The recency listing streams through `query_iterator` instead of hitting the Milvus result limit (SESF-36).
+- Timeline pagination orders by parsed UTC timestamps (SESF-43).
+- The Tier-2 auth-keyword rule rejects non-literal assignment values (SESF-44).
+
+## [0.4.0] - 2026-06-07
+
+Issue IDs and timeline.
+
+### Added
+
+- Every turn is tagged with the issue IDs it mentions, in a new `issue_ids` Milvus field and FTS column
+  (SESF-25).
+- An `issue_id` filter on `search_all_sessions` and `search_session` (SESF-25).
+- The `get_issue_timeline` MCP tool and `GET /timeline` give a cross-harness, oldest-first feed of the
+  turns that reference an issue (SESF-25, SESF-26).
+
+### Fixed
+
+- The hybrid FTS path applies the `issue_id` filter (SESF-32).
+- Filter values use C-style escaping, and timeline pagination is memory-bounded (SESF-33, SESF-34).
+- FTS backfill heals after a transient schema drift, and the schema cache is invalidated on change
+  (SESF-38, SESF-40).
+
+## [0.3.0] - 2026-05-31
+
+Ranking and recall.
+
+### Added
+
+- Hybrid recency-aware ranking and a `sort_by` parameter (`hybrid`, `relevance`, `recency`) on the search
+  tools (SESF-24).
+- `search_all_sessions` without a `query` lists the newest turns first (SESF-16).
+- Antigravity Desktop turns take their `project_root` from the summaries metadata (SESF-17, SESF-29).
+
+## [0.2.0] - 2026-05-28
+
+Multi-harness ingestion.
+
+### Added
+
+- Provider adapters ingest Codex, OpenCode and Antigravity sessions next to Claude Code, sharing one
+  embedding budget (SESF-6, SESF-19).
+- `cleanup.py backfill` pauses, resumes and enqueues provider backfill, and its queue survives a restart
+  (SESF-6).
+- A home-directory launcher for hooks, an optional login LaunchAgent and an hourly backfill LaunchAgent
+  (SESF-7, SESF-20).
+
+### Fixed
+
+- Schema drift is detected at startup, and a destructive migration is opt-in (SESF-11).
+- The backfill turn budget defaults to 100,000, FTS connections are per thread, and OpenCode timestamps are
+  ISO-8601 (SESF-12, SESF-13, SESF-14).
+- A running server drains backfill jobs enqueued from the CLI (SESF-15).
+
+## [0.1.0] - 2026-05-20
+
+Fork baseline.
+
+### Added
+
+- Fork from `mwgreen/claude-code-session-rag` at `637e6f4`.
+- `date_from` and `date_to` filters on `search_all_sessions`, applied to Milvus and FTS (SR-3).
+- Milvus Standalone through an environment variable, with Milvus Lite as the fallback.
+- `detect_project_root()` and project roots derived from Claude Code slug names (SR-2).
+- Backfill checkpoints every 100 files and pauses after Milvus connection errors (SR-1).
+
+### Fixed
+
+- Backfill no longer dies after a Milvus Lite gRPC `GOAWAY` (SR-1).
+- FTS backfill runs in the background, so the server binds without waiting for it (SR-1).
+- MLX embedding calls run on one dedicated thread, and the watchdog uses a heartbeat file (SESF-3, SESF-8).
+- A new collection is loaded after it is created (SESF-2).
+- Milvus drains through `query_iterator` and FTS inserts are streamed (SESF-4, SESF-5).

@@ -75,11 +75,14 @@ Renamed from `SRAG-` (originally `SF-` in `.claude/project.json` post-rebrand) o
 - Worktree branches for all changes
 - **Request a CodeRabbit review on every code PR.** The repo has fewer than 10 stars, so CodeRabbit does not review automatically. Right after opening a PR that touches code (`.py`, shell scripts, tests, or config the server reads), post a PR comment containing only `@coderabbitai review`. Skip it for chore PRs that only change instruction files (`CLAUDE.md`, `AGENTS.md`, `.claude/`, `.agents/`, skills) or docs. Copilot and Codex reviews may run too; request CodeRabbit anyway.
 
+## Versioning
+
+See CLAUDE.md "Versioning". Every `feat` or `fix` PR runs the `release` skill (`.agents/skills/release/SKILL.md`) with `patch`, `minor` or `major` before it is marked ready; the `Version` workflow fails one that does not raise `version.py` and change `CHANGELOG.md`.
+
 ## Project-Local Agent Assets
 
 - Claude project metadata lives in `.claude/project.json`.
-- No project-local Claude skills, commands, or agents are currently present under `.claude/`.
-- Codex-compatible project-local mirrors belong under `.agents/` if future `.claude/skills`, `.claude/commands`, or `.claude/agents` assets are added.
+- The `release` skill is project-owned: `.claude/skills/release/SKILL.md` and its identical Codex mirror `.agents/skills/release/SKILL.md`. `release` is excluded from skills-deploy, which reports drift between the two copies.
 
 <!-- skills-deploy:rules begin -->
 ## Library rules (managed by skills-deploy)

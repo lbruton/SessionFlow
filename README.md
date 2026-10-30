@@ -2,6 +2,8 @@
 
 Semantic search over coding-agent conversation history. One persistent HTTP server indexes transcripts as they change and serves hybrid vector and keyword search over MCP.
 
+`version.py` holds the version, and [CHANGELOG.md](CHANGELOG.md) lists the changes in each version. `curl http://127.0.0.1:7102/health` reports the version a server runs.
+
 ## What it does
 
 SessionFlow watches session transcripts from Claude Code and other providers. It embeds every turn with a local MLX model (EmbeddingGemma-300M on Apple Silicon) and exposes the index through MCP tools. Search by meaning, keyword, date range, project, git branch or issue ID.

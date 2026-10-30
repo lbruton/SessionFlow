@@ -25,6 +25,8 @@
     "extra": [
       "vale:Prose"
     ],
-    "exclude": []
+    "exclude": [
+      "release"
+    ]
   }
 }
