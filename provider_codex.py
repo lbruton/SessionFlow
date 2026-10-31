@@ -376,6 +376,12 @@ class CodexAdapter:
                     by_ordinal[task.ordinal] = turn
 
         turns = [by_ordinal[ordinal] for ordinal in sorted(by_ordinal)]
+        # A partial parse can shorten a task or shift ordinals, and REPLACE_SAME_TURN
+        # would then delete complete rows: emit nothing and keep the previous cursor.
+        if errors:
+            turns, current = [], sorted(emitted)
+        else:
+            current = sorted(turn["doc_id"] for turn in turns)
         return ProviderParseResult(
             source=source,
             turns=[turn for turn in turns if turn["doc_id"] not in emitted],
@@ -383,7 +389,7 @@ class CodexAdapter:
                 "cursor_type": "record_set",
                 "logical_session_id": source.logical_session_id,
                 "known_paths": known_paths,
-                "emitted_ids": sorted(turn["doc_id"] for turn in turns),
+                "emitted_ids": current,
                 "project_root": source.project_root,
             },
             errors=errors,

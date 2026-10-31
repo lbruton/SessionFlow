@@ -430,13 +430,27 @@ def test_codex_unreadable_rollout_is_reported_as_an_error(tmp_path, monkeypatch)
     assert parsed.errors
 
 
-def test_codex_malformed_record_is_reported_as_an_error(tmp_path):
+def test_codex_malformed_record_withholds_turns_and_keeps_the_cursor(tmp_path):
     home = _write_rewritten_rollout(tmp_path, ZST_LINES)
+    first = _parse(home)
     rollout = next((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
     with rollout.open("a") as handle:
         handle.write('{"type": "response_item", "payload": {"role": "assist')
 
+    parsed = _parse(home, cursor=first.cursor)
+
+    assert parsed.errors == [f"{rollout.name}: 1 malformed line"]
+    assert parsed.turns == []
+    assert parsed.cursor["emitted_ids"] == first.cursor["emitted_ids"]
+
+
+def test_codex_partial_parse_emits_nothing_on_a_first_parse(tmp_path):
+    home = _write_rewritten_rollout(tmp_path, ZST_LINES)
+    rollout = next((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    with rollout.open("a") as handle:
+        handle.write("{not json\n")
+
     parsed = _parse(home)
 
-    assert len(parsed.turns) == 2
-    assert parsed.errors == [f"{rollout.name}: 1 malformed line"]
+    assert parsed.turns == []
+    assert parsed.cursor["emitted_ids"] == []
