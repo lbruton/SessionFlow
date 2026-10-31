@@ -49,12 +49,13 @@ def no_live_index(monkeypatch):
         raise AssertionError("test reached the live index")
 
     for name in ("_query_batches", "add_turns", "get_rows_by_ids", "replace_passages",
-                 "write_passage_fts",
+                 "write_passage_fts", "_rewrite_fts_row",
                  "delete_by_doc_id", "milvus_client", "embed_texts"):
         monkeypatch.setattr(rag_engine, name, _refuse)
     monkeypatch.setattr(reembed, "_embed_documents", _refuse)
     monkeypatch.setattr(passage_backfill, "_stored_doc_ids", _refuse)
     monkeypatch.setattr(passage_backfill, "_sources", _refuse)
+    monkeypatch.setattr(passage_backfill, "_in_fts", _refuse)
 
 
 class _Budget:
@@ -124,6 +125,7 @@ def world(monkeypatch, tmp_path):
     monkeypatch.setattr(passage_backfill, "_stored_doc_ids",
                         lambda doc_ids, db_path=None: set(doc_ids) & w.stored)
     monkeypatch.setattr(passage_backfill, "get_embedding_budget", lambda: w.budget)
+    monkeypatch.setattr(passage_backfill, "_in_fts", lambda doc_id, db_path=None: True)
     return w
 
 
@@ -387,6 +389,7 @@ def test_would_store_mirrors_the_boilerplate_drop():
 
 def test_failed_passage_fts_write_is_retried_before_done(world, monkeypatch):
     world.rows = {2: _row(2, "s::long", _words(1000), turn_index=2)}
+    monkeypatch.setattr(rag_engine, "_rewrite_fts_row", lambda doc_id, row, db_path=None: True)
     real_replace = rag_engine.replace_passages
 
     def _replace_fts_fails(parent_doc_id, built, vectors, db_path=None):
@@ -471,3 +474,22 @@ def test_resumed_session_cleans_up_a_cut_row_whose_full_turn_is_stored(world):
     assert [[t["doc_id"] for t in batch] for batch in world.added] == [["s::full"]]
     assert all(r["doc_id"] != "s::cut" for r in world.rows.values())
     assert report.uncut == 0
+
+
+def test_uncut_turn_missing_from_fts_is_retried_before_done(world, monkeypatch):
+    world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1)}
+    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", _words(30), turn_index=1)]}
+    rewritten = []
+    monkeypatch.setattr(passage_backfill, "_in_fts", lambda doc_id, db_path=None: False)
+    monkeypatch.setattr(rag_engine, "_rewrite_fts_row",
+                        lambda doc_id, row, db_path=None: rewritten.append(doc_id) or True)
+    monkeypatch.setattr(rag_engine, "write_passage_fts", lambda *a, **k: True)
+    monkeypatch.setattr(rag_engine, "_pk_from_doc_id",
+                        lambda doc_id: next(pk for pk, r in world.rows.items()
+                                            if r["doc_id"] == doc_id))
+
+    report = passage_backfill.run(confirmed=True)
+
+    assert report.status == "done"
+    assert report.uncut == 1 and report.fts_pending == 0
+    assert rewritten == ["s::full"]

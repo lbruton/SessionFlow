@@ -160,6 +160,21 @@ def _stored_doc_ids(doc_ids: List[str], db_path: Optional[str]) -> Set[str]:
     return found
 
 
+def _in_fts(doc_id: str, db_path: Optional[str]) -> bool:
+    """Return True when the FTS sidecar holds ``doc_id``; a failed read counts as missing."""
+    if not db_path:
+        return True
+    conn = None
+    try:
+        conn = rag_engine._fts.connection(db_path)
+        return bool(rag_engine._fts.select_where(conn, ["doc_id"], "doc_id = ?", (doc_id,)))
+    except Exception:  # noqa: BLE001 - the retry rewrites the row either way
+        return False
+    finally:
+        if conn is not None:
+            rag_engine._fts.close_ephemeral(conn)
+
+
 # --- State -------------------------------------------------------------------
 
 
@@ -279,6 +294,10 @@ def _uncut_session(state: dict, entry: list, sources: Dict[SessionKey, list],
             return "embedding budget deferred re-parsed turns"
         stored.add(turn["doc_id"])
         state["uncut"] += 1
+        # add_turns logs an FTS insert failure and goes on; the turn and its passages
+        # share one insert, so a missing parent row means both need the retry.
+        if not _in_fts(turn["doc_id"], db_path):
+            state["fts_retry"].append(rag_engine._pk_from_doc_id(turn["doc_id"]))
         _save_state(state)
     state["discarded"] += len(turns) - len(kept)
     return None
@@ -295,13 +314,15 @@ def _build(row: dict) -> List[dict]:
 
 
 def _retry_fts(state: dict, db_path: Optional[str]) -> None:
-    """Rewrite the FTS passages that failed earlier; keep the ones that fail again."""
+    """Rewrite the FTS rows of turns and passages that failed earlier; keep the ones that fail again."""
     still = []
     for pk in state.get("fts_retry", []):
         try:
             rows = rag_engine.get_rows_by_ids([pk], db_path=db_path)
-            ok = not rows or rag_engine.write_passage_fts(rows[0]["doc_id"], _build(rows[0]),
-                                                          db_path=db_path)
+            ok = not rows or (
+                rag_engine._rewrite_fts_row(rows[0]["doc_id"], rows[0], db_path)
+                and rag_engine.write_passage_fts(rows[0]["doc_id"], _build(rows[0]),
+                                                 db_path=db_path))
         except Exception:  # noqa: BLE001 - keep the entry for the next run
             ok = False
         if not ok:
