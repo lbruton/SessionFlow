@@ -50,4 +50,4 @@ async def test_health_reports_ranking(stub_rag_engine, monkeypatch):
     monkeypatch.delitem(sys.modules, "http_server", raising=False)
     http_server = importlib.import_module("http_server")
     response = await http_server.health(None)
-    assert json.loads(response.body)["ranking"] == {"recency_weight": 0.3, "recency_decay_days": 7}
+    assert json.loads(response.body)["ranking"] == {"recency_weight": 0.15, "recency_decay_days": 7}
