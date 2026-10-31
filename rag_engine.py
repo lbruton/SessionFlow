@@ -1101,32 +1101,8 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
         return 0
 
     provider_defaults = default_provider_metadata()
-    data = []
-    for turn, emb in zip(new_turns, embeddings):
-        # Stable hash: SHA-256 truncated to int64. Python's hash() is
-        # randomized per process, so the same doc_id would get different
-        # primary keys across server restarts.
-        int_id = _pk_from_doc_id(turn["doc_id"])
-        data.append({
-            "id": int_id,
-            "vector": emb,
-            "document": _truncate_utf8(turn["text"], 65535),
-            "doc_id": turn["doc_id"],
-            "session_id": turn.get("session_id", ""),
-            "logical_session_id": turn.get("logical_session_id", turn.get("session_id", "")),
-            "provider": turn.get("provider", provider_defaults["provider"]),
-            "source_kind": turn.get("source_kind", provider_defaults["source_kind"]),
-            "source_class": turn.get("source_class", provider_defaults["source_class"]),
-            "source_id": turn.get("source_id", ""),
-            "source_path": turn.get("source_path", turn.get("transcript_file", "")),
-            "transcript_file": turn.get("transcript_file", ""),
-            "turn_index": turn.get("turn_index", 0),
-            "timestamp": turn.get("timestamp", ""),
-            "git_branch": turn.get("git_branch", ""),
-            "chunk_type": turn.get("chunk_type", "turn"),
-            "project_root": turn.get("project_root", ""),
-            "issue_ids": turn["_issue_ids"],
-        })
+    data = [_milvus_row(turn, emb, provider_defaults)
+            for turn, emb in zip(new_turns, embeddings)]
 
     with milvus_client(db_path) as client:
         client.insert(collection_name=COLLECTION_NAME, data=data)
@@ -1135,24 +1111,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
     try:
         if db_path:
             fts_conn = _fts.connection(db_path)
-            fts_records = [{
-                "doc_id": t["doc_id"],
-                "content": t["text"],
-                "session_id": t.get("session_id", ""),
-                "logical_session_id": t.get("logical_session_id", t.get("session_id", "")),
-                "provider": t.get("provider", provider_defaults["provider"]),
-                "source_kind": t.get("source_kind", provider_defaults["source_kind"]),
-                "source_class": t.get("source_class", provider_defaults["source_class"]),
-                "source_id": t.get("source_id", ""),
-                "source_path": t.get("source_path", t.get("transcript_file", "")),
-                "git_branch": t.get("git_branch", ""),
-                "turn_index": t.get("turn_index", 0),
-                "timestamp": t.get("timestamp", ""),
-                "chunk_type": t.get("chunk_type", "turn"),
-                "project_root": t.get("project_root", ""),
-                "issue_ids": t["_issue_ids"],
-            } for t in new_turns]
-            _fts.insert(fts_conn, fts_records)
+            _fts.insert(fts_conn, [_fts_record(t, provider_defaults) for t in new_turns])
             _fts.close_ephemeral(fts_conn)
     except Exception as e:
         # The FTS payload holds Turn content, so scrub the exception
@@ -1161,6 +1120,92 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
 
     _replace_stale_turns(already_indexed + new_turns, db_path)
     return len(data)
+
+
+def _milvus_row(turn: Dict, vector: List[float], defaults: Dict) -> Dict:
+    """Return the Milvus row of ``turn``; ``turn["_issue_ids"]`` is already set."""
+    return {
+        # sha256-derived, because Python's hash() differs per process.
+        "id": _pk_from_doc_id(turn["doc_id"]),
+        "vector": vector,
+        "document": _truncate_utf8(turn["text"], 65535),
+        "doc_id": turn["doc_id"],
+        "session_id": turn.get("session_id", ""),
+        "logical_session_id": turn.get("logical_session_id", turn.get("session_id", "")),
+        "provider": turn.get("provider", defaults["provider"]),
+        "source_kind": turn.get("source_kind", defaults["source_kind"]),
+        "source_class": turn.get("source_class", defaults["source_class"]),
+        "source_id": turn.get("source_id", ""),
+        "source_path": turn.get("source_path", turn.get("transcript_file", "")),
+        "transcript_file": turn.get("transcript_file", ""),
+        "turn_index": turn.get("turn_index", 0),
+        "timestamp": turn.get("timestamp", ""),
+        "git_branch": turn.get("git_branch", ""),
+        "chunk_type": turn.get("chunk_type", "turn"),
+        "project_root": turn.get("project_root", ""),
+        "issue_ids": turn["_issue_ids"],
+    }
+
+
+def _fts_record(turn: Dict, defaults: Dict) -> Dict:
+    """Return the FTS sidecar record of ``turn``; ``turn["_issue_ids"]`` is already set."""
+    return {
+        "doc_id": turn["doc_id"],
+        "content": turn["text"],
+        "session_id": turn.get("session_id", ""),
+        "logical_session_id": turn.get("logical_session_id", turn.get("session_id", "")),
+        "provider": turn.get("provider", defaults["provider"]),
+        "source_kind": turn.get("source_kind", defaults["source_kind"]),
+        "source_class": turn.get("source_class", defaults["source_class"]),
+        "source_id": turn.get("source_id", ""),
+        "source_path": turn.get("source_path", turn.get("transcript_file", "")),
+        "git_branch": turn.get("git_branch", ""),
+        "turn_index": turn.get("turn_index", 0),
+        "timestamp": turn.get("timestamp", ""),
+        "chunk_type": turn.get("chunk_type", "turn"),
+        "project_root": turn.get("project_root", ""),
+        "issue_ids": turn["_issue_ids"],
+    }
+
+
+def replace_passages(parent_doc_id: str, built: List[Dict], vectors: List[List[float]],
+                     db_path: Optional[str] = None) -> bool:
+    """Replace the stored passages of ``parent_doc_id`` with ``built`` and their vectors.
+
+    Deletes the parent's passages in Milvus and FTS, then inserts the new ones, so
+    a repeated call leaves one copy. Passages carry ``_issue_ids``.
+
+    Args:
+        parent_doc_id: Doc_id of the parent turn.
+        built: Passage dicts from ``passages.build_passages``, all of one turn.
+        vectors: One vector per passage.
+        db_path: Milvus DB path; also derives the FTS sidecar path.
+
+    Returns:
+        False when an FTS write failed; the server's FTS healing adds the missing rows.
+    """
+    if not built:
+        return True
+    defaults = default_provider_metadata()
+    with milvus_client(db_path) as client:
+        _delete_milvus_passages(client, parent_doc_id, built[0])
+        client.insert(collection_name=COLLECTION_NAME,
+                      data=[_milvus_row(p, v, defaults) for p, v in zip(built, vectors)])
+    if not db_path:
+        return True
+    conn = None
+    try:
+        conn = _fts.connection(db_path)
+        _fts.delete_where(conn, "doc_id >= ? AND doc_id < ?",
+                          (f"{parent_doc_id}::p", f"{parent_doc_id}::q"))
+        _fts.insert(conn, [_fts_record(p, defaults) for p in built])
+        return True
+    except Exception as e:
+        logger.warning("FTS passage write failed: %s", _scrub_exception(e))
+        return False
+    finally:
+        if conn is not None:
+            _fts.close_ephemeral(conn)
 
 
 _offset_tokenizer = None

@@ -212,8 +212,11 @@ class _BudgetDenied(Exception):
     """The shared embedding budget refused a batch (paused or capped)."""
 
 
-def _embed_documents(budget, texts: List[str]) -> List[list]:
-    """Embed ``texts`` as documents through the shared budget (cooldown + accounting)."""
+def _embed_documents(budget, texts: List[str], titles: Optional[List[str]] = None) -> List[list]:
+    """Embed ``texts`` as documents through the shared budget (cooldown + accounting).
+
+    ``titles`` fills the model's title slot per text; None keeps the default prefix.
+    """
     chars = sum(len(t) for t in texts)
     decision = budget.before_batch(batch_size=len(texts), estimated_chars=chars)
     if not decision.allowed and decision.retry_after_seconds > 0:
@@ -223,7 +226,10 @@ def _embed_documents(budget, texts: List[str]) -> List[list]:
         raise _BudgetDenied(decision.reason)
     started = _monotonic()
     try:
-        vectors = rag_engine.embed_texts(texts, is_query=False)
+        if titles is None:
+            vectors = rag_engine.embed_texts(texts, is_query=False)
+        else:
+            vectors = rag_engine.embed_texts(texts, is_query=False, titles=titles)
     except Exception as e:
         budget.after_batch(_monotonic() - started, 0, error=e)
         raise
