@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-10-30
+
+### Fixed
+
+- Transcript keyword search builds its FTS5 query from the quoted terms joined with OR, so natural-language questions and queries with an issue ID such as `SESF-57 padding` get keyword hits in hybrid search. Identifiers stay one phrase, stopwords are dropped, and memory search uses the same builder (SESF-93).
+
 ## [0.9.1] - 2026-10-30
 
 ### Changed
