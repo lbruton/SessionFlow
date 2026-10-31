@@ -169,3 +169,13 @@ def test_cli_exits_nonzero_while_sessions_wait_for_backfill(world, cleanup, caps
     assert _run(cleanup, ["dedupe-codex", "--apply", "--yes"]) == 1
     assert world["deleted"] == []
     assert "backfill" in capsys.readouterr().out
+
+
+def test_unreadable_session_is_left_alone(world):
+    world["rows"] = [_row("codex:s:old", "s", 230, FULL), _row("codex:s:old2", "s", 233, FULL)]
+    world["parsed"] = {"s": None}
+
+    plan = dedupe_codex.plan(db_path="db")
+
+    assert plan.stale == {} and plan.duplicates == {}
+    assert plan.unreadable_sessions == 1

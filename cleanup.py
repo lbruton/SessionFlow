@@ -672,8 +672,12 @@ def cmd_prune_codex(args) -> int:
     parsed: set = set()
     sessions: set = set()
     for source in adapter.discover_sources():
+        result = adapter.parse_source(source, cursor=None)
+        # A rollout that failed to read is not an empty one; keep its rows.
+        if result.errors:
+            continue
         sessions.add(source.logical_session_id)
-        for turn in adapter.parse_source(source, cursor=None).turns:
+        for turn in result.turns:
             parsed.add(turn["doc_id"])
 
     orphans = sorted(
@@ -785,6 +789,9 @@ def cmd_dedupe_codex(args) -> int:
     print(f"Sessions without one:      {plan.sessions_missing}")
     print(f"Replaced rows to delete:   {stale}")
     print(f"Duplicate rows to delete:  {duplicates}")
+    if plan.unreadable_sessions:
+        print(f"Sessions whose rollout failed to read: {plan.unreadable_sessions} "
+              "(their rows are kept)")
     if plan.waiting_sessions:
         print(f"Sessions waiting for the backfill: {plan.waiting_sessions} "
               f"({plan.waiting_turns} turns not indexed yet; their rows are kept). Run "

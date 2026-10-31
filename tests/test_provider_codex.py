@@ -409,3 +409,22 @@ def test_codex_long_task_is_cut_like_a_claude_turn(tmp_path):
 
     assert turn["text"] == ("User: q\n\nAssistant: " + "x" * MAX_TURN_CHARS)[:MAX_TURN_CHARS] \
         + "\n\n[truncated]"
+
+
+def test_codex_unreadable_rollout_is_reported_as_an_error(tmp_path, monkeypatch):
+    import provider_codex
+    from provider_codex import CodexAdapter
+
+    home = _write_rewritten_rollout(tmp_path, ZST_LINES)
+    adapter = CodexAdapter(home=home)
+    source = adapter.discover_sources()[0]
+
+    def _fail(path):
+        raise OSError("gone")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(provider_codex, "iter_rollout_lines", _fail)
+    parsed = adapter.parse_source(source, cursor=None)
+
+    assert parsed.turns == []
+    assert parsed.errors

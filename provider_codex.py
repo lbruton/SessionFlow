@@ -345,6 +345,7 @@ class CodexAdapter:
             known_paths = [fallback] if fallback else []
         emitted: set[str] = set((cursor or {}).get("emitted_ids", []))
         by_ordinal: Dict[int, dict] = {}
+        errors: List[str] = []
         for path in known_paths:
             try:
                 entries = []
@@ -353,7 +354,9 @@ class CodexAdapter:
                         entries.append(json.loads(line))
                     except json.JSONDecodeError:
                         continue
-            except (OSError, UnicodeDecodeError):
+            except (OSError, UnicodeDecodeError) as exc:
+                # Callers that delete rows must tell a failed read from an empty rollout.
+                errors.append(f"{Path(path).name}: {exc}")
                 continue
             tasks, branch = _parse_tasks(entries)
             for task in tasks:
@@ -376,6 +379,7 @@ class CodexAdapter:
                 "emitted_ids": sorted(turn["doc_id"] for turn in turns),
                 "project_root": source.project_root,
             },
+            errors=errors,
         )
 
     def watch_roots(self) -> List[ProviderWatchRoot]:

@@ -31,6 +31,7 @@ class CodexDedupePlan:
         duplicates: Repeated rows of sessions whose rollout is gone.
         waiting_sessions: Sessions on disk with parsed turns not yet in Milvus.
         waiting_turns: Parsed turns not yet in Milvus.
+        unreadable_sessions: Sessions whose rollout failed to read; their rows are kept.
         sessions_on_disk: Indexed sessions whose rollout was found.
         sessions_missing: Indexed sessions whose rollout is gone.
     """
@@ -39,6 +40,7 @@ class CodexDedupePlan:
     duplicates: Dict[str, List[str]] = field(default_factory=dict)
     waiting_sessions: int = 0
     waiting_turns: int = 0
+    unreadable_sessions: int = 0
     sessions_on_disk: int = 0
     sessions_missing: int = 0
 
@@ -87,15 +89,23 @@ def _indexed_rows(db_path: Optional[str]) -> List[dict]:
     return list(rows.values())
 
 
-def _parse_sessions() -> Dict[str, List[dict]]:
-    """Parse every Codex rollout on disk; a session whose tasks are all skipped maps to []."""
+def _parse_sessions() -> Dict[str, Optional[List[dict]]]:
+    """Parse every Codex rollout on disk.
+
+    A session whose tasks are all skipped maps to []; one whose rollout failed to
+    read maps to None.
+    """
     from provider_codex import CodexAdapter
 
     adapter = CodexAdapter()
-    parsed: Dict[str, List[dict]] = {}
+    parsed: Dict[str, Optional[List[dict]]] = {}
     for source in adapter.discover_sources():
-        parsed.setdefault(source.logical_session_id, []).extend(
-            adapter.parse_source(source, cursor=None).turns)
+        result = adapter.parse_source(source, cursor=None)
+        session_id = source.logical_session_id
+        if result.errors or (session_id in parsed and parsed[session_id] is None):
+            parsed[session_id] = None
+            continue
+        parsed.setdefault(session_id, []).extend(result.turns)
     return parsed
 
 
@@ -143,6 +153,9 @@ def plan(db_path: Optional[str] = None) -> CodexDedupePlan:
             continue
         result.sessions_on_disk += 1
         turns = parsed[session_id]
+        if turns is None:
+            result.unreadable_sessions += 1
+            continue
         in_milvus = {row["doc_id"] for row in rows if row["in_milvus"]}
         missing = {t["doc_id"] for t in turns if _would_store(t)} - in_milvus
         if missing:
