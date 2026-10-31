@@ -364,3 +364,72 @@ def test_canary_text_passes_the_memory_secret_check():
         text = ev.canary_text(ev.make_token())
         _, spans = secret_redaction.scan_spans(text, mode="report")
         assert spans == []
+
+
+def test_failed_add_deletes_only_an_exact_canary():
+    class AddFails(FakeClient):
+        def call(self, name, arguments):
+            if name == "add_memory":
+                self.calls.append((name, arguments))
+                self.stored_text = arguments["text"]
+                raise ev.EvalError("timeout after commit")
+            if name == "search_memories":
+                self.calls.append((name, arguments))
+                return {"results": [{"memory_id": "other", "text": "unrelated"},
+                                    {"memory_id": "canary-1", "text": self.stored_text}]}
+            return super().call(name, arguments)
+
+    client = AddFails()
+    result = ev.freshness_probe(client)
+    assert result["error"] == "timeout after commit"
+    assert result["deleted"] is True
+    deletes = [a for n, a in client.calls if n == "delete_memory"]
+    assert [d["memory_id"] for d in deletes] == ["canary-1"]
+
+
+def test_restore_server_runs_every_step_and_reports_failures(monkeypatch):
+    import subprocess
+
+    steps = []
+
+    def launchctl(*args):
+        steps.append(args)
+        raise subprocess.CalledProcessError(1, "launchctl")
+
+    monkeypatch.setattr(ev, "_launchctl", launchctl)
+    monkeypatch.setattr(ev, "_restart_server", lambda label: steps.append(("restart", label)))
+    monkeypatch.setattr(ev, "wait_ready", lambda client, env: steps.append(("ready", env)))
+    errors = ev.restore_server("SESSIONFLOW_RECENCY_WEIGHT", "0.2", "lbl", "http://x/mcp/")
+    assert steps == [("setenv", "SESSIONFLOW_RECENCY_WEIGHT", "0.2"), ("restart", "lbl"),
+                     ("ready", {"SESSIONFLOW_RECENCY_WEIGHT": "0.2"})]
+    assert len(errors) == 1
+
+
+def test_restore_server_unsets_a_value_that_was_unset(monkeypatch):
+    steps = []
+    monkeypatch.setattr(ev, "_launchctl", lambda *args: steps.append(args) or "")
+    monkeypatch.setattr(ev, "_restart_server", lambda label: None)
+    monkeypatch.setattr(ev, "wait_ready", lambda client, env: steps.append(env))
+    assert ev.restore_server("SESSIONFLOW_RECENCY_WEIGHT", None, "lbl", "http://x/mcp/") == []
+    assert steps == [("unsetenv", "SESSIONFLOW_RECENCY_WEIGHT"), {}]
+
+
+def test_eval_agent_plist_escapes_paths_and_keeps_the_url(tmp_path):
+    import plistlib
+    import subprocess
+
+    script = Path(__file__).resolve().parent.parent / "sessionflow-server.sh"
+    plist = tmp_path / "eval.plist"
+    shell = (
+        'eval "$(sed -n "/^xml_escape()/,/^}/p;/^write_eval_agent_plist()/,/^}/p" "$0")"; '
+        f'LAUNCH_AGENT_DIR="{tmp_path}"; EVAL_AGENT_PLIST="{plist}"; EVAL_AGENT_LABEL=l; '
+        'PYTHON=/p/python; SCRIPT_DIR=/repo; EVAL_HOUR=3; EVAL_MINUTE=30; '
+        'EVAL_AGENT_STDOUT=/o; EVAL_AGENT_STDERR=/e; '
+        'SESSIONFLOW_EVAL_QUERIES="/a & b/q.jsonl"; SESSIONFLOW_EVAL_OUT="/a <b>/eval"; '
+        'SESSIONFLOW_PORT=7200; write_eval_agent_plist'
+    )
+    subprocess.run(["bash", "-c", shell, str(script)], check=True,
+                   env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)})
+    args = plistlib.loads(plist.read_bytes())["ProgramArguments"]
+    assert args[2:4] == ["--url", "http://127.0.0.1:7200"]
+    assert "/a & b/q.jsonl" in args and "/a <b>/eval" in args

@@ -26,21 +26,28 @@ def test_out_of_range_weight_falls_back(monkeypatch, value):
     assert rag_engine.ranking_settings()["recency_weight"] == rag_engine.RECENCY_WEIGHT_DEFAULT
 
 
-def test_hybrid_rank_uses_the_reported_weight(monkeypatch):
-    monkeypatch.setenv("SESSIONFLOW_RECENCY_WEIGHT", "0")
+@pytest.mark.parametrize("weight,order", [("1", ["new", "old"]), (None, ["old", "new"])])
+def test_hybrid_rank_uses_the_reported_weight(monkeypatch, weight, order):
+    from datetime import datetime, timezone
+
+    if weight is None:
+        monkeypatch.delenv("SESSIONFLOW_RECENCY_WEIGHT", raising=False)
+    else:
+        monkeypatch.setenv("SESSIONFLOW_RECENCY_WEIGHT", weight)
     rows = [{"_rrf_score": 1.0, "timestamp": "2020-01-01T00:00:00Z", "doc_id": "old"},
             {"_rrf_score": 0.5, "timestamp": "2026-10-30T00:00:00Z", "doc_id": "new"}]
-    ranked = rag_engine._rank_results(rows, "hybrid", 2)
-    assert [r["doc_id"] for r in ranked] == ["old", "new"]
+    now = datetime(2026, 10, 30, 12, tzinfo=timezone.utc)
+    ranked = rag_engine._rank_results(rows, "hybrid", 2, now=now)
+    assert [r["doc_id"] for r in ranked] == order
 
 
 @pytest.mark.anyio
-async def test_health_reports_ranking(stub_rag_engine):
+async def test_health_reports_ranking(stub_rag_engine, monkeypatch):
     import importlib
     import json
     import sys
 
-    sys.modules.pop("http_server", None)
+    monkeypatch.delitem(sys.modules, "http_server", raising=False)
     http_server = importlib.import_module("http_server")
     response = await http_server.health(None)
     assert json.loads(response.body)["ranking"] == {"recency_weight": 0.3, "recency_decay_days": 7}

@@ -140,3 +140,20 @@ def test_client_key_names_the_mcp_client(home, monkeypatch, service):
 def test_tools_write_nothing_when_off(home, service):
     _call("search_memories", {"query": "queue drain", "project": "sessionflow"})
     assert _lines(home) == []
+
+
+def test_existing_loose_log_file_is_tightened(home, monkeypatch):
+    monkeypatch.setenv("SESSIONFLOW_SEARCH_LOG", "1")
+    path = home / ".sessionflow" / "search-log.jsonl"
+    path.parent.mkdir()
+    path.write_text("")
+    path.chmod(0o644)
+    search_log.record_follow_up("get_memory", client=None, item_id="m1")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_lone_surrogate_does_not_raise(home, monkeypatch):
+    monkeypatch.setenv("SESSIONFLOW_SEARCH_LOG", "1")
+    search_log.record_search("search_memories", client=None, project="p", sort_by="hybrid",
+                             query="bad \ud800 text", ids=[])
+    assert len(_lines(home)) == 1

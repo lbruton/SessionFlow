@@ -611,8 +611,22 @@ do_backfill_agent_status() {
     fi
 }
 
+xml_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"
+    s="${s//</&lt;}"
+    s="${s//>/&gt;}"
+    printf '%s' "$s"
+}
+
 write_eval_agent_plist() {
     mkdir -p "$LAUNCH_AGENT_DIR"
+    local python script_dir queries out url
+    python=$(xml_escape "$PYTHON")
+    script_dir=$(xml_escape "$SCRIPT_DIR")
+    queries=$(xml_escape "$SESSIONFLOW_EVAL_QUERIES")
+    out=$(xml_escape "$SESSIONFLOW_EVAL_OUT")
+    url=$(xml_escape "${SESSIONFLOW_URL:-http://127.0.0.1:${SESSIONFLOW_PORT:-7102}}")
     cat > "$EVAL_AGENT_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyLists-1.0.dtd">
@@ -623,13 +637,15 @@ write_eval_agent_plist() {
     <!-- Calls the running server over MCP; eval_retrieval.py never loads MLX. -->
     <key>ProgramArguments</key>
     <array>
-        <string>${PYTHON}</string>
-        <string>${SCRIPT_DIR}/eval_retrieval.py</string>
+        <string>${python}</string>
+        <string>${script_dir}/eval_retrieval.py</string>
+        <string>--url</string>
+        <string>${url}</string>
         <string>nightly</string>
         <string>--queries</string>
-        <string>${SESSIONFLOW_EVAL_QUERIES}</string>
+        <string>${queries}</string>
         <string>--out</string>
-        <string>${SESSIONFLOW_EVAL_OUT}</string>
+        <string>${out}</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -652,7 +668,7 @@ write_eval_agent_plist() {
     <key>StandardErrorPath</key>
     <string>${EVAL_AGENT_STDERR}</string>
     <key>WorkingDirectory</key>
-    <string>${SCRIPT_DIR}</string>
+    <string>${script_dir}</string>
 </dict>
 </plist>
 PLIST
@@ -663,6 +679,13 @@ do_install_eval_agent() {
         echo "[sessionflow] Set SESSIONFLOW_EVAL_QUERIES (query set JSONL) and SESSIONFLOW_EVAL_OUT (report folder)." >&2
         exit 1
     fi
+    # The agent runs from the repo folder, so relative paths would resolve there.
+    case "$SESSIONFLOW_EVAL_QUERIES" in /*) ;; *)
+        echo "[sessionflow] SESSIONFLOW_EVAL_QUERIES must be an absolute path." >&2; exit 1 ;;
+    esac
+    case "$SESSIONFLOW_EVAL_OUT" in /*) ;; *)
+        echo "[sessionflow] SESSIONFLOW_EVAL_OUT must be an absolute path." >&2; exit 1 ;;
+    esac
     if [ ! -f "$SESSIONFLOW_EVAL_QUERIES" ]; then
         echo "[sessionflow] No query set at $SESSIONFLOW_EVAL_QUERIES" >&2
         exit 1
@@ -673,6 +696,10 @@ do_install_eval_agent() {
         launchctl bootout "$target" "$EVAL_AGENT_PLIST" 2>/dev/null || true
     fi
     write_eval_agent_plist
+    if ! plutil -lint "$EVAL_AGENT_PLIST" >/dev/null; then
+        echo "[sessionflow] The eval plist at $EVAL_AGENT_PLIST is not valid; not loading it." >&2
+        exit 1
+    fi
     if launchctl bootstrap "$target" "$EVAL_AGENT_PLIST" 2>/dev/null; then
         echo "[sessionflow] Eval LaunchAgent installed at $EVAL_AGENT_PLIST" >&2
         printf '[sessionflow] Runs daily at %02d:%02d\n' "$EVAL_HOUR" "$EVAL_MINUTE" >&2

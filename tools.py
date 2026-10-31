@@ -600,11 +600,11 @@ async def _call_memory_tool(name: str, arguments: dict, client: str | None = Non
         details = getattr(exc, "details", None)
         return _memory_error(code, message, fmt, details if isinstance(details, dict) else None)
     if name == "search_memories":
-        search_log.record_search(name, client=client, project=project,
+        await search_log.log_search(name, client=client, project=project,
                                  sort_by=args.get("sort_by", "hybrid"), query=args.get("query") or "",
                                  ids=[r.get("memory_id") for r in payload.get("results") or []])
     elif name == "get_memory":
-        search_log.record_follow_up(name, client=client, item_id=args["memory_id"])
+        await search_log.log_follow_up(name, client=client, item_id=args["memory_id"])
     if fmt == "json":
         text = _json_text(payload)
     return [types.TextContent(type="text", text=text)]
@@ -860,8 +860,8 @@ def register_tools(server: Server):
         name = getattr(getattr(params, "clientInfo", None), "name", None) or "unknown"
         return f"{name}:{id(session):x}"
 
-    def _log_turn_search(name: str, arguments: dict, scope: ProjectScope, results: list) -> None:
-        search_log.record_search(
+    async def _log_turn_search(name: str, arguments: dict, scope: ProjectScope, results: list) -> None:
+        await search_log.log_search(
             name, client=_client_key(), project=scope.filter_value(),
             sort_by=arguments.get("sort_by", "hybrid"), query=arguments.get("query") or "",
             ids=[f"{r.get('session_id')}:{r.get('turn_index')}" for r in results])
@@ -899,7 +899,7 @@ def register_tools(server: Server):
                     issue_id=issue_id_arg,
                     db_path=db,
                 )
-                _log_turn_search(name, arguments, scope, results)
+                await _log_turn_search(name, arguments, scope, results)
                 return [types.TextContent(type="text", text=format_results(results, scope))]
 
             elif name == "search_all_sessions":
@@ -936,7 +936,7 @@ def register_tools(server: Server):
                     issue_id=issue_id_arg,
                     db_path=db,
                 )
-                _log_turn_search(name, arguments, scope, results)
+                await _log_turn_search(name, arguments, scope, results)
                 if arguments.get("format") == "json":
                     payload = {
                         "scope": {"roots": scope.filter_value(), "note": scope.note},
@@ -952,7 +952,7 @@ def register_tools(server: Server):
                     context=arguments.get("context", 2),
                     db_path=db,
                 )
-                search_log.record_follow_up(
+                await search_log.log_follow_up(
                     name, client=_client_key(),
                     item_id=f"{arguments['session_id']}:{arguments['turn_index']}")
                 return [types.TextContent(type="text", text=format_turns(results))]

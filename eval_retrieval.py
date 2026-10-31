@@ -486,6 +486,24 @@ def freshness_probe(client, *, project: str = CANARY_PROJECT, agent_id: str = "c
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+def _delete_exact_canary(client, project: str, token: str) -> bool:
+    """Delete memories whose text equals this token's canary text; True when one was deleted."""
+    text = canary_text(token)
+    try:
+        found = client.call("search_memories", {"query": token, "project": project, "n": 5})
+    except EvalError:
+        return False
+    deleted = False
+    for row in found.get("results") or []:
+        if row.get("text") == text:
+            try:
+                client.call("delete_memory", {"memory_id": row["memory_id"], "project": project})
+                deleted = True
+            except EvalError:
+                pass
+    return deleted
+
+
 def _probe(client, project, agent_id, poll_s, timeout_s, sleep, clock) -> dict:
     token = make_token()
     result = {"host": None, "memory_id": None, "add_outcome": None, "add_index": None,
@@ -497,7 +515,9 @@ def _probe(client, project, agent_id, poll_s, timeout_s, sleep, clock) -> dict:
             "text": canary_text(token), "agent_id": agent_id, "project": project, "type": "fact",
             "topic_key": f"{CANARY_TOPIC}:{socket.gethostname()}", "extra": {"source": "eval"}})
     except EvalError as exc:
+        # The add may have committed before the error; delete only an exact match.
         result["error"] = str(exc)
+        result["deleted"] = _delete_exact_canary(client, project, token)
         return result
     result.update(memory_id=added.get("memory_id"), add_outcome=added.get("outcome"),
                   add_index=added.get("index"))
@@ -623,8 +643,41 @@ def usage_rollup(entries: list[dict], *, now: datetime, days: int = 7) -> dict:
 # --- Server restarts for sweeps ------------------------------------------------
 
 
-def _launchctl(*args: str) -> None:
-    subprocess.run(["launchctl", *args], check=True, capture_output=True, text=True)
+def _launchctl(*args: str) -> str:
+    done = subprocess.run(["launchctl", *args], check=True, capture_output=True, text=True)
+    return done.stdout
+
+
+def _launchctl_getenv(name: str) -> Optional[str]:
+    """Return the launchd value of ``name``, or None when it is unset."""
+    value = _launchctl("getenv", name).strip()
+    return value or None
+
+
+def restore_server(var: str, prior: Optional[str], label: str, url: str) -> list[str]:
+    """Put ``var`` back to its value before the sweep, restart and wait; return the failures.
+
+    Each step runs even when an earlier one fails, so a failed ``setenv`` still
+    leaves a restarted server.
+    """
+    errors = []
+    try:
+        if prior is None:
+            _launchctl("unsetenv", var)
+        else:
+            _launchctl("setenv", var, prior)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        errors.append(f"launchctl env for {var}: {exc}")
+    try:
+        _restart_server(label)
+    except (subprocess.CalledProcessError, OSError) as exc:
+        errors.append(f"restart {label}: {exc}")
+    expected = {var: prior} if prior is not None and var in RANKING_ENV else {}
+    try:
+        wait_ready(McpClient(url), expected)
+    except EvalError as exc:
+        errors.append(str(exc))
+    return errors
 
 
 def _restart_server(label: str) -> None:
@@ -683,8 +736,10 @@ def _cmd_sweep(args) -> int:
         return 2
     queries = load_queries(args.queries)
     values = [v.strip() for v in args.values.split(",") if v.strip()]
+    prior = _launchctl_getenv(args.var)
     reports = {}
     client = McpClient(args.url)
+    cleanup_errors: list[str] = []
     try:
         for value in values:
             env = {args.var: value}
@@ -699,9 +754,9 @@ def _cmd_sweep(args) -> int:
             write_report(report, args.out, f"{_local_date()}-sweep-{args.sort_by}-{label}")
     finally:
         client.close()
-        _launchctl("unsetenv", args.var)
-        _restart_server(args.label)
-        wait_ready(McpClient(args.url), {})
+        cleanup_errors = restore_server(args.var, prior, args.label, args.url)
+        for error in cleanup_errors:
+            print(f"eval_retrieval: restore failed: {error}", file=sys.stderr)
     parts = [f"## Sweep of {args.var} ({args.sort_by})", ""]
     for metric, name in METRICS:
         parts += [f"### {name}", "", render_comparison(reports, metric)]
@@ -710,7 +765,7 @@ def _cmd_sweep(args) -> int:
     out.write_text(text, encoding="utf-8")
     print(text)
     print(f"Wrote {out}", file=sys.stderr)
-    return 0
+    return 1 if cleanup_errors else 0
 
 
 def _cmd_freshness(args) -> int:
