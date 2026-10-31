@@ -612,11 +612,8 @@ do_backfill_agent_status() {
 }
 
 xml_escape() {
-    local s="$1"
-    s="${s//&/&amp;}"
-    s="${s//</&lt;}"
-    s="${s//>/&gt;}"
-    printf '%s' "$s"
+    # sed, because bash 3.2 and 5.2 treat & in a ${s//x/y} replacement differently.
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
 write_eval_agent_plist() {
