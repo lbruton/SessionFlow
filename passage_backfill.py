@@ -243,33 +243,42 @@ def plan(db_path: Optional[str] = None) -> PassageReport:
 
 
 def _uncut_session(state: dict, entry: list, sources: Dict[SessionKey, list],
-                   db_path: Optional[str]) -> bool:
-    """Re-parse one session's cut turns; return False when the budget deferred them."""
+                   db_path: Optional[str], stop) -> Optional[str]:
+    """Re-add one session's cut turns one at a time; return a pause reason, or None when done.
+
+    ``stop`` is checked before each turn, so a session never outlives the chunk
+    deadline. A resumed session skips the turns already stored.
+    """
     provider, session, turn_indexes = entry
     found = sources.get((provider, session))
     if not found:
         state["gone"] += 1
-        return True
+        return None
     wanted = set(turn_indexes)
     turns = []
     for source in found:
         result = _parse(provider, source)
         if result.errors:
             state["unreadable"] += 1
-            return True
+            return None
         turns.extend(t for t in result.turns
                      if t.get("chunk_type", "turn") == "turn" and t.get("turn_index") in wanted)
-    if not turns:
-        return True
-    # Checked before add_turns, which strips the text in place.
+    # Checked before add_turns, which strips the text in place; ingest drops the rest.
     kept = [t for t in turns if rag_engine.would_store(t)]
+    stored = _stored_doc_ids(sorted({t["doc_id"] for t in kept}), db_path) if kept else set()
+    for turn in kept:
+        if turn["doc_id"] in stored:
+            continue
+        if (reason := stop()) is not None:
+            return reason
+        rag_engine.add_turns([turn], db_path=db_path)
+        if not _stored_doc_ids([turn["doc_id"]], db_path):
+            return "embedding budget deferred re-parsed turns"
+        stored.add(turn["doc_id"])
+        state["uncut"] += 1
+        _save_state(state)
     state["discarded"] += len(turns) - len(kept)
-    rag_engine.add_turns(turns, db_path=db_path)
-    doc_ids = {t["doc_id"] for t in kept}
-    if len(_stored_doc_ids(sorted(doc_ids), db_path)) < len(doc_ids):
-        return False
-    state["uncut"] += len(kept)
-    return True
+    return None
 
 
 def _build(row: dict) -> List[dict]:
@@ -377,8 +386,10 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
                 if (reason := _stop()) is not None:
                     outcome, message = "paused", reason
                     break
-                if not _uncut_session(state, state["sessions"][state["cursor"]], sources, db_path):
-                    outcome, message = "paused", "embedding budget deferred re-parsed turns"
+                reason = _uncut_session(state, state["sessions"][state["cursor"]], sources,
+                                        db_path, _stop)
+                if reason is not None:
+                    outcome, message = "paused", reason
                     break
                 state["cursor"] += 1
                 steps += 1

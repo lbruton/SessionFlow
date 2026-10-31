@@ -412,3 +412,28 @@ def test_failed_passage_fts_write_is_retried_before_done(world, monkeypatch):
     assert len(world.embedded) == 2  # the retry rebuilt the text without embedding
     assert {d for d, _ in retried} == {"s::long"}
     assert retried[-1][1] == [f"s::long::p{i}" for i in range(len(retried[-1][1]))]
+
+
+def test_uncut_session_honors_the_chunk_deadline_between_turns(world, monkeypatch):
+    world.rows = {i: _row(i, f"s::cut{i}", OLD_CUT, turn_index=i) for i in (1, 2, 3)}
+    world.parsed = {("claude_code_cli", "s"): [
+        _parsed_turn(f"s::full{i}", _words(30), turn_index=i) for i in (1, 2, 3)]}
+    clock = {"now": 0.0}
+    real_add = rag_engine.add_turns
+
+    def _slow_add(turns, db_path=None):
+        clock["now"] += 61  # each re-added turn takes a minute
+        return real_add(turns, db_path)
+
+    monkeypatch.setattr(reembed, "_monotonic", lambda: clock["now"])
+    monkeypatch.setattr(rag_engine, "add_turns", _slow_add)
+
+    report = passage_backfill.run(confirmed=True, max_minutes=1)
+    assert report.status == "paused"
+    assert len(world.added) == 1 and report.uncut == 1 and report.cursor == 0
+
+    report = passage_backfill.run(confirmed=True)
+    assert report.status == "done"
+    assert report.uncut == 3
+    assert [t["doc_id"] for batch in world.added for t in batch] == [
+        "s::full1", "s::full2", "s::full3"]
