@@ -1233,6 +1233,31 @@ def write_passage_fts(parent_doc_id: str, built: List[Dict],
             _fts.close_ephemeral(conn)
 
 
+def document_titles(rows: List[Dict], db_path: Optional[str] = None) -> List[Optional[str]]:
+    """Return the embedding title ingest gave each stored row, for regenerating its vector.
+
+    A passage's title comes from its parent turn's stored text through
+    ``passages.passage_title``; every other row has None, the default prefix.
+    """
+    parents = sorted({passages.passage_parent(r.get("doc_id", "")) or "" for r in rows
+                      if r.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE} - {""})
+    texts: Dict[str, str] = {}
+    if parents:
+        with milvus_client(db_path) as client:
+            for start in range(0, len(parents), 200):
+                for r in client.query(collection_name=COLLECTION_NAME,
+                                      filter=f"doc_id in {json.dumps(parents[start:start + 200])}",
+                                      output_fields=["doc_id", "document"]):
+                    texts[r["doc_id"]] = r.get("document") or ""
+    titles: List[Optional[str]] = []
+    for r in rows:
+        parent = (passages.passage_parent(r.get("doc_id", ""))
+                  if r.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE else None)
+        titles.append(passages.passage_title(r.get("project_root", ""), texts.get(parent, ""))
+                      if parent else None)
+    return titles
+
+
 _offset_tokenizer = None
 _offset_tokenizer_lock = threading.Lock()
 _passage_warned = False

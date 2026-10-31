@@ -354,7 +354,9 @@ def _rewrite_batch(state: dict, rows: List[dict], budget, db_path: Optional[str]
         rag_engine._apply_redaction([turn])
         keep.append((row, turn["text"]))
 
-    vectors = reembed._embed_documents(budget, [text for _, text in keep]) if keep else []
+    titles = rag_engine.document_titles([row for row, _ in keep], db_path) if keep else []
+    vectors = (reembed._embed_documents(budget, [text for _, text in keep], titles=titles)
+               if keep else [])
     _append_documents(Path(state["backup_path"]), rows)
     reembed._append_backup(Path(state["vector_backup_path"]), rows)
 
@@ -512,9 +514,10 @@ def verify(sample: int = 200, threshold: float = 0.9999,
     complete = True
     try:
         for start in range(0, len(picked), 100):
-            for row in rag_engine.get_rows_by_ids(picked[start:start + 100], db_path=db_path):
+            rows = rag_engine.get_rows_by_ids(picked[start:start + 100], db_path=db_path)
+            for row, title in zip(rows, rag_engine.document_titles(rows, db_path)):
                 dirty = clean_text(row["document"]) != row["document"]
-                fresh = reembed._embed_documents(budget, [row["document"]])[0]
+                fresh = reembed._embed_documents(budget, [row["document"]], titles=[title])[0]
                 cos = reembed._cos(row["vector"], fresh)
                 cosines.append(cos)
                 unstripped += dirty

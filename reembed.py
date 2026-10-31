@@ -212,10 +212,12 @@ class _BudgetDenied(Exception):
     """The shared embedding budget refused a batch (paused or capped)."""
 
 
-def _embed_documents(budget, texts: List[str], titles: Optional[List[str]] = None) -> List[list]:
+def _embed_documents(budget, texts: List[str],
+                     titles: Optional[List[Optional[str]]] = None) -> List[list]:
     """Embed ``texts`` as documents through the shared budget (cooldown + accounting).
 
-    ``titles`` fills the model's title slot per text; None keeps the default prefix.
+    ``titles`` fills the model's title slot per text, as from
+    ``rag_engine.document_titles``; None entries keep the default prefix.
     """
     chars = sum(len(t) for t in texts)
     decision = budget.before_batch(batch_size=len(texts), estimated_chars=chars)
@@ -226,10 +228,10 @@ def _embed_documents(budget, texts: List[str], titles: Optional[List[str]] = Non
         raise _BudgetDenied(decision.reason)
     started = _monotonic()
     try:
-        if titles is None:
-            vectors = rag_engine.embed_texts(texts, is_query=False)
-        else:
+        if titles and any(titles):
             vectors = rag_engine.embed_texts(texts, is_query=False, titles=titles)
+        else:
+            vectors = rag_engine.embed_texts(texts, is_query=False)
     except Exception as e:
         budget.after_batch(_monotonic() - started, 0, error=e)
         raise
@@ -443,7 +445,8 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
         try:
             rows = rag_engine.get_rows_by_ids(ids, db_path=db_path)
             if rows:
-                vectors = _embed_documents(budget, [r["document"] for r in rows])
+                vectors = _embed_documents(budget, [r["document"] for r in rows],
+                                           titles=rag_engine.document_titles(rows, db_path))
                 _append_backup(backup, rows)
                 for row, vec in zip(rows, vectors):
                     row["vector"] = vec
@@ -507,8 +510,9 @@ def verify(sample: int = 200, threshold: float = 0.9999,
     try:
         for start in range(0, len(picked), 100):
             rows = rag_engine.get_rows_by_ids(picked[start:start + 100], db_path=db_path)
-            for row in rows:
-                fresh = _embed_documents(budget, [row["document"]])[0]
+            titles = rag_engine.document_titles(rows, db_path)
+            for row, title in zip(rows, titles):
+                fresh = _embed_documents(budget, [row["document"]], titles=[title])[0]
                 cosines.append(_cos(row["vector"], fresh))
     except _BudgetDenied:
         pass
