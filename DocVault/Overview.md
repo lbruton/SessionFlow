@@ -69,7 +69,7 @@ Hosted/OpenAI embeddings are **explicitly deferred**. Embedding stays local MLX 
 | `SESSIONFLOW_EMBED_BATCH_SIZE` | Embedding batch size for backfill throttling |
 | `SESSIONFLOW_EMBED_COOLDOWN_MS` | Inter-batch cooldown to protect MLX Metal driver |
 | `SESSIONFLOW_BACKFILL_MODE` | `recent` \| `incremental` \| `full` |
-| `SESSIONFLOW_RECENCY_WEIGHT` | Hybrid blend weight `w` in `[0,1]` (SESF-24); default `0.3`, silent fallback if unparseable/out-of-range |
+| `SESSIONFLOW_RECENCY_WEIGHT` | Hybrid blend weight `w` in `[0,1]` (SESF-24); default `0.15`, silent fallback if unparseable/out-of-range |
 | `SESSIONFLOW_RECENCY_DECAY_DAYS` | Exponential decay constant for `recency_score = exp(-days_old/decay_days)` (SESF-24); default `7`, min `1` |
 | `SESSIONFLOW_REDACT` | Secret-redaction guard on/off (SESF-41); default **on** when unset |
 | `SESSIONFLOW_REDACT_MODE` | `enforce` (mask) \| `report` (detect + count, store raw) (SESF-41); default `report` when unset |

@@ -63,7 +63,7 @@ from provider_adapters import (
 import boilerplate
 import secret_redaction
 
-RECENCY_WEIGHT_DEFAULT = 0.3
+RECENCY_WEIGHT_DEFAULT = 0.15
 RECENCY_DECAY_DAYS_DEFAULT = 7
 MISSING_TIMESTAMP_RECENCY = 0.5
 _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_score")

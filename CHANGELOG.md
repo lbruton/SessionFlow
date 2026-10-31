@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-30
+
+### Changed
+
+- The default hybrid recency weight (`SESSIONFLOW_RECENCY_WEIGHT` unset) is 0.15 instead of 0.3. The retrieval eval sweep scored 0.15 best overall (MRR 0.654 against 0.630) (SESF-97).
+
 ## [0.9.0] - 2026-10-30
 
 ### Added
