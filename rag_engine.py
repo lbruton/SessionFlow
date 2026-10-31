@@ -1509,8 +1509,11 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     # the only relevance signal that spans both vector and FTS-only rows. The
     # `_rrf_score` is kept alive until after scoring (see _rank_results).
     fts_weight = IDENTIFIER_FTS_WEIGHT if _is_identifier_query(query) else 1.0
+    # Collapse the whole fused pool before the fetch_n cut, so sibling passages
+    # of one turn cannot push other turns out of it.
+    pool = len(vector_results) + len(fts_results)
     merged = _collapse_passages(
-        rrf_merge(vector_results, fts_results, n=fetch_n, fts_weight=fts_weight))
+        rrf_merge(vector_results, fts_results, n=pool, fts_weight=fts_weight))[:fetch_n]
 
     if not merged:
         return []
@@ -1547,8 +1550,7 @@ _DISPLAY_CUT = "\n\n[cut: get_turns shows the whole turn]"
 def _collapse_passages(merged: List[Dict]) -> List[Dict]:
     """Keep the first row of each parent and its passages, in ``merged`` order.
 
-    A kept passage gets ``passage_index``. A kept turn longer than
-    ``MAX_TURN_CHARS`` plus the stored cut marker is cut for display.
+    A kept passage gets ``passage_index``. A kept turn goes through ``_cap_for_display``.
     """
     seen = set()
     out = []
@@ -1560,11 +1562,16 @@ def _collapse_passages(merged: List[Dict]) -> List[Dict]:
         seen.add(key)
         if row.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE:
             row["passage_index"] = passages.passage_index(doc_id)
-        elif (row.get("chunk_type") == "turn"
-              and len(row.get("content", "")) > MAX_TURN_CHARS + len(CUT_MARK)):
-            row["content"] = row["content"][:MAX_TURN_CHARS] + _DISPLAY_CUT
-        out.append(row)
+        out.append(_cap_for_display(row))
     return out
+
+
+def _cap_for_display(row: Dict) -> Dict:
+    """Cut a turn longer than ``MAX_TURN_CHARS`` plus the stored cut marker; ``get_turns`` keeps it whole."""
+    if (row.get("chunk_type") == "turn"
+            and len(row.get("content", "")) > MAX_TURN_CHARS + len(CUT_MARK)):
+        row["content"] = row["content"][:MAX_TURN_CHARS] + _DISPLAY_CUT
+    return row
 
 
 _NOT_PASSAGE = f'chunk_type != "{passages.PASSAGE_CHUNK_TYPE}"'
@@ -1617,7 +1624,7 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     defaults = default_provider_metadata()
     # distance=None: no query vector exists for recency listings, so there is
     # no score to report.
-    mapped = [_row_to_result(row, defaults, distance=None) for row in rows]
+    mapped = [_cap_for_display(_row_to_result(row, defaults, distance=None)) for row in rows]
 
     return _rank_results(mapped, "recency", n)
 
