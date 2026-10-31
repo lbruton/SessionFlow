@@ -268,6 +268,9 @@ def _uncut_session(state: dict, entry: list, sources: Dict[SessionKey, list],
     stored = _stored_doc_ids(sorted({t["doc_id"] for t in kept}), db_path) if kept else set()
     for turn in kept:
         if turn["doc_id"] in stored:
+            # An earlier chunk may have stopped between the insert and the stale-row
+            # cleanup; add_turns skips the embed and deletes the cut row again.
+            rag_engine.add_turns([turn], db_path=db_path)
             continue
         if (reason := stop()) is not None:
             return reason
@@ -408,6 +411,10 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
                 ids = ids[:max_turns - steps]
             rows = {int(r["id"]): r for r in rag_engine.get_rows_by_ids(ids, db_path=db_path)}
             for pk in ids:
+                # One parent can take several embed batches, so the deadline is checked per parent.
+                if steps and (reason := _stop()) is not None:
+                    outcome, message = "paused", reason
+                    break
                 if pk in rows:
                     _add_passages(state, rows[pk], budget, db_path)
                 state["cursor"] += 1

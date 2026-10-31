@@ -435,5 +435,39 @@ def test_uncut_session_honors_the_chunk_deadline_between_turns(world, monkeypatc
     report = passage_backfill.run(confirmed=True)
     assert report.status == "done"
     assert report.uncut == 3
+    # The resumed run re-adds full1 only to clean up its cut row; add_turns skips the embed.
     assert [t["doc_id"] for batch in world.added for t in batch] == [
+        "s::full1",
         "s::full1", "s::full2", "s::full3"]
+
+
+def test_passages_phase_honors_the_deadline_between_parents(world, monkeypatch):
+    world.rows = {i: _row(i, f"s::l{i}", _words(1000), turn_index=i) for i in (1, 2, 3)}
+    world.budget.batch_size = 8
+    clock = {"now": 0.0}
+    real_replace = rag_engine.replace_passages
+
+    def _slow_replace(*args, **kwargs):
+        clock["now"] += 61  # each parent takes a minute
+        return real_replace(*args, **kwargs)
+
+    monkeypatch.setattr(reembed, "_monotonic", lambda: clock["now"])
+    monkeypatch.setattr(rag_engine, "replace_passages", _slow_replace)
+
+    report = passage_backfill.run(confirmed=True, max_minutes=1)
+    assert report.status == "paused"
+    assert len(world.replaced) == 1 and report.cursor == 1
+
+
+def test_resumed_session_cleans_up_a_cut_row_whose_full_turn_is_stored(world):
+    world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1),
+                  2: _row(2, "s::full", _words(30), turn_index=1)}
+    world.stored.add("s::full")  # the earlier chunk stored it, then stopped before cleanup
+    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", _words(30), turn_index=1)]}
+
+    report = passage_backfill.run(confirmed=True)
+
+    assert report.status == "done"
+    assert [[t["doc_id"] for t in batch] for batch in world.added] == [["s::full"]]
+    assert all(r["doc_id"] != "s::cut" for r in world.rows.values())
+    assert report.uncut == 0
