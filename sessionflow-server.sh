@@ -690,6 +690,10 @@ do_install_eval_agent() {
         echo "[sessionflow] No query set at $SESSIONFLOW_EVAL_QUERIES" >&2
         exit 1
     fi
+    if [ ! -x "$PYTHON" ]; then
+        echo "[sessionflow] No project venv interpreter at $PYTHON; run setup.sh first." >&2
+        exit 1
+    fi
     local target
     target=$(launch_agent_target)
     if launchctl print "${target}/${EVAL_AGENT_LABEL}" >/dev/null 2>&1; then
