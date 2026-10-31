@@ -179,3 +179,21 @@ def test_unreadable_session_is_left_alone(world):
 
     assert plan.stale == {} and plan.duplicates == {}
     assert plan.unreadable_sessions == 1
+
+
+def test_gone_session_keeps_the_milvus_copy_of_a_repeat(world):
+    world["rows"] = [_row("codex:g:fts", "g", 1, FULL, in_milvus=False),
+                     _row("codex:g:vec", "g", 2, FULL)]
+
+    plan = dedupe_codex.plan(db_path="db")
+
+    assert plan.duplicates == {"g": ["codex:g:fts"]}
+
+
+def test_assistant_only_vector_row_needs_a_vector_backed_full_row(world):
+    world["rows"] = [_row("codex:g:full", "g", 1, FULL, in_milvus=False),
+                     _row("codex:g:tail", "g", 2, "the reply")]
+
+    plan = dedupe_codex.plan(db_path="db")
+
+    assert plan.duplicates == {}

@@ -118,16 +118,27 @@ def _would_store(turn: dict) -> bool:
 
 
 def _duplicate_rows(rows: List[dict]) -> List[str]:
-    """Return repeats of an earlier row and assistant-only copies of a User + Assistant row."""
-    documents = [row.get("document") or "" for row in rows]
-    with_user = [doc for doc in documents if _REPLY_MARKER in doc]
+    """Return repeats of an earlier row and assistant-only copies of a User + Assistant row.
+
+    The rollout is gone, so a deleted vector cannot be rebuilt: a Milvus row goes only
+    when a Milvus row with the same turn stays, and Milvus copies are kept first.
+    """
+    # Each User + Assistant document maps to whether a Milvus row holds it.
+    with_user: Dict[str, bool] = {}
+    for row in rows:
+        document = row.get("document") or ""
+        if _REPLY_MARKER in document:
+            with_user[document] = with_user.get(document, False) or row["in_milvus"]
     seen: Set[str] = set()
     duplicates: List[str] = []
-    for row in sorted(rows, key=lambda r: (int(r["turn_index"]), r["doc_id"])):
+    order = sorted(rows, key=lambda r: (not r["in_milvus"], int(r["turn_index"]), r["doc_id"]))
+    for row in order:
         document = row.get("document") or ""
         if document in seen or (
             not document.startswith("User: ")
-            and any(doc.endswith(_REPLY_MARKER + document) for doc in with_user)
+            and any(doc.endswith(_REPLY_MARKER + document)
+                    and (backed or not row["in_milvus"])
+                    for doc, backed in with_user.items())
         ):
             duplicates.append(row["doc_id"])
         else:
