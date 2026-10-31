@@ -9,6 +9,15 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+### Added
+
+- `cleanup.py dedupe-codex` deletes Codex rows of the old line-number keys. A session whose rollout is on disk keeps only the rows its parse yields, and only once the backfill has indexed every parsed turn. A session whose rollout is gone keeps one row per distinct turn. It is a dry run by default, `--apply` refuses without `--yes`, and the deleted doc_ids go to `~/.sessionflow/audit/dedupe-codex-<run>.jsonl` (SESF-98).
+
+### Changed
+
+- Codex sessions are indexed as one row per task: the user message and every reply up to `task_complete`. `turn_index` is the task's ordinal in the rollout instead of the line number, so a rollout rewrite that shifts lines keeps each doc_id. Codex turns replace their earlier row as a task grows, and a task is cut at 8,000 characters with `[truncated]`, like a Claude turn (SESF-98).
+- Codex rollouts compressed to `.jsonl.zst` are read, through the new `zstandard` dependency. A plain copy next to its compressed twin wins (SESF-98).
+
 ## [0.9.2] - 2026-10-30
 
 ### Fixed

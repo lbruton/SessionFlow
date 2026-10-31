@@ -83,6 +83,8 @@ def _codex_home(tmp_path):
         {"type": "event_msg", "payload": {"type": "task_started", "started_at": 1792982930}},
         {"type": "response_item", "payload": {"type": "message", "role": "user", "content": "q1"}},
         {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": "a1"}},
+        {"type": "event_msg", "payload": {"type": "task_started", "started_at": 1792982930}},
+        {"type": "response_item", "payload": {"type": "message", "role": "user", "content": "q2"}},
         {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": "a2"}},
     ]
     (root / "rollout-sess.jsonl").write_text(

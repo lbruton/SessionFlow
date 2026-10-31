@@ -106,7 +106,6 @@ def test_codex_turns_take_task_start_time_over_rewritten_line_time(tmp_path):
 
     assert [t["timestamp"][:19] for t in turns] == [
         "2026-10-26T02:48:50",
-        "2026-10-26T02:48:50",
         "2026-10-26T05:02:36",
     ]
 
@@ -126,8 +125,7 @@ def test_codex_turns_carry_session_meta_git_branch(tmp_path):
     assert turns and all(t["git_branch"] == "feature/x" for t in turns)
 
 
-def test_codex_resumed_parse_does_not_pair_skipped_user_with_next_answer(tmp_path):
-    """A turn skipped via the cursor must still consume its user message."""
+def test_codex_resumed_parse_emits_nothing_new(tmp_path):
     from provider_codex import CodexAdapter
 
     home = _write_rewritten_rollout(tmp_path, [
@@ -138,12 +136,10 @@ def test_codex_resumed_parse_does_not_pair_skipped_user_with_next_answer(tmp_pat
     ])
     adapter = CodexAdapter(home=home)
     source = adapter.discover_sources()[0]
-    full = adapter.parse_source(source, cursor=None).turns
-    assert [t["text"] for t in full] == ["User: q1\n\nAssistant: a1", "a2"]
+    full = adapter.parse_source(source, cursor=None)
+    assert [t["text"] for t in full.turns] == ["User: q1\n\nAssistant: a1\n\na2"]
 
-    resumed = adapter.parse_source(source, cursor={"emitted_ids": [full[0]["doc_id"]]}).turns
-
-    assert [(t["doc_id"], t["text"]) for t in resumed] == [(full[1]["doc_id"], "a2")]
+    assert adapter.parse_source(source, cursor=full.cursor).turns == []
 
 
 def _turn_started(turn_id, epoch=1792982930):
@@ -238,3 +234,178 @@ def test_codex_turns_fall_back_to_line_time_without_task_events(tmp_path):
     turns = adapter.parse_source(adapter.discover_sources()[0], cursor=None).turns
 
     assert turns[0]["timestamp"][:19] == "2026-10-26T14:51:34"
+
+
+def _task_complete():
+    return {"type": "event_msg", "payload": {"type": "task_complete"}}
+
+
+def _noise():
+    return {"type": "event_msg", "payload": {"type": "token_count"}}
+
+
+def _parse(home, cursor=None):
+    from provider_codex import CodexAdapter
+
+    adapter = CodexAdapter(home=home)
+    source = adapter.discover_sources()[0]
+    return adapter.parse_source(source, cursor=cursor)
+
+
+def test_codex_task_with_several_replies_is_one_turn(tmp_path):
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _turn_started("t1"),
+        _msg("user", "q"),
+        _msg("assistant", "a1"),
+        _msg("assistant", "a2"),
+        _msg("assistant", "a3"),
+        _task_complete(),
+    ])
+
+    turns = _parse(home).turns
+
+    assert [t["text"] for t in turns] == ["User: q\n\nAssistant: a1\n\na2\n\na3"]
+
+
+def test_codex_turn_index_is_the_task_ordinal(tmp_path):
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _turn_started("t1"), _msg("user", "q1"), _msg("assistant", "a1"), _task_complete(),
+        _turn_started("t2"), _msg("user", "q2"), _msg("assistant", "a2"), _task_complete(),
+    ])
+
+    assert [t["turn_index"] for t in _parse(home).turns] == [0, 1]
+
+
+def test_codex_shifted_lines_keep_doc_ids_and_turn_index(tmp_path):
+    tasks = [
+        [_turn_started("t1"), _msg("user", "q1"), _msg("assistant", "a1"), _task_complete()],
+        [_turn_started("t2"), _msg("user", "q2"), _msg("assistant", "a2"), _task_complete()],
+    ]
+    plain = [_session_meta(), *tasks[0], *tasks[1]]
+    shifted = [_session_meta(), _noise(), tasks[0][0], _noise(), *tasks[0][1:],
+               _noise(), _noise(), *tasks[1]]
+
+    first = _parse(_write_rewritten_rollout(tmp_path / "a", plain)).turns
+    second = _parse(_write_rewritten_rollout(tmp_path / "b", shifted)).turns
+
+    assert [(t["doc_id"], t["turn_index"]) for t in first] == \
+        [(t["doc_id"], t["turn_index"]) for t in second]
+
+
+def test_codex_turns_replace_their_earlier_row(tmp_path):
+    from provider_adapters import REPLACE_SAME_TURN
+
+    lines = [_session_meta(), _turn_started("t1"), _msg("user", "q"), _msg("assistant", "a1")]
+    home = _write_rewritten_rollout(tmp_path, lines)
+    first = _parse(home)
+    rollout = next((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    import json
+    with rollout.open("a") as handle:
+        handle.write(json.dumps({"timestamp": REWRITE_TS, **_msg("assistant", "a2")}) + "\n")
+
+    grown = _parse(home, cursor=first.cursor).turns
+
+    assert first.turns[0][REPLACE_SAME_TURN] is True
+    assert [t["turn_index"] for t in grown] == [first.turns[0]["turn_index"]]
+    assert grown[0]["doc_id"] != first.turns[0]["doc_id"]
+    assert grown[0]["text"] == "User: q\n\nAssistant: a1\n\na2"
+    assert grown[0][REPLACE_SAME_TURN] is True
+
+
+def test_codex_without_task_events_opens_a_turn_per_user_message(tmp_path):
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _msg("user", "q1"), _msg("assistant", "a1"),
+        _msg("user", "q2"), _msg("assistant", "a2"),
+    ])
+
+    turns = _parse(home).turns
+
+    assert [(t["turn_index"], t["text"]) for t in turns] == [
+        (0, "User: q1\n\nAssistant: a1"),
+        (1, "User: q2\n\nAssistant: a2"),
+    ]
+
+
+def test_codex_native_turn_after_import_keeps_its_ordinal(tmp_path):
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(),
+        _turn_started("external-import-turn-1"), _msg("user", "iq"), _msg("assistant", "ia"),
+        _turn_started("native-1"), _msg("user", "q"), _msg("assistant", "a"),
+    ])
+
+    assert [t["turn_index"] for t in _parse(home).turns] == [1]
+
+
+def test_codex_cursor_holds_only_current_doc_ids(tmp_path):
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(), _turn_started("t1"), _msg("user", "q"), _msg("assistant", "a"),
+    ])
+
+    parsed = _parse(home, cursor={"emitted_ids": ["codex:rewritten:stale"]})
+
+    assert parsed.cursor["emitted_ids"] == [parsed.turns[0]["doc_id"]]
+
+
+def _compress(path):
+    import zstandard
+
+    target = path.with_name(path.name + ".zst")
+    target.write_bytes(zstandard.ZstdCompressor().compress(path.read_bytes()))
+    return target
+
+
+ZST_LINES = [
+    _session_meta(),
+    _turn_started("t1"), _msg("user", "q1"), _msg("assistant", "a1"), _task_complete(),
+    _turn_started("t2"), _msg("user", "q2"), _msg("assistant", "a2"),
+]
+
+
+def test_codex_zst_rollout_parses_like_its_plain_copy(tmp_path):
+    plain_home = _write_rewritten_rollout(tmp_path / "plain", ZST_LINES)
+    zst_home = _write_rewritten_rollout(tmp_path / "zst", ZST_LINES)
+    plain = next((zst_home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    _compress(plain)
+    plain.unlink()
+
+    from provider_codex import CodexAdapter
+    source = CodexAdapter(home=zst_home).discover_sources()[0]
+    expected = _parse(plain_home).turns
+    got = _parse(zst_home).turns
+
+    assert source.project_root == "/repo"
+    assert [(t["doc_id"], t["turn_index"], t["text"]) for t in got] == \
+        [(t["doc_id"], t["turn_index"], t["text"]) for t in expected]
+
+
+def test_codex_session_with_plain_and_zst_copy_is_read_once(tmp_path):
+    from provider_codex import CodexAdapter
+
+    home = _write_rewritten_rollout(tmp_path, ZST_LINES)
+    plain = next((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    _compress(plain)
+
+    adapter = CodexAdapter(home=home)
+    sources = adapter.discover_sources()
+    parsed = adapter.parse_source(sources[0], cursor=None)
+
+    assert len(sources) == 1
+    assert parsed.cursor["known_paths"] == [str(plain)]
+    assert len(parsed.turns) == 2
+
+
+def test_codex_long_task_is_cut_like_a_claude_turn(tmp_path):
+    from transcript_parser import MAX_TURN_CHARS
+
+    home = _write_rewritten_rollout(tmp_path, [
+        _session_meta(), _turn_started("t1"), _msg("user", "q"),
+        _msg("assistant", "x" * MAX_TURN_CHARS), _msg("assistant", "tail"),
+    ])
+
+    (turn,) = _parse(home).turns
+
+    assert turn["text"] == ("User: q\n\nAssistant: " + "x" * MAX_TURN_CHARS)[:MAX_TURN_CHARS] \
+        + "\n\n[truncated]"
