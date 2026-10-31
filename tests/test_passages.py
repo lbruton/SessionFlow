@@ -503,3 +503,94 @@ def test_listing_cuts_a_long_turn_for_display(monkeypatch):
     (row,) = rag_engine._recent_listing(5, db_path=DB)
     assert len(row["content"]) < transcript_parser.MAX_TURN_CHARS + 100
     assert "get_turns" in row["content"]
+
+
+# --- titles when vectors are regenerated --------------------------------------
+
+PARENT_TEXT = "User: why does the cache miss\n\nAssistant: " + "w " * 900
+
+
+def _stored(pk, doc_id, document, chunk_type):
+    return {"id": pk, "doc_id": doc_id, "document": document, "chunk_type": chunk_type,
+            "project_root": "/p/Proj", "session_id": "s", "turn_index": 7,
+            "vector": [0.0] * 4}
+
+
+@pytest.fixture
+def regen(monkeypatch, tmp_path):
+    """Stored parent, passage and short turn, plus embed capture, for reembed runs."""
+    import reembed
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rows = {1: _stored(1, "s::p", PARENT_TEXT, "turn"),
+            2: _stored(2, "s::p::p1", "w w w", PASSAGE_CHUNK_TYPE),
+            3: _stored(3, "s::q", "User: short\n\nAssistant: ok", "turn")}
+    calls = []
+
+    class _Client:
+        def query(self, collection_name, filter, output_fields=None, limit=None):
+            wanted = set(__import__("json").loads(filter.split(" in ", 1)[1]))
+            return [{"doc_id": r["doc_id"], "document": r["document"]}
+                    for r in rows.values() if r["doc_id"] in wanted]
+
+    @contextlib.contextmanager
+    def _client(db_path=None):
+        yield _Client()
+
+    def _embed(texts, is_query=False, titles=None):
+        calls.append((list(texts), titles))
+        return [[0.0] * 4 for _ in texts]
+
+    class _Budget:
+        batch_size = 8
+
+        def before_batch(self, **kw):
+            return types.SimpleNamespace(allowed=True, retry_after_seconds=0, reason="")
+
+        def after_batch(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(rag_engine, "milvus_client", _client)
+    monkeypatch.setattr(rag_engine, "_query_batches",
+                        lambda fields, *a, **k: iter([[{"id": i} for i in sorted(rows)]]))
+    monkeypatch.setattr(rag_engine, "get_rows_by_ids",
+                        lambda ids, db_path=None: [dict(rows[i]) for i in ids if i in rows])
+    monkeypatch.setattr(rag_engine, "upsert_rows", lambda batch, db_path=None: len(batch))
+    monkeypatch.setattr(rag_engine, "embed_texts", _embed)
+    monkeypatch.setattr(reembed, "get_embedding_budget", lambda: _Budget())
+    monkeypatch.setattr(reembed, "_reembed_memories", lambda: None)
+    monkeypatch.setattr(reembed, "_db_path", lambda: DB)
+    return types.SimpleNamespace(reembed=reembed, calls=calls, rows=rows)
+
+
+def test_document_titles_rebuild_passage_titles_from_the_parent(regen):
+    rows = [regen.rows[2], regen.rows[1], regen.rows[3]]
+    assert rag_engine.document_titles(rows, db_path=DB) == [
+        "Proj · why does the cache miss", None, None]
+
+
+def test_reembed_run_keeps_passage_titles(regen):
+    report = regen.reembed.run(confirmed=True)
+    assert report.status == "done"
+    titles_by_text = {t: (titles[i] if titles else None)
+                      for texts, titles in regen.calls for i, t in enumerate(texts)}
+    assert titles_by_text["w w w"] == "Proj · why does the cache miss"
+    assert titles_by_text[PARENT_TEXT] is None
+
+
+def test_reembed_verify_compares_against_titled_passages(regen):
+    regen.reembed.run(confirmed=True)
+    regen.calls.clear()
+    regen.reembed.verify(sample=3, seed=1)
+    titled = [titles for texts, titles in regen.calls if texts == ["w w w"]]
+    assert titled == [["Proj · why does the cache miss"]]
+
+
+def test_untitled_batches_keep_the_plain_embed_call(regen):
+    seen = []
+    regen.reembed.rag_engine.embed_texts = lambda texts, is_query=False: seen.append(texts) or [
+        [0.0] for _ in texts]
+    regen.reembed._embed_documents(type("B", (), {
+        "before_batch": lambda self, **k: types.SimpleNamespace(allowed=True),
+        "after_batch": lambda self, *a, **k: None})(), ["a"], titles=[None])
+    assert seen == [["a"]]
