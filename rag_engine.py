@@ -977,6 +977,14 @@ def _apply_boilerplate(turns: List[Dict]) -> List[Dict]:
     return kept
 
 
+def would_store(turn: Dict) -> bool:
+    """Return False for a turn that ``_apply_boilerplate`` would drop, without changing it."""
+    if not _boilerplate_enabled():
+        return True
+    clean, removed = boilerplate.strip(turn.get("text", ""))
+    return not removed or len(clean.strip()) >= MIN_TURN_CHARS
+
+
 def _boilerplate_status() -> Dict:
     with _boilerplate_lock:
         return {

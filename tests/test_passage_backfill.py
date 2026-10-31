@@ -232,7 +232,7 @@ def test_long_turns_without_passages_get_them_with_titles(world):
 
 def test_passages_phase_pauses_on_budget_and_resumes(world):
     world.rows = {i: _row(i, f"s::l{i}", _words(1000), turn_index=i) for i in range(1, 4)}
-    world.deny_after = 1
+    world.deny_after = 2  # the first turn embeds in two budget-sized calls
     report = passage_backfill.run(confirmed=True)
     assert report.status == "paused"
     assert len(world.replaced) == 1
@@ -348,3 +348,34 @@ def test_cli_registers_the_passages_command(monkeypatch, capsys):
         cleanup.main()
     assert exit_info.value.code == 1
     assert "Refusing to run" in capsys.readouterr().err
+
+
+def test_a_turn_with_many_passages_embeds_in_budget_batches(world):
+    world.rows = {2: _row(2, "s::long", _words(3000), turn_index=2)}
+    report = passage_backfill.run(confirmed=True)
+
+    assert report.status == "done"
+    assert len(world.embedded) > 1
+    assert all(len(texts) <= world.budget.batch_size for texts, _ in world.embedded)
+    (parent, ids, n_vectors), = world.replaced
+    assert n_vectors == len(ids) == sum(len(texts) for texts, _ in world.embedded)
+
+
+def test_reparsed_turn_that_ingest_drops_is_not_a_deferral(world):
+    world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1)}
+    noise = "<system-reminder>\n" + "harness noise " * 50 + "\n</system-reminder>\nok"
+    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::noise", noise, turn_index=1)]}
+    rag_engine.add_turns = lambda turns, db_path=None: 0  # ingest drops the stripped turn
+
+    report = passage_backfill.run(confirmed=True)
+
+    assert report.status == "done"
+    assert report.discarded == 1
+    assert report.uncut == 0
+    assert [d for d, _, _ in world.replaced] == ["s::cut"]
+
+
+def test_would_store_mirrors_the_boilerplate_drop():
+    noise = "<system-reminder>\n" + "harness noise " * 50 + "\n</system-reminder>\nok"
+    assert not rag_engine.would_store({"text": noise})
+    assert rag_engine.would_store({"text": "User: a real question\n\nAssistant: a reply"})

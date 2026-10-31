@@ -46,6 +46,7 @@ class PassageReport:
         sessions: Sessions holding those turns.
         missing: Long turns without passages (by length, before tokenizing).
         uncut: Cut turns replaced by their whole text so far.
+        discarded: Re-parsed turns that ingest drops as boilerplate; their cut row stays.
         gone: Sessions whose transcript is no longer on disk.
         unreadable: Sessions whose transcript failed to parse.
         added: Passages stored so far.
@@ -64,6 +65,7 @@ class PassageReport:
     sessions: int = 0
     missing: int = 0
     uncut: int = 0
+    discarded: int = 0
     gone: int = 0
     unreadable: int = 0
     added: int = 0
@@ -184,7 +186,8 @@ def status() -> dict:
     return _load_state() or {}
 
 
-_COUNTERS = ("uncut", "gone", "unreadable", "added", "short", "fts_failed", "errors")
+_COUNTERS = ("uncut", "discarded", "gone", "unreadable", "added", "short", "fts_failed",
+             "errors")
 
 
 def _report(state: dict, status: str, message: str = "") -> PassageReport:
@@ -257,11 +260,14 @@ def _uncut_session(state: dict, entry: list, sources: Dict[SessionKey, list],
                      if t.get("chunk_type", "turn") == "turn" and t.get("turn_index") in wanted)
     if not turns:
         return True
+    # Checked before add_turns, which strips the text in place.
+    kept = [t for t in turns if rag_engine.would_store(t)]
+    state["discarded"] += len(turns) - len(kept)
     rag_engine.add_turns(turns, db_path=db_path)
-    doc_ids = [t["doc_id"] for t in turns]
-    if len(_stored_doc_ids(doc_ids, db_path)) < len(set(doc_ids)):
+    doc_ids = {t["doc_id"] for t in kept}
+    if len(_stored_doc_ids(sorted(doc_ids), db_path)) < len(doc_ids):
         return False
-    state["uncut"] += len(turns)
+    state["uncut"] += len(kept)
     return True
 
 
@@ -275,8 +281,12 @@ def _add_passages(state: dict, row: dict, budget, db_path: Optional[str]) -> Non
         return
     for p in built:
         p["_issue_ids"] = row.get("issue_ids", "")
-    vectors = reembed._embed_documents(budget, [p["text"] for p in built],
-                                       titles=[p["title"] for p in built])
+    # The budget refuses a batch over its batch size, so a long turn embeds in slices.
+    vectors: List[list] = []
+    for start in range(0, len(built), budget.batch_size):
+        part = built[start:start + budget.batch_size]
+        vectors.extend(reembed._embed_documents(budget, [p["text"] for p in part],
+                                                titles=[p["title"] for p in part]))
     if not rag_engine.replace_passages(row["doc_id"], built, vectors, db_path=db_path):
         state["fts_failed"] += 1
     state["added"] += len(built)
