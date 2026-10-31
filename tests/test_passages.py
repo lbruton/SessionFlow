@@ -478,3 +478,28 @@ def test_stats_count_turns_without_passages(monkeypatch):
     assert stats["total_turns"] == 1
     assert stats["by_type"] == {"turn": 1, PASSAGE_CHUNK_TYPE: 2}
     assert lag_args["count"] == 3
+
+
+def test_sibling_passages_do_not_crowd_out_other_turns(monkeypatch):
+    from tests.test_recency_ranking import _patch_pipeline
+
+    def _hit(doc_id):
+        return {"doc_id": doc_id, "content": doc_id, "session_id": "s", "distance": 0.1,
+                "timestamp": ""}
+
+    vector = [_hit(f"s::a::p{i}") for i in range(6)]
+    fts = [_hit(f"s::a::p{i}") for i in range(6, 11)] + [_hit("s::b")]
+    _patch_pipeline(monkeypatch, vector=vector, fts=fts)
+    out = rag_engine.search("q", n=2, sort_by="relevance", db_path=DB)
+    assert [passages.passage_parent(r["doc_id"]) or r["doc_id"] for r in out] == ["s::a", "s::b"]
+
+
+def test_listing_cuts_a_long_turn_for_display(monkeypatch):
+    long_row = {"document": "x" * (transcript_parser.MAX_TURN_CHARS + 500), "doc_id": "s::1",
+                "session_id": "s", "turn_index": 1, "chunk_type": "turn",
+                "timestamp": "2026-10-31T10:00:00Z"}
+    monkeypatch.setattr(rag_engine, "_query_batches",
+                        lambda fields, filter_expr=None, db_path=None, **kw: iter([[long_row]]))
+    (row,) = rag_engine._recent_listing(5, db_path=DB)
+    assert len(row["content"]) < transcript_parser.MAX_TURN_CHARS + 100
+    assert "get_turns" in row["content"]
