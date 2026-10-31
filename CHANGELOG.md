@@ -9,6 +9,13 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-31
+
+### Changed
+
+- `cleanup.py dedupe-codex` deletes an old Codex row of a session on disk only when a new task row holds its whole reply. Import turns, text past the 8,000-character task cut and text from an older rollout layout stay, and the command reports them as uncovered rows kept (SESF-98).
+- `cleanup.py prune-codex` runs `dedupe-codex` instead of deleting every row the parse does not yield (SESF-98).
+
 ## [0.10.0] - 2026-10-30
 
 ### Added
