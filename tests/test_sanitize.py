@@ -791,9 +791,13 @@ def primitive_harness(monkeypatch):
     def _fts_insert(conn, records):
         cap["fts_ops"].append(("insert", records))
 
+    def _fts_delete_where(conn, where, params):
+        cap["fts_ops"].append(("delete_where", params))
+
     fake_fts = types.SimpleNamespace(
         connection=lambda db_path: object(),
         delete=_fts_delete,
+        delete_where=_fts_delete_where,
         insert=_fts_insert,
         close_ephemeral=lambda conn: None,
     )
