@@ -594,3 +594,50 @@ def test_untitled_batches_keep_the_plain_embed_call(regen):
         "before_batch": lambda self, **k: types.SimpleNamespace(allowed=True),
         "after_batch": lambda self, *a, **k: None})(), ["a"], titles=[None])
     assert seen == [["a"]]
+
+
+def test_sanitize_redaction_keeps_the_passage_title(monkeypatch):
+    import sanitize
+    from tests.test_sanitize import AWS_KEY
+
+    seen = {}
+    monkeypatch.setattr(rag_engine, "document_titles",
+                        lambda rows, db_path=None: [f"Proj · leaked {AWS_KEY}"])
+
+    def _embed(redacted, title=None):
+        seen["title"] = title
+        return [0.0] * 4
+
+    monkeypatch.setattr(sanitize, "_throttled_embed", _embed)
+    monkeypatch.setattr(rag_engine, "upsert_document", lambda *a, **k: types.SimpleNamespace(
+        milvus_ok=True, fts_ok=True))
+    audit = types.SimpleNamespace(write=lambda **kw: None)
+    row = {"doc_id": "s::p::p0", "document": f"key {AWS_KEY} here",
+           "chunk_type": PASSAGE_CHUNK_TYPE, "project_root": "/p/Proj"}
+
+    assert sanitize._apply_redact("s::p::p0", row, None, [], audit, DB) is True
+    assert seen["title"].startswith("Proj · leaked ")
+    assert AWS_KEY not in seen["title"]
+
+
+def test_throttled_embed_passes_the_title(monkeypatch):
+    import sanitize
+
+    calls = []
+
+    class _Budget:
+        def split_batches(self, items):
+            return [items]
+
+        def before_batch(self, *a, **k):
+            return types.SimpleNamespace(allowed=True)
+
+        def after_batch(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(rag_engine, "get_embedding_budget", lambda: _Budget())
+    monkeypatch.setattr(rag_engine, "embed_texts",
+                        lambda texts, is_query=False, **kw: calls.append(kw) or [[0.0]])
+    sanitize._throttled_embed("text", title="Proj · q")
+    sanitize._throttled_embed("text")
+    assert calls == [{"titles": ["Proj · q"]}, {}]

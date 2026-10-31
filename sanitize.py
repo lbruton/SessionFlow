@@ -356,7 +356,7 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _throttled_embed(redacted: str) -> Optional[list]:
+def _throttled_embed(redacted: str, title: Optional[str] = None) -> Optional[list]:
     """Embed ``redacted`` through the shared budget, honoring the cooldown floor.
 
     Routes the single-text re-embed through the process-wide embedding budget's
@@ -367,6 +367,8 @@ def _throttled_embed(redacted: str) -> Optional[list]:
       once (the budget is asking us to wait out a cooldown).
     * Denied **without** a delay → a hard pause/cap. Do **not** embed; return
       ``None`` so the caller aborts the run cleanly (checkpoint + ``paused``).
+
+    ``title`` fills the model's title slot, as ingest did for a passage.
 
     Returns:
         The embedding vector for ``redacted``, or ``None`` when the budget
@@ -389,7 +391,10 @@ def _throttled_embed(redacted: str) -> Optional[list]:
         started = time.monotonic()
         error: Optional[BaseException] = None
         try:
-            vectors = rag_engine.embed_texts(batch, is_query=False)
+            if title:
+                vectors = rag_engine.embed_texts(batch, is_query=False, titles=[title])
+            else:
+                vectors = rag_engine.embed_texts(batch, is_query=False)
             vector = vectors[0]
         except BaseException as exc:  # noqa: BLE001 - scrub before re-raise
             error = exc
@@ -648,7 +653,11 @@ def _apply_redact(
         )
         return bool(result.milvus_ok and result.fts_ok)
 
-    vector = _throttled_embed(redacted)
+    # A passage's title comes from its parent's user question, which may hold the secret too.
+    title = rag_engine.document_titles([dict(row, doc_id=doc_id)], db_path)[0]
+    if title:
+        title = secret_redaction.scan_spans(title, mode="enforce", allowlist=allowlist)[0]
+    vector = _throttled_embed(redacted, title)
     if vector is None:
         # Budget hard-denied the re-embed (pause/cap, no retry delay). Do not
         # write this turn — signal the caller to abort and checkpoint.

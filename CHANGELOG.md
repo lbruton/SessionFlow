@@ -26,7 +26,7 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 - Turns are stored whole up to the 65,535-byte Milvus `document` cap instead of being cut at 8,000 characters. Search output still prints at most 8,000 characters of a turn, and `get_turns` returns all of it (SESF-69).
 - Search keeps one row per turn: the best of the parent and its passages. A passage hit prints its part number (SESF-69).
-- `cleanup.py reembed` and `cleanup.py rewrite` re-embed passages with the title rebuilt from their parent turn (`rag_engine.document_titles`) (SESF-69).
+- `cleanup.py reembed`, `cleanup.py rewrite` and `cleanup.py sanitize` re-embed passages with the title rebuilt from their parent turn (`rag_engine.document_titles`); `sanitize` redacts that title too (SESF-69).
 - Deleting a turn by doc_id also deletes its passages from Milvus and FTS. The recency listing, `get_turns`, the issue timeline, session listings and the stats turn count skip passages (SESF-69).
 
 ## [0.11.0] - 2026-10-31
