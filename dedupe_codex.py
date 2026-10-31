@@ -1,8 +1,8 @@
 """Remove Codex rows left by keying turns on rollout line numbers.
 
-A session whose rollout is on disk keeps the rows its parse yields. Its other rows
-are deleted only once the backfill has indexed every parsed turn, so search never
-loses a turn. A session whose rollout is gone keeps one row per distinct turn.
+A session whose rollout is on disk loses an old row only when a new task row holds
+its reply, and only once the backfill has indexed every parsed turn, so search never
+loses text. A session whose rollout is gone keeps one row per distinct turn.
 Nothing here embeds.
 """
 
@@ -27,8 +27,10 @@ class CodexDedupePlan:
     """Codex rows to delete, by session.
 
     Attributes:
-        stale: Rows of sessions on disk that the current parse does not yield.
+        stale: Rows of sessions on disk that the current parse does not yield and
+            whose reply a new task row holds (see ``_covered``).
         duplicates: Repeated rows of sessions whose rollout is gone.
+        uncovered_rows: Rows the parse does not yield and no new row covers; kept.
         waiting_sessions: Sessions on disk with parsed turns not yet in Milvus.
         waiting_turns: Parsed turns not yet in Milvus.
         unreadable_sessions: Sessions whose rollout failed to read; their rows are kept.
@@ -40,6 +42,7 @@ class CodexDedupePlan:
     duplicates: Dict[str, List[str]] = field(default_factory=dict)
     waiting_sessions: int = 0
     waiting_turns: int = 0
+    uncovered_rows: int = 0
     unreadable_sessions: int = 0
     sessions_on_disk: int = 0
     sessions_missing: int = 0
@@ -174,10 +177,40 @@ def plan(db_path: Optional[str] = None) -> CodexDedupePlan:
             result.waiting_turns += len(missing)
             continue
         current = {t["doc_id"] for t in turns}
-        stale = sorted(row["doc_id"] for row in rows if row["doc_id"] not in current)
+        texts = _covering_texts(turns)
+        stale: List[str] = []
+        for row in rows:
+            if row["doc_id"] in current:
+                continue
+            if _covered(row, texts):
+                stale.append(row["doc_id"])
+            else:
+                result.uncovered_rows += 1
         if stale:
-            result.stale[session_id] = stale
+            result.stale[session_id] = sorted(stale)
     return result
+
+
+def _covering_texts(turns: List[dict]) -> List[str]:
+    # Stored documents went through boilerplate stripping, so compare both forms.
+    texts: List[str] = []
+    for turn in turns:
+        text = turn.get("text", "")
+        texts.extend((text, boilerplate.strip(text)[0]))
+    return texts
+
+
+def _covered(row: dict, texts: List[str]) -> bool:
+    """Whether a new task row holds this row's whole reply.
+
+    Import turns, text past the task cut and text from an older rollout layout are
+    not covered, and their rows stay until a parse can rebuild them.
+    """
+    document = row.get("document") or ""
+    if document.startswith("User: ") and _REPLY_MARKER in document:
+        document = document.split(_REPLY_MARKER, 1)[1]
+    reply = document.removesuffix("[truncated]").strip()
+    return bool(reply) and any(reply in text for text in texts)
 
 
 def _audit_dir() -> Path:

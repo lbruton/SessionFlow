@@ -31,6 +31,16 @@ def _turn(doc_id, session, turn_index, text):
             "text": text, "chunk_type": "turn"}
 
 
+@pytest.fixture(autouse=True)
+def no_live_index(monkeypatch):
+    """Fail any read or write that would reach the real index; ``world`` stubs what it needs."""
+    def _refuse(*args, **kwargs):
+        raise AssertionError("test reached the live index")
+
+    for name in ("delete_by_doc_id", "add_turns", "_query_batches"):
+        monkeypatch.setattr(dedupe_codex.rag_engine, name, _refuse)
+
+
 @pytest.fixture
 def world(monkeypatch, tmp_path):
     state = {"rows": [], "parsed": {}, "deleted": [], "fts_fail": set(), "reads": 0}
@@ -197,3 +207,40 @@ def test_assistant_only_vector_row_needs_a_vector_backed_full_row(world):
     plan = dedupe_codex.plan(db_path="db")
 
     assert plan.duplicates == {}
+
+
+def test_uncovered_row_of_a_session_on_disk_is_kept(world):
+    world["rows"] = [
+        _row("codex:s:new", "s", 0, FULL),
+        _row("codex:s:dup", "s", 230, "the reply"),
+        _row("codex:s:import", "s", 12, "User: imported\n\nAssistant: imported answer"),
+    ]
+    world["parsed"] = {"s": [_turn("codex:s:new", "s", 0, FULL)]}
+
+    plan = dedupe_codex.plan(db_path="db")
+
+    assert plan.stale == {"s": ["codex:s:dup"]}
+    assert plan.uncovered_rows == 1
+
+
+def test_reply_cut_by_the_task_limit_is_not_covered(world):
+    long_reply = "y" * 50
+    world["rows"] = [_row("codex:s:new", "s", 0, "User: q\n\nAssistant: yyyy\n\n[truncated]"),
+                     _row("codex:s:old", "s", 9, long_reply)]
+    world["parsed"] = {"s": [_turn("codex:s:new", "s", 0, "User: q\n\nAssistant: yyyy\n\n[truncated]")]}
+
+    plan = dedupe_codex.plan(db_path="db")
+
+    assert plan.stale == {}
+    assert plan.uncovered_rows == 1
+
+
+def test_stripped_old_row_is_covered_by_the_stripped_new_text(world):
+    raw = "User: q\n\nAssistant: before\n<system-reminder>\nharness\n</system-reminder>\nafter the reminder"
+    world["rows"] = [_row("codex:s:new", "s", 0, raw),
+                     _row("codex:s:old", "s", 9, "before\nafter the reminder")]
+    world["parsed"] = {"s": [_turn("codex:s:new", "s", 0, raw)]}
+
+    plan = dedupe_codex.plan(db_path="db")
+
+    assert plan.stale == {"s": ["codex:s:old"]}

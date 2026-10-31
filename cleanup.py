@@ -17,7 +17,7 @@ Usage:
     cleanup.py retag-project --from <old> --to <new> [--provider P] [--apply --yes]
                                                              # Move turns to a new project root
     cleanup.py restamp-codex [--apply --yes]                 # Rewrite Codex turn times and branches
-    cleanup.py prune-codex   [--apply --yes]                 # Delete Codex turns their rollout no longer yields
+    cleanup.py prune-codex   [--apply --yes]                 # Same as dedupe-codex
     cleanup.py dedupe-turns  [--apply --yes]                 # Repair Claude turns indexed mid-write
     cleanup.py dedupe-codex  [--apply --yes]                 # Delete Codex rows of the old turn keys
 """
@@ -638,74 +638,17 @@ def cmd_restamp_codex(args) -> int:
 
 
 def cmd_prune_codex(args) -> int:
-    """Delete indexed Codex turns that a full parse of their rollout no longer produces.
-
-    Only sessions whose rollout is still on disk are touched; turns of a deleted
-    rollout stay searchable. The index is read before the rollouts, so a turn
-    indexed during the run is always in the parse. Dry run by default;
-    ``--apply`` refuses without ``--yes`` before any read.
+    """Run ``dedupe-codex``, which deletes only Codex rows a new task row covers.
 
     Args:
         args: Parsed argparse namespace with ``apply`` and ``yes``.
 
     Returns:
-        ``0`` on success, ``1`` when the confirmation gate refuses, the FTS read
-        fails, or any delete failed in either store.
+        The exit code of :func:`cmd_dedupe_codex`.
     """
-    if args.apply and not args.yes:
-        print(
-            "Refusing to apply: confirmation required. Re-run with --yes to "
-            "delete the orphan turns.",
-            file=sys.stderr,
-        )
-        return 1
-
-    db_path = get_db_path()
-    try:
-        stored = rag_engine.stored_metadata_by_provider("codex", ["timestamp"], db_path=db_path)
-    except RuntimeError as e:
-        print(f"{e}. Nothing deleted; re-run once the FTS sidecar is readable.",
-              file=sys.stderr)
-        return 1
-
-    adapter = _codex_adapter()
-    parsed: set = set()
-    sessions: set = set()
-    for source in adapter.discover_sources():
-        result = adapter.parse_source(source, cursor=None)
-        # A rollout that failed to read is not an empty one; keep its rows.
-        if result.errors:
-            continue
-        sessions.add(source.logical_session_id)
-        for turn in result.turns:
-            parsed.add(turn["doc_id"])
-
-    orphans = sorted(
-        doc_id for doc_id in stored
-        if doc_id not in parsed
-        and doc_id.removeprefix("codex:").rsplit(":", 1)[0] in sessions
-    )
-
-    print(f"Codex turns parsed from disk: {len(parsed)}")
-    print(f"Indexed Codex turns:          {len(stored)}")
-    print(f"Orphan turns to delete:       {len(orphans)}")
-
-    if not args.apply:
-        print("\nDry run: nothing deleted. Re-run with --apply --yes to delete.")
-        return 0
-
-    fts_failed = 0
-    for count, doc_id in enumerate(orphans, start=1):
-        if not rag_engine.delete_by_doc_id(doc_id, db_path=db_path).fts_ok:
-            fts_failed += 1
-        if count % 1000 == 0:
-            print(f"  {count}/{len(orphans)}", flush=True)
-
-    print(f"\nDeleted: {len(orphans) - fts_failed}")
-    if fts_failed:
-        print(f"FTS delete failures: {fts_failed} (re-run to converge)")
-        return 1
-    return 0
+    print("prune-codex runs dedupe-codex, which deletes only rows a new task row covers.",
+          file=sys.stderr)
+    return cmd_dedupe_codex(args)
 
 
 def cmd_dedupe_turns(args) -> int:
@@ -788,6 +731,7 @@ def cmd_dedupe_codex(args) -> int:
     print(f"Sessions with a rollout:   {plan.sessions_on_disk}")
     print(f"Sessions without one:      {plan.sessions_missing}")
     print(f"Replaced rows to delete:   {stale}")
+    print(f"Uncovered rows kept:       {plan.uncovered_rows}")
     print(f"Duplicate rows to delete:  {duplicates}")
     if plan.unreadable_sessions:
         print(f"Sessions whose rollout failed to read: {plan.unreadable_sessions} "
@@ -1076,7 +1020,7 @@ def build_parser():
     # prune-codex
     p_prune = subparsers.add_parser(
         "prune-codex",
-        help="Delete Codex turns their rollout no longer yields (dry-run by default)",
+        help="Run dedupe-codex (dry-run by default)",
     )
     p_prune.add_argument("--apply", action="store_true",
                          help="Delete the turns; requires --yes")
