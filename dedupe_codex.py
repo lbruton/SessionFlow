@@ -177,7 +177,8 @@ def plan(db_path: Optional[str] = None) -> CodexDedupePlan:
             result.waiting_turns += len(missing)
             continue
         current = {t["doc_id"] for t in turns}
-        texts = _covering_texts(turns)
+        texts = _covering_texts(
+            [row for row in rows if row["doc_id"] in current and row["in_milvus"]])
         stale: List[str] = []
         for row in rows:
             if row["doc_id"] in current:
@@ -191,25 +192,25 @@ def plan(db_path: Optional[str] = None) -> CodexDedupePlan:
     return result
 
 
-def _covering_texts(turns: List[dict]) -> List[str]:
-    # Stored documents went through boilerplate stripping, so compare both forms.
-    texts: List[str] = []
-    for turn in turns:
-        text = turn.get("text", "")
-        texts.extend((text, boilerplate.strip(text)[0]))
-    return texts
+def _reply(document: str) -> str:
+    if document.startswith("User: ") and _REPLY_MARKER in document:
+        document = document.split(_REPLY_MARKER, 1)[1]
+    return document.removesuffix("[truncated]").strip()
+
+
+def _covering_texts(stored_rows: List[dict]) -> List[str]:
+    # Stored rows are stripped and redacted like the old rows, and a turn that
+    # ingestion dropped has none. Only the reply part can cover a reply.
+    return [_reply(row.get("document") or "") for row in stored_rows]
 
 
 def _covered(row: dict, texts: List[str]) -> bool:
-    """Whether a new task row holds this row's whole reply.
+    """Whether a stored new task row holds this row's whole reply.
 
     Import turns, text past the task cut and text from an older rollout layout are
     not covered, and their rows stay until a parse can rebuild them.
     """
-    document = row.get("document") or ""
-    if document.startswith("User: ") and _REPLY_MARKER in document:
-        document = document.split(_REPLY_MARKER, 1)[1]
-    reply = document.removesuffix("[truncated]").strip()
+    reply = _reply(row.get("document") or "")
     return bool(reply) and any(reply in text for text in texts)
 
 
