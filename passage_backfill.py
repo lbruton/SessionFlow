@@ -51,7 +51,7 @@ class PassageReport:
         unreadable: Sessions whose transcript failed to parse.
         added: Passages stored so far.
         short: Turns that turned out too short for passages.
-        fts_failed: Turns whose FTS passage write failed (FTS healing adds them).
+        fts_pending: Turns whose FTS passage write failed and waits for a retry.
         errors: Failed steps so far (each one is retried by the next run).
         cursor: Position in the current phase's worklist.
         total: Length of the current phase's worklist.
@@ -70,7 +70,7 @@ class PassageReport:
     unreadable: int = 0
     added: int = 0
     short: int = 0
-    fts_failed: int = 0
+    fts_pending: int = 0
     errors: int = 0
     cursor: int = 0
     total: int = 0
@@ -186,8 +186,7 @@ def status() -> dict:
     return _load_state() or {}
 
 
-_COUNTERS = ("uncut", "discarded", "gone", "unreadable", "added", "short", "fts_failed",
-             "errors")
+_COUNTERS = ("uncut", "discarded", "gone", "unreadable", "added", "short", "errors")
 
 
 def _report(state: dict, status: str, message: str = "") -> PassageReport:
@@ -196,6 +195,7 @@ def _report(state: dict, status: str, message: str = "") -> PassageReport:
         status=status, phase=state["phase"], cut_rows=state["cut_rows"],
         sessions=len(state["sessions"]), missing=state["missing"],
         cursor=state["cursor"], total=len(worklist), run_id=state["run_id"],
+        fts_pending=len(state.get("fts_retry", [])),
         message=message, **{k: state[k] for k in _COUNTERS},
     )
 
@@ -215,6 +215,7 @@ def _new_state(db_path: Optional[str]) -> dict:
         "missing": len(missing),
         "cursor": 0,
         **{k: 0 for k in _COUNTERS},
+        "fts_retry": [],
         "chunks": [],
     }
 
@@ -271,16 +272,38 @@ def _uncut_session(state: dict, entry: list, sources: Dict[SessionKey, list],
     return True
 
 
+def _build(row: dict) -> List[dict]:
+    """Return the passages of one stored turn; the same text always gives the same passages."""
+    document = row.get("document") or ""
+    built = passages.build_passages({**row, "text": document},
+                                    rag_engine._token_offsets(document))
+    for p in built:
+        p["_issue_ids"] = row.get("issue_ids", "")
+    return built
+
+
+def _retry_fts(state: dict, db_path: Optional[str]) -> None:
+    """Rewrite the FTS passages that failed earlier; keep the ones that fail again."""
+    still = []
+    for pk in state.get("fts_retry", []):
+        try:
+            rows = rag_engine.get_rows_by_ids([pk], db_path=db_path)
+            ok = not rows or rag_engine.write_passage_fts(rows[0]["doc_id"], _build(rows[0]),
+                                                          db_path=db_path)
+        except Exception:  # noqa: BLE001 - keep the entry for the next run
+            ok = False
+        if not ok:
+            still.append(pk)
+    state["fts_retry"] = still
+    _save_state(state)
+
+
 def _add_passages(state: dict, row: dict, budget, db_path: Optional[str]) -> None:
     """Build, embed and store the passages of one stored turn."""
-    document = row.get("document") or ""
-    turn = {**row, "text": document}
-    built = passages.build_passages(turn, rag_engine._token_offsets(document))
+    built = _build(row)
     if not built:
         state["short"] += 1
         return
-    for p in built:
-        p["_issue_ids"] = row.get("issue_ids", "")
     # The budget refuses a batch over its batch size, so a long turn embeds in slices.
     vectors: List[list] = []
     for start in range(0, len(built), budget.batch_size):
@@ -288,7 +311,8 @@ def _add_passages(state: dict, row: dict, budget, db_path: Optional[str]) -> Non
         vectors.extend(reembed._embed_documents(budget, [p["text"] for p in part],
                                                 titles=[p["title"] for p in part]))
     if not rag_engine.replace_passages(row["doc_id"], built, vectors, db_path=db_path):
-        state["fts_failed"] += 1
+        # FTS healing runs only when its sentinel is set, so this run retries the write.
+        state["fts_retry"].append(int(row["id"]))
     state["added"] += len(built)
 
 
@@ -315,7 +339,8 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
         return PassageReport(status="refused", message="confirmation required (--yes)")
     db_path = db_path or reembed._db_path()
 
-    state = None if restart else _load_state()
+    previous = _load_state() or {}
+    state = None if restart else previous
     if state and state.get("run_id"):
         if state.get("model_name") != rag_engine.get_model_name():
             return _report(state, "refused",
@@ -325,8 +350,12 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
             return _report(state, "done", "run already complete; use --restart to redo")
     else:
         state = _new_state(db_path)
+        # A fresh scan sees the passages in Milvus, so only the old retries reach their FTS rows.
+        state["fts_retry"] = list(previous.get("fts_retry", []))
+    state.setdefault("fts_retry", [])
     state["status"] = "running"
     _save_state(state)
+    _retry_fts(state, db_path)
 
     budget = get_embedding_budget()
     started_at, started = reembed._now_iso(), reembed._monotonic()
@@ -378,6 +407,12 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
     except Exception as e:
         state["errors"] += 1
         outcome, message = "error", rag_engine._scrub_exception(e)
+
+    if outcome == "done" and state["fts_retry"]:
+        _retry_fts(state, db_path)
+        if state["fts_retry"]:
+            outcome = "paused"
+            message = f"{len(state['fts_retry'])} FTS passage writes pending; run again to retry"
 
     state["chunks"].append({
         "started_at": started_at,

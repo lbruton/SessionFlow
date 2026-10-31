@@ -943,7 +943,7 @@ def _print_passage_report(report) -> None:
     print(f"Unreadable: {report.unreadable}")
     print(f"Added:      {report.added} passages")
     print(f"Short:      {report.short}")
-    print(f"FTS failed: {report.fts_failed}")
+    print(f"FTS retry:  {report.fts_pending}")
     print(f"Errors:     {report.errors}")
     print(f"Cursor:     {report.cursor} of {report.total}")
     if report.message:

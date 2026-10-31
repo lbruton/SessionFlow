@@ -14,6 +14,7 @@ import transcript_parser
 from passages import PASSAGE_CHUNK_TYPE, PASSAGE_TOKENS
 
 REAL_REPLACE_PASSAGES = rag_engine.replace_passages
+REAL_WRITE_PASSAGE_FTS = rag_engine.write_passage_fts
 OLD_CUT = ("word " * transcript_parser.MAX_TURN_CHARS)[:transcript_parser.MAX_TURN_CHARS] \
     + transcript_parser.CUT_MARK
 
@@ -48,6 +49,7 @@ def no_live_index(monkeypatch):
         raise AssertionError("test reached the live index")
 
     for name in ("_query_batches", "add_turns", "get_rows_by_ids", "replace_passages",
+                 "write_passage_fts",
                  "delete_by_doc_id", "milvus_client", "embed_texts"):
         monkeypatch.setattr(rag_engine, name, _refuse)
     monkeypatch.setattr(reembed, "_embed_documents", _refuse)
@@ -292,6 +294,7 @@ def test_replace_passages_rewrites_milvus_and_fts(monkeypatch):
 
     fts = []
     monkeypatch.setattr(rag_engine, "milvus_client", _client)
+    monkeypatch.setattr(rag_engine, "write_passage_fts", REAL_WRITE_PASSAGE_FTS)
     monkeypatch.setattr(rag_engine, "_fts", types.SimpleNamespace(
         connection=lambda db_path: object(),
         delete_where=lambda conn, where, params: fts.append(("delete_where", params)),
@@ -325,6 +328,7 @@ def test_replace_passages_reports_an_fts_failure(monkeypatch):
         raise RuntimeError("database is locked")
 
     monkeypatch.setattr(rag_engine, "milvus_client", _client)
+    monkeypatch.setattr(rag_engine, "write_passage_fts", REAL_WRITE_PASSAGE_FTS)
     monkeypatch.setattr(rag_engine, "_fts", types.SimpleNamespace(
         connection=lambda db_path: object(), delete_where=_boom,
         close_ephemeral=lambda conn: None))
@@ -379,3 +383,32 @@ def test_would_store_mirrors_the_boilerplate_drop():
     noise = "<system-reminder>\n" + "harness noise " * 50 + "\n</system-reminder>\nok"
     assert not rag_engine.would_store({"text": noise})
     assert rag_engine.would_store({"text": "User: a real question\n\nAssistant: a reply"})
+
+
+def test_failed_passage_fts_write_is_retried_before_done(world, monkeypatch):
+    world.rows = {2: _row(2, "s::long", _words(1000), turn_index=2)}
+    real_replace = rag_engine.replace_passages
+
+    def _replace_fts_fails(parent_doc_id, built, vectors, db_path=None):
+        real_replace(parent_doc_id, built, vectors, db_path)
+        return False
+
+    retried = []
+    monkeypatch.setattr(rag_engine, "replace_passages", _replace_fts_fails)
+    monkeypatch.setattr(rag_engine, "write_passage_fts",
+                        lambda parent_doc_id, built, db_path=None: retried.append(
+                            (parent_doc_id, [p["doc_id"] for p in built])) or False)
+
+    report = passage_backfill.run(confirmed=True)
+    assert report.status == "paused"
+    assert report.fts_pending == 1
+
+    monkeypatch.setattr(rag_engine, "write_passage_fts",
+                        lambda parent_doc_id, built, db_path=None: retried.append(
+                            (parent_doc_id, [p["doc_id"] for p in built])) or True)
+    report = passage_backfill.run(confirmed=True)
+    assert report.status == "done"
+    assert report.fts_pending == 0
+    assert len(world.embedded) == 2  # the retry rebuilt the text without embedding
+    assert {d for d, _ in retried} == {"s::long"}
+    assert retried[-1][1] == [f"s::long::p{i}" for i in range(len(retried[-1][1]))]

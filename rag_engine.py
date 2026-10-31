@@ -1190,7 +1190,8 @@ def replace_passages(parent_doc_id: str, built: List[Dict], vectors: List[List[f
         db_path: Milvus DB path; also derives the FTS sidecar path.
 
     Returns:
-        False when an FTS write failed; the server's FTS healing adds the missing rows.
+        False when the FTS write failed; ``write_passage_fts`` retries it without
+        Milvus. The server's FTS healing runs only when its sentinel is set.
     """
     if not built:
         return True
@@ -1199,8 +1200,24 @@ def replace_passages(parent_doc_id: str, built: List[Dict], vectors: List[List[f
         _delete_milvus_passages(client, parent_doc_id, built[0])
         client.insert(collection_name=COLLECTION_NAME,
                       data=[_milvus_row(p, v, defaults) for p, v in zip(built, vectors)])
+    return write_passage_fts(parent_doc_id, built, db_path=db_path)
+
+
+def write_passage_fts(parent_doc_id: str, built: List[Dict],
+                      db_path: Optional[str] = None) -> bool:
+    """Replace the FTS rows of ``parent_doc_id``'s passages with ``built``.
+
+    Args:
+        parent_doc_id: Doc_id of the parent turn.
+        built: Passage dicts from ``passages.build_passages``, carrying ``_issue_ids``.
+        db_path: Milvus DB path; derives the FTS sidecar path.
+
+    Returns:
+        False when the FTS write failed.
+    """
     if not db_path:
         return True
+    defaults = default_provider_metadata()
     conn = None
     try:
         conn = _fts.connection(db_path)
