@@ -14,6 +14,7 @@ Usage:
     cleanup.py stats       [--project <root>]                # Show index statistics
     cleanup.py reembed     {plan|run|drive|status|verify}    # Re-embed every stored vector in place
     cleanup.py rewrite     {plan|run|drive|status|verify}    # Strip boilerplate and re-embed long rows in place
+    cleanup.py passages    {plan|run|drive|status|verify}    # Re-parse cut turns and add passages to long turns
     cleanup.py retag-project --from <old> --to <new> [--provider P] [--apply --yes]
                                                              # Move turns to a new project root
     cleanup.py restamp-codex [--apply --yes]                 # Rewrite Codex turn times and branches
@@ -908,6 +909,48 @@ def _print_rewrite_report(report) -> None:
         print(f"Note:      {report.message}")
 
 
+def cmd_passages(args) -> int:
+    """Drive the passage backfill (see :mod:`passage_backfill`).
+
+    ``plan`` scans and writes nothing, ``run`` and ``drive`` refuse without
+    ``--yes``, and ``verify`` counts what a run would still change.
+
+    Args:
+        args: Parsed argparse namespace for the ``passages`` subcommand.
+
+    Returns:
+        A process exit code: ``0`` on success, ``1`` on refusal, error, or work left.
+    """
+    import passage_backfill
+
+    if args.action != "verify":
+        return _chunked_action("passages", passage_backfill, args, _print_passage_report)
+    result = passage_backfill.verify(db_path=get_db_path())
+    print(f"Without passages: {result.missing}")
+    print(f"Still cut:        {result.cut_rows}")
+    return 0 if result.missing == 0 else 1
+
+
+def _print_passage_report(report) -> None:
+    """Print a passage backfill report's counters."""
+    print(f"Status:     {report.status}")
+    print(f"Phase:      {report.phase}")
+    print(f"Cut turns:  {report.cut_rows} in {report.sessions} sessions")
+    print(f"Missing:    {report.missing} long turns without passages")
+    print(f"Uncut:      {report.uncut}")
+    print(f"Discarded:  {report.discarded}")
+    print(f"Rejected:   {report.rejected}")
+    print(f"Gone:       {report.gone}")
+    print(f"Unreadable: {report.unreadable}")
+    print(f"Added:      {report.added} passages")
+    print(f"Short:      {report.short}")
+    print(f"FTS retry:  {report.fts_pending}")
+    print(f"Errors:     {report.errors}")
+    print(f"Cursor:     {report.cursor} of {report.total}")
+    if report.message:
+        print(f"Note:       {report.message}")
+
+
 def _print_reembed_report(report) -> None:
     """Print a re-embed report's counters."""
     print(f"Status:    {report.status}")
@@ -1089,6 +1132,13 @@ def build_parser():
         run_help="Rewrite one chunk in this process",
         verify_help="Check rewritten rows for boilerplate and stale vectors",
     )
+    _add_chunked_command(
+        subparsers, "passages",
+        help="Re-parse turns cut at the old limit, then add passages to long turns",
+        plan_help="Scan and count what a run would do (read-only)",
+        run_help="Run one chunk in this process",
+        verify_help="Count long turns still without passages (read-only)",
+    )
 
     return parser
 
@@ -1148,6 +1198,7 @@ def main():
         "backfill": cmd_backfill,
         "reembed": cmd_reembed,
         "rewrite": cmd_rewrite,
+        "passages": cmd_passages,
     }
     return_code = commands[args.command](args)
     if return_code is not None:

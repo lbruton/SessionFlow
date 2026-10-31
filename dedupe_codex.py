@@ -15,7 +15,6 @@ import json
 import os
 import uuid
 
-import boilerplate
 import rag_engine
 
 PROVIDER = "codex"
@@ -112,14 +111,6 @@ def _parse_sessions() -> Dict[str, Optional[List[dict]]]:
     return parsed
 
 
-def _would_store(turn: dict) -> bool:
-    # Mirrors rag_engine._apply_boilerplate, which drops a turn stripping leaves too short.
-    if not rag_engine._boilerplate_enabled():
-        return True
-    clean, removed = boilerplate.strip(turn.get("text", ""))
-    return not removed or len(clean.strip()) >= rag_engine.MIN_TURN_CHARS
-
-
 def _duplicate_rows(rows: List[dict]) -> List[str]:
     """Return repeats of an earlier row and assistant-only copies of a User + Assistant row.
 
@@ -171,7 +162,7 @@ def plan(db_path: Optional[str] = None) -> CodexDedupePlan:
             result.unreadable_sessions += 1
             continue
         in_milvus = {row["doc_id"] for row in rows if row["in_milvus"]}
-        missing = {t["doc_id"] for t in turns if _would_store(t)} - in_milvus
+        missing = {t["doc_id"] for t in turns if rag_engine.would_store(t)} - in_milvus
         if missing:
             result.waiting_sessions += 1
             result.waiting_turns += len(missing)
