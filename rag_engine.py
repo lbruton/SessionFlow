@@ -1877,6 +1877,22 @@ def _semantic_scores(results: List[Dict]) -> List[float]:
     return [(s - lo) / span for s in raw]
 
 
+def ranking_settings() -> Dict[str, Union[float, int]]:
+    """Return the hybrid ranking settings this process applies, read from the environment.
+
+    ``SESSIONFLOW_RECENCY_WEIGHT`` outside ``[0, 1]`` and an unparsable value fall
+    back to the default; ``SESSIONFLOW_RECENCY_DECAY_DAYS`` is at least 1.
+    """
+    return {
+        "recency_weight": _env_float(
+            "SESSIONFLOW_RECENCY_WEIGHT", RECENCY_WEIGHT_DEFAULT, 0.0, 1.0
+        ),
+        "recency_decay_days": _env_int(
+            "SESSIONFLOW_RECENCY_DECAY_DAYS", RECENCY_DECAY_DAYS_DEFAULT, minimum=1
+        ),
+    }
+
+
 def _rank_results(results: List[Dict], sort_by: str, n: int,
                   now: Optional[datetime] = None, *,
                   timestamp_key: str = "timestamp",
@@ -1910,12 +1926,9 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
             reverse=True,
         )
     else:  # hybrid
-        weight = _env_float(
-            "SESSIONFLOW_RECENCY_WEIGHT", RECENCY_WEIGHT_DEFAULT, 0.0, 1.0
-        )
-        decay_days = _env_int(
-            "SESSIONFLOW_RECENCY_DECAY_DAYS", RECENCY_DECAY_DAYS_DEFAULT, minimum=1
-        )
+        settings = ranking_settings()
+        weight = settings["recency_weight"]
+        decay_days = settings["recency_decay_days"]
         semantic = _semantic_scores(results)
         for r, sem in zip(results, semantic, strict=True):
             rec = _recency_score(r.get(timestamp_key, ""), now, decay_days)

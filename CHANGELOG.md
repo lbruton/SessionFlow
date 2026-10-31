@@ -9,6 +9,15 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-30
+
+### Added
+
+- `eval_retrieval.py` scores a labelled JSONL query set against the running server: recall@5, MRR and nDCG@10 per query group, plus a current-first rate for superseded decisions and the top hit score for no-answer queries. `run`, `sweep` (restarts the LaunchAgent once per env value; needs `--yes`), `freshness` (a canary memory, deleted after the probe), `usage` and `nightly` subcommands (SESF-82).
+- `SESSIONFLOW_SEARCH_LOG=1` appends each search, `get_memory` and `get_turns` call to `~/.sessionflow/search-log.jsonl` with redacted queries and result IDs in rank order. It is off by default (SESF-82).
+- `/health` reports the hybrid ranking settings under `ranking` (SESF-82).
+- `sessionflow-server.sh install-eval-agent`, `uninstall-eval-agent` and `eval-agent-status` manage a nightly LaunchAgent that runs `eval_retrieval.py nightly` (SESF-82).
+
 ## [0.8.1] - 2026-10-30
 
 ### Fixed

@@ -68,6 +68,7 @@ Restart Claude Code after setup to load the MCP server.
 | `SESSIONFLOW_EXPIRE_DAYS` | `365` | Prune turns older than this many days. |
 | `SESSIONFLOW_WATCH` | `true` | Turn the transcript file watcher on or off. |
 | `SESSIONFLOW_URL` | `http://127.0.0.1:7102` | Server URL that the hooks call. |
+| `SESSIONFLOW_SEARCH_LOG` | off | Set to `1` to log each search and follow-up call to `~/.sessionflow/search-log.jsonl`. Queries are redacted. |
 
 ## Running
 
@@ -92,6 +93,19 @@ Several harnesses can start at the same time, and their `SessionStart` hooks the
 ```
 
 The `start`, `stop`, `restart` and `status` commands work the same with or without the LaunchAgent. `setup.sh` offers to install it. Set `SESSIONFLOW_INSTALL_AGENT=1` to install it without a prompt.
+
+### Retrieval eval
+
+`eval_retrieval.py` scores a labelled query set against the running server. Each JSONL line names an `id`, a `group`, a `tool`, a `query`, optional `args` and the `expected` IDs (`memory_id` or `session_id:turn_index`). `tests/eval/fixture_queries.jsonl` shows the format.
+
+```bash
+./venv/bin/python eval_retrieval.py run --queries queries.jsonl --sort-by hybrid --sort-by relevance --out reports/
+./venv/bin/python eval_retrieval.py sweep --queries queries.jsonl --var SESSIONFLOW_RECENCY_WEIGHT --values 0,0.15,0.3,0.5 --out reports/ --yes
+./venv/bin/python eval_retrieval.py freshness     # Time a canary memory until search finds it
+./venv/bin/python eval_retrieval.py usage --days 7 # Roll up the search usage log
+```
+
+`sweep` restarts the LaunchAgent once per value. `SESSIONFLOW_EVAL_QUERIES=<file> SESSIONFLOW_EVAL_OUT=<folder> ./sessionflow-server.sh install-eval-agent` runs `nightly` every day at 03:30.
 
 ## Memories
 

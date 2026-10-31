@@ -971,6 +971,7 @@ async def health(request: Request) -> JSONResponse:
         "providers": _provider_health(deep=deep),
         "backfill": _backfill_status_payload(),
         "embedding": _embedding_status_payload(),
+        "ranking": rag_engine.ranking_settings(),
         "fts": fts_payload,
     }, status_code=503 if starting else 200)
 
