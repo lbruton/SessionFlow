@@ -428,3 +428,15 @@ def test_codex_unreadable_rollout_is_reported_as_an_error(tmp_path, monkeypatch)
 
     assert parsed.turns == []
     assert parsed.errors
+
+
+def test_codex_malformed_record_is_reported_as_an_error(tmp_path):
+    home = _write_rewritten_rollout(tmp_path, ZST_LINES)
+    rollout = next((home / ".codex" / "sessions").rglob("rollout-*.jsonl"))
+    with rollout.open("a") as handle:
+        handle.write('{"type": "response_item", "payload": {"role": "assist')
+
+    parsed = _parse(home)
+
+    assert len(parsed.turns) == 2
+    assert parsed.errors == [f"{rollout.name}: 1 malformed line"]

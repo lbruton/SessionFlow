@@ -347,17 +347,24 @@ class CodexAdapter:
         by_ordinal: Dict[int, dict] = {}
         errors: List[str] = []
         for path in known_paths:
+            # Callers that delete rows must tell a failed or partial read from a
+            # complete one, so read errors and malformed lines both land in errors.
+            malformed = 0
             try:
                 entries = []
                 for line in iter_rollout_lines(path):
+                    if not line.strip():
+                        continue
                     try:
                         entries.append(json.loads(line))
                     except json.JSONDecodeError:
-                        continue
+                        malformed += 1
             except (OSError, UnicodeDecodeError) as exc:
-                # Callers that delete rows must tell a failed read from an empty rollout.
                 errors.append(f"{Path(path).name}: {exc}")
                 continue
+            if malformed:
+                errors.append(f"{Path(path).name}: {malformed} malformed "
+                              f"line{'s' if malformed > 1 else ''}")
             tasks, branch = _parse_tasks(entries)
             for task in tasks:
                 if task.importing or not task.parts:
