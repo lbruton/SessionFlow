@@ -17,6 +17,9 @@ REAL_REPLACE_PASSAGES = rag_engine.replace_passages
 REAL_WRITE_PASSAGE_FTS = rag_engine.write_passage_fts
 OLD_CUT = ("word " * transcript_parser.MAX_TURN_CHARS)[:transcript_parser.MAX_TURN_CHARS] \
     + transcript_parser.CUT_MARK
+OLD_BODY = OLD_CUT[:-len(transcript_parser.CUT_MARK)]
+# A whole re-parsed turn extends the stored cut text.
+FULL = OLD_BODY + " " + " ".join(f"t{i}" for i in range(400))
 
 
 def _words(n, user="why is the tail missing"):
@@ -56,6 +59,7 @@ def no_live_index(monkeypatch):
     monkeypatch.setattr(passage_backfill, "_stored_doc_ids", _refuse)
     monkeypatch.setattr(passage_backfill, "_sources", _refuse)
     monkeypatch.setattr(passage_backfill, "_in_fts", _refuse)
+    monkeypatch.setattr(passage_backfill, "_cut_documents", _refuse)
 
 
 class _Budget:
@@ -126,6 +130,10 @@ def world(monkeypatch, tmp_path):
                         lambda doc_ids, db_path=None: set(doc_ids) & w.stored)
     monkeypatch.setattr(passage_backfill, "get_embedding_budget", lambda: w.budget)
     monkeypatch.setattr(passage_backfill, "_in_fts", lambda doc_id, db_path=None: True)
+    monkeypatch.setattr(passage_backfill, "_cut_documents", lambda session, turn_indexes, db_path=None: {
+        r["turn_index"]: r["document"] for r in w.rows.values()
+        if r["session_id"] == session and r["chunk_type"] == "turn"
+        and r["turn_index"] in turn_indexes and passage_backfill.is_old_cut(r["document"])})
     return w
 
 
@@ -173,7 +181,7 @@ def test_run_refuses_without_confirmation(world):
 def test_cut_turns_are_reparsed_and_replaced(world):
     world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1),
                   2: _row(2, "s::other", "User: q\n\nAssistant: fine", turn_index=2)}
-    full = _words(3000)
+    full = FULL
     world.parsed = {("claude_code_cli", "s"): [
         _parsed_turn("s::full", full, turn_index=1),
         _parsed_turn("s::other", "User: q\n\nAssistant: fine", turn_index=2),
@@ -188,7 +196,7 @@ def test_cut_turns_are_reparsed_and_replaced(world):
 
 def test_deferred_reparse_pauses_and_resumes(world):
     world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1)}
-    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", _words(30), turn_index=1)]}
+    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", FULL, turn_index=1)]}
     real_add = rag_engine.add_turns
     rag_engine.add_turns = lambda turns, db_path=None: 0  # budget deferred everything
 
@@ -205,7 +213,7 @@ def test_deferred_reparse_pauses_and_resumes(world):
 def test_gone_and_unreadable_sessions_are_counted_and_skipped(world):
     world.rows = {1: _row(1, "g::cut", OLD_CUT, session="g"),
                   2: _row(2, "u::cut", OLD_CUT, session="u")}
-    world.parsed = {("claude_code_cli", "u"): [_parsed_turn("u::full", _words(30), session="u")]}
+    world.parsed = {("claude_code_cli", "u"): [_parsed_turn("u::full", FULL, session="u")]}
     world.errors = {("claude_code_cli", "u"): ["bad line"]}
     report = passage_backfill.run(confirmed=True)
     assert report.gone == 1
@@ -420,7 +428,7 @@ def test_failed_passage_fts_write_is_retried_before_done(world, monkeypatch):
 def test_uncut_session_honors_the_chunk_deadline_between_turns(world, monkeypatch):
     world.rows = {i: _row(i, f"s::cut{i}", OLD_CUT, turn_index=i) for i in (1, 2, 3)}
     world.parsed = {("claude_code_cli", "s"): [
-        _parsed_turn(f"s::full{i}", _words(30), turn_index=i) for i in (1, 2, 3)]}
+        _parsed_turn(f"s::full{i}", FULL, turn_index=i) for i in (1, 2, 3)]}
     clock = {"now": 0.0}
     real_add = rag_engine.add_turns
 
@@ -466,7 +474,7 @@ def test_resumed_session_cleans_up_a_cut_row_whose_full_turn_is_stored(world):
     world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1),
                   2: _row(2, "s::full", _words(30), turn_index=1)}
     world.stored.add("s::full")  # the earlier chunk stored it, then stopped before cleanup
-    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", _words(30), turn_index=1)]}
+    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", FULL, turn_index=1)]}
 
     report = passage_backfill.run(confirmed=True)
 
@@ -478,7 +486,7 @@ def test_resumed_session_cleans_up_a_cut_row_whose_full_turn_is_stored(world):
 
 def test_uncut_turn_missing_from_fts_is_retried_before_done(world, monkeypatch):
     world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1)}
-    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", _words(30), turn_index=1)]}
+    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::full", FULL, turn_index=1)]}
     rewritten = []
     monkeypatch.setattr(passage_backfill, "_in_fts", lambda doc_id, db_path=None: False)
     monkeypatch.setattr(rag_engine, "_rewrite_fts_row",
@@ -493,3 +501,28 @@ def test_uncut_turn_missing_from_fts_is_retried_before_done(world, monkeypatch):
     assert report.status == "done"
     assert report.uncut == 1 and report.fts_pending == 0
     assert rewritten == ["s::full"]
+
+
+def test_partial_reparse_keeps_the_cut_row(world):
+    world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1)}
+    # A malformed assistant record was skipped, so only the user prompt came back.
+    world.parsed = {("claude_code_cli", "s"): [
+        _parsed_turn("s::partial", "User: why is the tail missing", turn_index=1)]}
+
+    report = passage_backfill.run(confirmed=True)
+
+    assert report.status == "done"
+    assert world.added == []
+    assert report.rejected == 1 and report.uncut == 0
+    assert [d for d, _, _ in world.replaced] == ["s::cut"]
+
+
+def test_reparse_that_changes_the_stored_text_keeps_the_cut_row(world):
+    world.rows = {1: _row(1, "s::cut", OLD_CUT, turn_index=1)}
+    changed = "different start " + FULL
+    world.parsed = {("claude_code_cli", "s"): [_parsed_turn("s::other", changed, turn_index=1)]}
+
+    report = passage_backfill.run(confirmed=True)
+
+    assert world.added == []
+    assert report.rejected == 1

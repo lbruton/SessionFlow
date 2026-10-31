@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+import boilerplate
 import passages
 import rag_engine
 import reembed
@@ -47,6 +48,8 @@ class PassageReport:
         missing: Long turns without passages (by length, before tokenizing).
         uncut: Cut turns replaced by their whole text so far.
         discarded: Re-parsed turns that ingest drops as boilerplate; their cut row stays.
+        rejected: Re-parsed turns that do not hold the whole stored cut text; their
+            cut row stays.
         gone: Sessions whose transcript is no longer on disk.
         unreadable: Sessions whose transcript failed to parse.
         added: Passages stored so far.
@@ -66,6 +69,7 @@ class PassageReport:
     missing: int = 0
     uncut: int = 0
     discarded: int = 0
+    rejected: int = 0
     gone: int = 0
     unreadable: int = 0
     added: int = 0
@@ -94,6 +98,18 @@ class VerifyResult:
 def is_old_cut(document: str) -> bool:
     """Return True for a turn cut at the old ``MAX_TURN_CHARS`` limit."""
     return document.endswith(CUT_MARK) and len(document) <= MAX_TURN_CHARS + len(CUT_MARK)
+
+
+def covers_cut(text: str, stored: str) -> bool:
+    """Return True when the re-parsed ``text`` holds the whole stored cut turn and more.
+
+    A parse that skipped a malformed record returns a shorter turn with no error,
+    and replacing the cut row with it would lose the stored text. ``text`` is
+    stripped as ingest strips it before the comparison.
+    """
+    body = (stored[:-len(CUT_MARK)] if stored.endswith(CUT_MARK) else stored).rstrip()
+    clean = boilerplate.strip(text)[0] if rag_engine._boilerplate_enabled() else text
+    return len(clean) > len(body) and clean.startswith(body)
 
 
 # --- Selection ---------------------------------------------------------------
@@ -160,6 +176,17 @@ def _stored_doc_ids(doc_ids: List[str], db_path: Optional[str]) -> Set[str]:
     return found
 
 
+def _cut_documents(session: str, turn_indexes, db_path: Optional[str]) -> Dict[int, str]:
+    """Return the stored text of each old cut turn of ``session``, keyed by ``turn_index``."""
+    expr = (f'logical_session_id == "{rag_engine._escape_filter_scalar(session)}" '
+            f'and chunk_type == "turn" and turn_index in {json.dumps(sorted(turn_indexes))}')
+    with rag_engine.milvus_client(db_path) as client:
+        rows = client.query(collection_name=rag_engine.COLLECTION_NAME, filter=expr,
+                            output_fields=["turn_index", "document"])
+    return {int(r["turn_index"]): r["document"] for r in rows
+            if is_old_cut(r.get("document") or "")}
+
+
 def _in_fts(doc_id: str, db_path: Optional[str]) -> bool:
     """Return True when the FTS sidecar holds ``doc_id``; a failed read counts as missing."""
     if not db_path:
@@ -201,7 +228,8 @@ def status() -> dict:
     return _load_state() or {}
 
 
-_COUNTERS = ("uncut", "discarded", "gone", "unreadable", "added", "short", "errors")
+_COUNTERS = ("uncut", "discarded", "rejected", "gone", "unreadable", "added", "short",
+             "errors")
 
 
 def _report(state: dict, status: str, message: str = "") -> PassageReport:
@@ -279,7 +307,11 @@ def _uncut_session(state: dict, entry: list, sources: Dict[SessionKey, list],
         turns.extend(t for t in result.turns
                      if t.get("chunk_type", "turn") == "turn" and t.get("turn_index") in wanted)
     # Checked before add_turns, which strips the text in place; ingest drops the rest.
-    kept = [t for t in turns if rag_engine.would_store(t)]
+    storable = [t for t in turns if rag_engine.would_store(t)]
+    cut_docs = _cut_documents(session, wanted, db_path) if storable else {}
+    # A cut row already gone was replaced by an earlier chunk; nothing is left to lose.
+    kept = [t for t in storable if t["turn_index"] not in cut_docs
+            or covers_cut(t["text"], cut_docs[t["turn_index"]])]
     stored = _stored_doc_ids(sorted({t["doc_id"] for t in kept}), db_path) if kept else set()
     for turn in kept:
         if turn["doc_id"] in stored:
@@ -299,7 +331,8 @@ def _uncut_session(state: dict, entry: list, sources: Dict[SessionKey, list],
         if not _in_fts(turn["doc_id"], db_path):
             state["fts_retry"].append(rag_engine._pk_from_doc_id(turn["doc_id"]))
         _save_state(state)
-    state["discarded"] += len(turns) - len(kept)
+    state["discarded"] += len(turns) - len(storable)
+    state["rejected"] += len(storable) - len(kept)
     return None
 
 

@@ -939,6 +939,7 @@ def _print_passage_report(report) -> None:
     print(f"Missing:    {report.missing} long turns without passages")
     print(f"Uncut:      {report.uncut}")
     print(f"Discarded:  {report.discarded}")
+    print(f"Rejected:   {report.rejected}")
     print(f"Gone:       {report.gone}")
     print(f"Unreadable: {report.unreadable}")
     print(f"Added:      {report.added} passages")
