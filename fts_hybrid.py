@@ -20,7 +20,9 @@ Usage:
 """
 
 import logging
+import re
 import sqlite3
+import string
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Union
@@ -46,6 +48,46 @@ def clear_fts_backfill_sentinel() -> None:
         pass
     except OSError as exc:
         logger.warning("Failed to clear FTS backfill sentinel: %s", exc)
+
+
+# Question and function words that would make OR match almost every row.
+_STOPWORDS = frozenset("""
+a an and are as at be but by can could did do does for from had has have how i if in into is it
+its me my no not of on or our should so than that the their them then there these they this
+those to was we were what when where which who whom why will with would you your
+""".split())
+
+_IDENTIFIER_CHARS = frozenset("_-.")
+_IDENTIFIER_MIN_LEN = 4
+_WORD_RE = re.compile(r"\w+")
+
+
+def is_identifier_token(token: str) -> bool:
+    """True for a token of at least 4 characters with a digit or ``_-.``: IDs, hosts, symbols."""
+    return len(token) >= _IDENTIFIER_MIN_LEN and any(
+        c.isdigit() or c in _IDENTIFIER_CHARS for c in token
+    )
+
+
+def build_match_query(query: Optional[str]) -> str:
+    """Build an FTS5 MATCH string that ORs the quoted terms of ``query``.
+
+    An identifier token stays one quoted phrase, so ``SESF-57`` matches the
+    adjacent terms ``sesf 57``. Other text splits into words, minus stopwords.
+    Returns an empty string when no term is left.
+    """
+    terms: List[str] = []
+    seen: Set[str] = set()
+    for chunk in (query or "").split():
+        chunk = chunk.strip(string.punctuation)
+        words = [chunk] if is_identifier_token(chunk) else _WORD_RE.findall(chunk)
+        for word in words:
+            key = word.lower()
+            if key in _STOPWORDS or key in seen:
+                continue
+            seen.add(key)
+            terms.append(word)
+    return " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
 
 
 class FTSIndex:
@@ -308,14 +350,16 @@ class FTSIndex:
         """
         if not db_path:
             return []
+        match = build_match_query(query)
+        logger.debug("FTS5 MATCH %s", match)
+        if not match:
+            return []
 
         try:
             conn = self.connection(db_path)
         except Exception as e:
             logger.warning("FTS connection failed: %s", e)
             return []
-
-        safe_query = query.replace('"', '""')
 
         where_parts = []
         params: list = []
@@ -343,18 +387,15 @@ class FTSIndex:
             f"WHERE {self.table_name} MATCH ?{where_clause} "
             f"ORDER BY rank LIMIT ?"
         )
-        params_full = [safe_query] + params + [n]
+        params_full = [match] + params + [n]
 
         try:
             rows = conn.execute(sql, params_full).fetchall()
         except Exception as e:
-            logger.debug("FTS5 MATCH failed (%s), trying quoted phrase", e)
-            params_full[0] = f'"{safe_query}"'
-            try:
-                rows = conn.execute(sql, params_full).fetchall()
-            except Exception as e2:
-                logger.warning("FTS5 search failed: %s", e2)
-                return []
+            logger.warning("FTS5 search failed: %s", e)
+            if not self._server_mode:
+                conn.close()
+            return []
 
         all_cols = ["doc_id", "content"] + self.metadata_columns
         results = []

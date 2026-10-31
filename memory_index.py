@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import embedding_control
+import fts_hybrid
 import rag_engine
 from memory_store import MemoryStore, run_db
 
@@ -240,13 +241,12 @@ class MemoryFTS:
                filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Return BM25-ranked hits as ``memory_id`` and ``version``.
 
-        Each whitespace-separated term is quoted, so punctuation such as an
-        issue ID's hyphen never breaks the FTS5 query syntax.
+        The MATCH string comes from ``fts_hybrid.build_match_query``, the same
+        builder transcript search uses.
         """
-        terms = [t for t in query.split() if t]
-        if not terms:
+        match = fts_hybrid.build_match_query(query)
+        if not match:
             return []
-        match = " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
         where, params = ["memories_fts MATCH ?"], [match]
         if project != "*":
             where.append("project = ?")
