@@ -9,6 +9,13 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-31
+
+### Added
+
+- `cleanup.py passages {plan|run|drive|status|verify}` backfills turns indexed before passages. The uncut phase re-parses, from disk with no cursor, each Claude, Cowork legacy and Codex session that holds a turn cut at the old 8,000-character limit, and re-adds those turns whole with their passages. The passages phase then adds passages to every long turn still without them, from the stored text. Sessions gone from disk or unreadable keep their cut row, which gets passages too. `run` and `drive` refuse without `--yes`, and the checkpoint is `~/.sessionflow/passages_state.json` (SESF-69).
+- `rag_engine.replace_passages` replaces the stored passages of one turn in Milvus and FTS (SESF-69).
+
 ## [0.12.0] - 2026-10-31
 
 ### Added
