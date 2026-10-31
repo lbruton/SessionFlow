@@ -85,3 +85,17 @@ def test_prune_codex_reports_fts_failures(cleanup_mod, prune, capsys):
 
     assert _run(cleanup_mod, ["prune-codex", "--apply", "--yes"]) == 1
     assert "FTS" in capsys.readouterr().out
+
+
+def test_prune_codex_skips_a_session_whose_rollout_fails_to_read(cleanup_mod, prune, monkeypatch):
+    import provider_codex
+
+    def _fail(path):
+        raise OSError("gone")
+        yield  # pragma: no cover
+
+    prune["stored"] = [*prune["doc_ids"]]
+    monkeypatch.setattr(provider_codex, "iter_rollout_lines", _fail)
+
+    assert _run(cleanup_mod, ["prune-codex", "--apply", "--yes"]) == 0
+    assert prune["deleted"] == []

@@ -19,6 +19,7 @@ Usage:
     cleanup.py restamp-codex [--apply --yes]                 # Rewrite Codex turn times and branches
     cleanup.py prune-codex   [--apply --yes]                 # Delete Codex turns their rollout no longer yields
     cleanup.py dedupe-turns  [--apply --yes]                 # Repair Claude turns indexed mid-write
+    cleanup.py dedupe-codex  [--apply --yes]                 # Delete Codex rows of the old turn keys
 """
 
 import argparse
@@ -671,8 +672,12 @@ def cmd_prune_codex(args) -> int:
     parsed: set = set()
     sessions: set = set()
     for source in adapter.discover_sources():
+        result = adapter.parse_source(source, cursor=None)
+        # A rollout that failed to read is not an empty one; keep its rows.
+        if result.errors:
+            continue
         sessions.add(source.logical_session_id)
-        for turn in adapter.parse_source(source, cursor=None).turns:
+        for turn in result.turns:
             parsed.add(turn["doc_id"])
 
     orphans = sorted(
@@ -747,6 +752,59 @@ def cmd_dedupe_turns(args) -> int:
         print(f"Rebuilds deferred by the embedding budget: {result.deferred_turns} "
               "(old rows kept; re-run to finish)")
         failed = True
+    if result.fts_failed:
+        print(f"FTS delete failures: {result.fts_failed} (re-run to converge)")
+        failed = True
+    return 1 if failed else 0
+
+
+def cmd_dedupe_codex(args) -> int:
+    """Delete Codex rows that the task-keyed parse replaces (see :mod:`dedupe_codex`).
+
+    Dry run by default. ``--apply`` refuses without ``--yes`` before any read. It
+    never embeds: a session on disk waits until the backfill has indexed its turns.
+
+    Args:
+        args: Parsed argparse namespace with ``apply`` and ``yes``.
+
+    Returns:
+        ``0`` on success, ``1`` when the confirmation gate refuses, a session still
+        waits for the backfill on ``--apply``, or any delete failed in FTS.
+    """
+    import dedupe_codex
+
+    if args.apply and not args.yes:
+        print(
+            "Refusing to apply: confirmation required. Re-run with --yes to "
+            "delete the replaced Codex rows.",
+            file=sys.stderr,
+        )
+        return 1
+
+    db_path = get_db_path()
+    plan = dedupe_codex.plan(db_path=db_path)
+    stale = sum(len(ids) for ids in plan.stale.values())
+    duplicates = sum(len(ids) for ids in plan.duplicates.values())
+    print(f"Sessions with a rollout:   {plan.sessions_on_disk}")
+    print(f"Sessions without one:      {plan.sessions_missing}")
+    print(f"Replaced rows to delete:   {stale}")
+    print(f"Duplicate rows to delete:  {duplicates}")
+    if plan.unreadable_sessions:
+        print(f"Sessions whose rollout failed to read: {plan.unreadable_sessions} "
+              "(their rows are kept)")
+    if plan.waiting_sessions:
+        print(f"Sessions waiting for the backfill: {plan.waiting_sessions} "
+              f"({plan.waiting_turns} turns not indexed yet; their rows are kept). Run "
+              "`cleanup.py backfill enqueue --provider codex --mode full`, then re-run.")
+
+    if not args.apply:
+        print("\nDry run: nothing deleted. Re-run with --apply --yes to delete.")
+        return 0
+
+    result = dedupe_codex.apply(plan, db_path=db_path)
+    print(f"\nRows deleted: {result.deleted_rows}")
+    print(f"Audit file:   {result.audit_path}")
+    failed = bool(plan.waiting_sessions)
     if result.fts_failed:
         print(f"FTS delete failures: {result.fts_failed} (re-run to converge)")
         failed = True
@@ -1025,6 +1083,16 @@ def build_parser():
     p_prune.add_argument("--yes", "-y", action="store_true",
                          help="Confirm an --apply run (required; no interactive prompt)")
 
+    # dedupe-codex
+    p_dedupe_codex = subparsers.add_parser(
+        "dedupe-codex",
+        help="Delete Codex rows of the old line-number turn keys (dry-run by default)",
+    )
+    p_dedupe_codex.add_argument("--apply", action="store_true",
+                                help="Delete the rows; requires --yes")
+    p_dedupe_codex.add_argument("--yes", "-y", action="store_true",
+                                help="Confirm an --apply run (required; no interactive prompt)")
+
     # dedupe-turns
     p_dedupe = subparsers.add_parser(
         "dedupe-turns",
@@ -1131,6 +1199,7 @@ def main():
         "restamp-codex": cmd_restamp_codex,
         "prune-codex": cmd_prune_codex,
         "dedupe-turns": cmd_dedupe_turns,
+        "dedupe-codex": cmd_dedupe_codex,
         "status": cmd_status,
         "backfill": cmd_backfill,
         "reembed": cmd_reembed,

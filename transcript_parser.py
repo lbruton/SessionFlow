@@ -28,6 +28,15 @@ from typing import List, Dict, NamedTuple, Optional, Tuple
 
 from provider_adapters import REPLACE_SAME_TURN, build_source_id, canonicalize_path
 
+MAX_TURN_CHARS = 8000
+
+
+def truncate_turn_text(text: str, max_chars: int = MAX_TURN_CHARS) -> str:
+    """Cut ``text`` to ``max_chars`` and mark the cut with ``[truncated]``."""
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n\n[truncated]"
+    return text
+
 
 class ParseResult(NamedTuple):
     """Turns parsed from a transcript and the offsets to store for it.
@@ -113,7 +122,7 @@ def parse_transcript(
     transcript_path: str,
     session_id: str,
     start_offset: int = 0,
-    max_turn_chars: int = 8000,
+    max_turn_chars: int = MAX_TURN_CHARS,
 ) -> Tuple[List[Dict], int]:
     """Parse a transcript and return ``(turns, consumed_offset)``.
 
@@ -129,7 +138,7 @@ def parse_transcript_incremental(
     transcript_path: str,
     session_id: str,
     start_offset: int = 0,
-    max_turn_chars: int = 8000,
+    max_turn_chars: int = MAX_TURN_CHARS,
 ) -> ParseResult:
     """Parse a Claude Code JSONL transcript into indexable turns.
 
@@ -336,11 +345,7 @@ def _build_turn(
         combined_assistant = "\n\n".join(assistant_texts)
         parts.append(f"Assistant: {combined_assistant}")
 
-    text = "\n\n".join(parts)
-
-    # Truncate if too long
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n\n[truncated]"
+    text = truncate_turn_text("\n\n".join(parts), max_chars)
 
     # Skip very short turns (likely just whitespace or newlines)
     if len(text.strip()) < 20:
