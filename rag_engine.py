@@ -61,7 +61,9 @@ from provider_adapters import (
     path_has_prefix,
 )
 import boilerplate
+import passages
 import secret_redaction
+from transcript_parser import CUT_MARK, MAX_TURN_CHARS
 
 RECENCY_WEIGHT_DEFAULT = 0.15
 RECENCY_DECAY_DAYS_DEFAULT = 7
@@ -423,7 +425,8 @@ def _embed_gemma(model, input_ids, attention_mask):
     return normalize_embeddings(mean_pooling(out, attention_mask))
 
 
-def embed_texts(texts: List[str], is_query: bool = False) -> List[List[float]]:
+def embed_texts(texts: List[str], is_query: bool = False,
+                titles: Optional[Sequence[Optional[str]]] = None) -> List[List[float]]:
     """Embed texts using the configured model. Adds model-specific prefix.
 
     In server mode the MLX work always runs on the single ``mlx-embed``
@@ -431,18 +434,35 @@ def embed_texts(texts: List[str], is_query: bool = False) -> List[List[float]]:
     not thread-safe, and two threads evaluating at once SIGSEGV the server.
     A caller already on that thread, or any caller before
     ``init_server_mode``, runs inline.
+
+    Args:
+        texts: Texts to embed.
+        is_query: True for search queries, which take the query prefix.
+        titles: Per-document titles for ``_document_prefix``; None keeps the default.
     """
+    args = (texts, is_query) if titles is None else (texts, is_query, titles)
     executor = _embed_executor
     if executor is not None and not threading.current_thread().name.startswith("mlx-embed"):
-        return executor.submit(_embed_texts_local, texts, is_query).result()
-    return _embed_texts_local(texts, is_query)
+        return executor.submit(_embed_texts_local, *args).result()
+    return _embed_texts_local(*args)
 
 
-def _embed_texts_local(texts: List[str], is_query: bool = False) -> List[List[float]]:
+def _document_prefix(title: Optional[str]) -> str:
+    """Return the document prefix with ``title`` in the model's title slot, if it has one."""
+    if title and "title: none" in _DOCUMENT_PREFIX:
+        return _DOCUMENT_PREFIX.replace("title: none", f"title: {title}", 1)
+    return _DOCUMENT_PREFIX
+
+
+def _embed_texts_local(texts: List[str], is_query: bool = False,
+                       titles: Optional[Sequence[Optional[str]]] = None) -> List[List[float]]:
     model, tokenizer = get_model()
     _, mlx_generate, mx = _load_mlx_runtime()
-    prefix = _SEARCH_PREFIX if is_query else _DOCUMENT_PREFIX
-    prefixed = [prefix + t for t in texts]
+    if is_query:
+        prefixed = [_SEARCH_PREFIX + t for t in texts]
+    else:
+        prefixed = [_document_prefix(titles[i] if titles else None) + t
+                    for i, t in enumerate(texts)]
 
     with _mlx_eval_lock:
         if _needs_input_remap():
@@ -1028,12 +1048,16 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
     # per-Provider change, and runs before _extract_issue_ids so issue IDs survive.
     _apply_redaction(new_turns)
 
+    units = _with_passages(new_turns)
+    items = [t for unit in units for t in unit]
+
     # Embed texts in local, resource-controlled batches. Query embedding stays
     # untouched in search(); this path is ingestion/backfill only.
     budget = get_embedding_budget()
     all_embeddings = []
-    for batch in budget.split_batches(new_turns):
+    for batch in budget.split_batches(items):
         texts = [t["text"] for t in batch]
+        titles = [t.get("title") for t in batch]
         decision = budget.before_batch(
             batch_size=len(batch),
             estimated_chars=sum(len(t) for t in texts),
@@ -1050,7 +1074,10 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
 
         started = time.monotonic()
         try:
-            embeddings = embed_texts(texts, is_query=False)
+            if any(titles):
+                embeddings = embed_texts(texts, is_query=False, titles=titles)
+            else:
+                embeddings = embed_texts(texts, is_query=False)
         except Exception as e:
             budget.after_batch(time.monotonic() - started, 0, error=e)
             # Scrub the exception's string args before the bare
@@ -1061,8 +1088,14 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
         budget.after_batch(time.monotonic() - started, len(batch))
         all_embeddings.extend(embeddings)
 
-    new_turns = new_turns[:len(all_embeddings)]
-    embeddings = all_embeddings
+    # A deferred batch drops every unit it reached, so no parent lands without its passages.
+    new_turns, done = [], 0
+    for unit in units:
+        if done + len(unit) > len(all_embeddings):
+            break
+        new_turns.extend(unit)
+        done += len(unit)
+    embeddings = all_embeddings[:done]
     if not new_turns:
         _replace_stale_turns(already_indexed, db_path)
         return 0
@@ -1092,7 +1125,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
             "git_branch": turn.get("git_branch", ""),
             "chunk_type": turn.get("chunk_type", "turn"),
             "project_root": turn.get("project_root", ""),
-            "issue_ids": _extract_issue_ids(turn.get("text", "")),
+            "issue_ids": turn["_issue_ids"],
         })
 
     with milvus_client(db_path) as client:
@@ -1117,7 +1150,7 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
                 "timestamp": t.get("timestamp", ""),
                 "chunk_type": t.get("chunk_type", "turn"),
                 "project_root": t.get("project_root", ""),
-                "issue_ids": _extract_issue_ids(t.get("text", "")),
+                "issue_ids": t["_issue_ids"],
             } for t in new_turns]
             _fts.insert(fts_conn, fts_records)
             _fts.close_ephemeral(fts_conn)
@@ -1128,6 +1161,86 @@ def add_turns(turns: List[Dict], db_path: Optional[str] = None) -> int:
 
     _replace_stale_turns(already_indexed + new_turns, db_path)
     return len(data)
+
+
+def document_titles(rows: List[Dict], db_path: Optional[str] = None) -> List[Optional[str]]:
+    """Return the embedding title ingest gave each stored row, for regenerating its vector.
+
+    A passage's title comes from its parent turn's stored text through
+    ``passages.passage_title``; every other row has None, the default prefix.
+    """
+    parents = sorted({passages.passage_parent(r.get("doc_id", "")) or "" for r in rows
+                      if r.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE} - {""})
+    texts: Dict[str, str] = {}
+    if parents:
+        with milvus_client(db_path) as client:
+            for start in range(0, len(parents), 200):
+                for r in client.query(collection_name=COLLECTION_NAME,
+                                      filter=f"doc_id in {json.dumps(parents[start:start + 200])}",
+                                      output_fields=["doc_id", "document"]):
+                    texts[r["doc_id"]] = r.get("document") or ""
+    titles: List[Optional[str]] = []
+    for r in rows:
+        parent = (passages.passage_parent(r.get("doc_id", ""))
+                  if r.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE else None)
+        titles.append(passages.passage_title(r.get("project_root", ""), texts.get(parent, ""))
+                      if parent else None)
+    return titles
+
+
+_offset_tokenizer = None
+_offset_tokenizer_lock = threading.Lock()
+_passage_warned = False
+
+
+def _token_offsets(text: str) -> List[tuple]:
+    """Return the ``(start, end)`` character span of each document token of ``text``.
+
+    Uses the transformers tokenizer of the cached model, which matches the MLX
+    one and needs no MLX thread. The Rust tokenizer is not safe across threads.
+    """
+    global _offset_tokenizer
+    with _offset_tokenizer_lock:
+        if _offset_tokenizer is None:
+            from transformers import AutoTokenizer
+
+            snapshots = sorted(_MODEL_CACHE.glob("snapshots/*/config.json"))
+            if not snapshots:
+                raise RuntimeError(f"Embedding model not cached at {_MODEL_CACHE}")
+            _offset_tokenizer = AutoTokenizer.from_pretrained(str(snapshots[0].parent))
+            # Offsets cover the whole turn; only embedding input is length-capped.
+            _offset_tokenizer.model_max_length = sys.maxsize
+        encoded = _offset_tokenizer(text, add_special_tokens=False,
+                                    return_offsets_mapping=True)
+    return [tuple(span) for span in encoded["offset_mapping"]]
+
+
+def _with_passages(turns: List[Dict]) -> List[List[Dict]]:
+    """Group each turn with its passages, parent first, and stamp ``_issue_ids`` on all.
+
+    Passages copy the parent's issue IDs, so an issue filter finds every row of
+    a turn. A tokenizer failure stores the parent alone.
+    """
+    global _passage_warned
+    units = []
+    for turn in turns:
+        turn["_issue_ids"] = _extract_issue_ids(turn.get("text", ""))
+        unit = [turn]
+        text = turn.get("text", "")
+        # A token covers at least one character, so a shorter text has no passages.
+        if turn.get("chunk_type", "turn") == "turn" and len(text) > passages.PASSAGE_TOKENS:
+            try:
+                built = passages.build_passages(turn, _token_offsets(text))
+            except Exception as e:
+                if not _passage_warned:
+                    logger.warning("Passages skipped, tokenizer failed: %s", _scrub_exception(e))
+                    _passage_warned = True
+                built = []
+            for p in built:
+                p["_issue_ids"] = turn["_issue_ids"]
+            unit.extend(built)
+        units.append(unit)
+    return units
 
 
 def _replace_stale_turns(landed: List[Dict], db_path: Optional[str]) -> int:
@@ -1421,7 +1534,11 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     # the only relevance signal that spans both vector and FTS-only rows. The
     # `_rrf_score` is kept alive until after scoring (see _rank_results).
     fts_weight = IDENTIFIER_FTS_WEIGHT if _is_identifier_query(query) else 1.0
-    merged = rrf_merge(vector_results, fts_results, n=fetch_n, fts_weight=fts_weight)
+    # Collapse the whole fused pool before the fetch_n cut, so sibling passages
+    # of one turn cannot push other turns out of it.
+    pool = len(vector_results) + len(fts_results)
+    merged = _collapse_passages(
+        rrf_merge(vector_results, fts_results, n=pool, fts_weight=fts_weight))[:fetch_n]
 
     if not merged:
         return []
@@ -1452,6 +1569,44 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     return merged[:n]
 
 
+_DISPLAY_CUT = "\n\n[cut: get_turns shows the whole turn]"
+
+
+def _collapse_passages(merged: List[Dict]) -> List[Dict]:
+    """Keep the first row of each parent and its passages, in ``merged`` order.
+
+    A kept passage gets ``passage_index``. A kept turn goes through ``_cap_for_display``.
+    """
+    seen = set()
+    out = []
+    for row in merged:
+        doc_id = row.get("doc_id", "")
+        key = passages.passage_parent(doc_id) or doc_id
+        if key in seen:
+            continue
+        seen.add(key)
+        if row.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE:
+            row["passage_index"] = passages.passage_index(doc_id)
+        out.append(_cap_for_display(row))
+    return out
+
+
+def _cap_for_display(row: Dict) -> Dict:
+    """Cut a turn longer than ``MAX_TURN_CHARS`` plus the stored cut marker; ``get_turns`` keeps it whole."""
+    if (row.get("chunk_type") == "turn"
+            and len(row.get("content", "")) > MAX_TURN_CHARS + len(CUT_MARK)):
+        row["content"] = row["content"][:MAX_TURN_CHARS] + _DISPLAY_CUT
+    return row
+
+
+_NOT_PASSAGE = f'chunk_type != "{passages.PASSAGE_CHUNK_TYPE}"'
+
+
+def _without_passages(filter_expr: Optional[str]) -> str:
+    """Return ``filter_expr`` restricted to rows that are not passages."""
+    return f"({filter_expr}) && {_NOT_PASSAGE}" if filter_expr else _NOT_PASSAGE
+
+
 def _recent_listing(n: int, session_id: Optional[str] = None,
                     git_branch: Optional[str] = None,
                     project_root: Optional[ProjectRoots] = None,
@@ -1475,10 +1630,10 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     if n <= 0:
         return []
 
-    filter_expr = _build_milvus_filter(
+    filter_expr = _without_passages(_build_milvus_filter(
         session_id, git_branch, project_root, provider, source_kind,
         date_from, date_to, issue_id,
-    )
+    ))
 
     collector = _NewestN(n)
     for batch in _query_batches(
@@ -1494,7 +1649,7 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     defaults = default_provider_metadata()
     # distance=None: no query vector exists for recency listings, so there is
     # no score to report.
-    mapped = [_row_to_result(row, defaults, distance=None) for row in rows]
+    mapped = [_cap_for_display(_row_to_result(row, defaults, distance=None)) for row in rows]
 
     return _rank_results(mapped, "recency", n)
 
@@ -1723,7 +1878,9 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     token = f",{canonical},"
 
     def _passes(entry: Dict) -> bool:
-        """Whether one entry clears the provider, date-bound and issue-token guards."""
+        """Whether one entry clears the passage, provider, date-bound and issue-token guards."""
+        if entry.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE:
+            return False
         if allowed is not None and entry.get("provider") not in allowed:  # Req 4.4
             return False
         ts = str(entry.get("timestamp") or "")  # coerce null/non-str so date compares can't TypeError
@@ -1986,7 +2143,7 @@ def _rows_on_day(day, project_roots: List[str], db_path: Optional[str]) -> List[
     hi = (end + timedelta(days=1)).strftime("%Y-%m-%d")
     roots = " or ".join(f'project_root like "{_escape_filter_scalar(r.rstrip("/"))}%"'
                         for r in project_roots)
-    filter_expr = f'timestamp >= "{lo}" and timestamp < "{hi}" and ({roots})'
+    filter_expr = f'timestamp >= "{lo}" and timestamp < "{hi}" and ({roots}) and {_NOT_PASSAGE}'
     fields = ["doc_id", "session_id", "logical_session_id", "provider", "timestamp",
               "project_root", "issue_ids"]
     rows: List[Dict] = []
@@ -2063,7 +2220,7 @@ def session_turns(session_id: str, provider: Optional[str], *, limit: int,
     """
     db_path = db_path or _server_db_path
     column = "logical_session_id" if provider == "codex" else "session_id"
-    parts = [f'{column} == "{_escape_filter_scalar(session_id)}"']
+    parts = [f'{column} == "{_escape_filter_scalar(session_id)}"', _NOT_PASSAGE]
     if provider:
         parts.append(f'provider == "{_escape_filter_scalar(provider)}"')
     fields = ["turn_index", "timestamp", "chunk_type", "document"]
@@ -2127,7 +2284,7 @@ def get_turns(session_id: str, turn_index: int, context: int = 2,
     with milvus_client(db_path) as client:
         results = client.query(
             collection_name=COLLECTION_NAME,
-            filter=f'session_id == "{_escape_filter_scalar(session_id)}"',
+            filter=_without_passages(f'session_id == "{_escape_filter_scalar(session_id)}"'),
             output_fields=["document", "doc_id", "session_id", "transcript_file",
                            "turn_index", "timestamp", "git_branch", "chunk_type",
                            "logical_session_id", "provider", "source_kind",
@@ -2200,7 +2357,9 @@ def get_stats(project_root: Optional[ProjectRoots] = None,
         db_path=db_path,
     )
 
-    total = len(all_results)
+    # FTS holds passages too, so the lag check compares every row.
+    stored = len(all_results)
+    total = sum(1 for r in all_results if r.get("chunk_type") != passages.PASSAGE_CHUNK_TYPE)
     sessions = set(r["session_id"] for r in all_results if r.get("session_id"))
     branches = set(r["git_branch"] for r in all_results if r.get("git_branch"))
 
@@ -2224,7 +2383,7 @@ def get_stats(project_root: Optional[ProjectRoots] = None,
     # Additive, project-scoped FTS lag keys. Pass the Milvus total
     # we just computed so fts_lag_status does not re-enter get_stats.
     lag = fts_lag_status(
-        db_path=db_path, project_root=project_root, milvus_turn_count=total
+        db_path=db_path, project_root=project_root, milvus_turn_count=stored
     )
     stats["fts_row_count"] = lag["fts_row_count"]
     stats["fts_lag"] = lag["fts_lag"]
@@ -2851,15 +3010,18 @@ def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> DeleteResult
     """
     pk = _pk_from_doc_id(doc_id)
     deleted = 0
+    is_parent = passages.passage_parent(doc_id) is None
     with milvus_client(db_path) as client:
         if not client.has_collection(COLLECTION_NAME):
             return DeleteResult(0, True)
         results = client.query(
             collection_name=COLLECTION_NAME,
             filter=f"id == {pk}",
-            output_fields=["id"],
+            output_fields=["id", "session_id", "turn_index"],
         )
         if results:
+            if is_parent:
+                _delete_milvus_passages(client, doc_id, results[0])
             client.delete(collection_name=COLLECTION_NAME, filter=f"id == {pk}")
             deleted = len(results)
 
@@ -2871,6 +3033,10 @@ def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> DeleteResult
         try:
             conn = _fts.connection(db_path)
             _fts.delete(conn, "doc_id", doc_id)
+            if is_parent:
+                # Every passage doc_id sorts between "<parent>::p" and "<parent>::q".
+                _fts.delete_where(conn, "doc_id >= ? AND doc_id < ?",
+                                  (f"{doc_id}::p", f"{doc_id}::q"))
             fts_ok = True
         except Exception as e:
             logger.warning(
@@ -2885,6 +3051,22 @@ def delete_by_doc_id(doc_id: str, db_path: Optional[str] = None) -> DeleteResult
         fts_ok = True
 
     return DeleteResult(deleted, fts_ok)
+
+
+def _delete_milvus_passages(client, parent_doc_id: str, parent: Dict) -> int:
+    """Delete the Milvus passage rows of ``parent_doc_id``; ``parent`` holds its session and turn."""
+    expr = (
+        f'session_id == "{_escape_filter_scalar(parent.get("session_id", ""))}" '
+        f'and turn_index == {int(parent.get("turn_index", 0))} '
+        f'and chunk_type == "{passages.PASSAGE_CHUNK_TYPE}"'
+    )
+    rows = client.query(collection_name=COLLECTION_NAME, filter=expr,
+                        output_fields=["id", "doc_id"])
+    pks = [r["id"] for r in rows
+           if passages.passage_parent(r.get("doc_id", "")) == parent_doc_id]
+    if pks:
+        client.delete(collection_name=COLLECTION_NAME, filter=f"id in {json.dumps(pks)}")
+    return len(pks)
 
 
 def delete_by_branch(git_branch: str, db_path: Optional[str] = None) -> int:
@@ -3107,7 +3289,8 @@ def list_sessions(project_root: Optional[str] = None,
     """List all sessions with turn counts and date ranges. Optionally filter by project."""
     all_results = _query_all(
         ["session_id", "timestamp", "git_branch", "chunk_type", "project_root"],
-        filter_expr=f'project_root == "{_escape_filter_scalar(project_root)}"' if project_root else None,
+        filter_expr=_without_passages(
+            f'project_root == "{_escape_filter_scalar(project_root)}"' if project_root else None),
         db_path=db_path,
     )
 

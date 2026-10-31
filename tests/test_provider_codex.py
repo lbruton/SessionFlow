@@ -398,17 +398,17 @@ def test_codex_session_with_plain_and_zst_copy_is_read_once(tmp_path):
 
 
 def test_codex_long_task_is_cut_like_a_claude_turn(tmp_path):
-    from transcript_parser import MAX_TURN_CHARS
+    from transcript_parser import CUT_MARK, MAX_TURN_BYTES
 
     home = _write_rewritten_rollout(tmp_path, [
         _session_meta(), _turn_started("t1"), _msg("user", "q"),
-        _msg("assistant", "x" * MAX_TURN_CHARS), _msg("assistant", "tail"),
+        _msg("assistant", "x" * MAX_TURN_BYTES), _msg("assistant", "tail"),
     ])
 
     (turn,) = _parse(home).turns
 
-    assert turn["text"] == ("User: q\n\nAssistant: " + "x" * MAX_TURN_CHARS)[:MAX_TURN_CHARS] \
-        + "\n\n[truncated]"
+    full = "User: q\n\nAssistant: " + "x" * MAX_TURN_BYTES
+    assert turn["text"] == full[:MAX_TURN_BYTES - len(CUT_MARK)] + CUT_MARK
 
 
 def test_codex_unreadable_rollout_is_reported_as_an_error(tmp_path, monkeypatch):

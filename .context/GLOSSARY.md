@@ -51,8 +51,12 @@ A mismatch between the live Milvus schema and expected fields; refuses startup u
 _Avoid_: schema mismatch
 
 **Chunk Type**:
-The classification of an indexed record (e.g. `turn`).
+The classification of an indexed record (e.g. `turn`, `turn_passage`).
 _Avoid_: record type
+
+**Passage**:
+A window of about 450 tokens of a long Turn, stored as its own `turn_passage` record beside the full Turn. Search returns the best Passage or Turn of each Turn.
+_Avoid_: chunk, segment
 
 ## Search & Retrieval
 

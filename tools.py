@@ -157,6 +157,9 @@ def format_results(results: list[dict], scope: ProjectScope | None = None) -> st
 
         output.append(" ".join(header_parts))
 
+        if r.get("passage_index") is not None:
+            chunk_type = (f"{chunk_type}, part {r['passage_index'] + 1} "
+                          "(get_turns shows the whole turn)")
         meta = f"*Turn: {turn_index} | Type: {chunk_type} | {score}*"
         output.append(meta)
         output.append("")

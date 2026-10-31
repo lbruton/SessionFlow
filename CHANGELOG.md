@@ -9,6 +9,19 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-31
+
+### Added
+
+- A turn longer than 450 tokens also gets `turn_passage` rows: windows of 450 tokens with 64 tokens of overlap, so each passage fits inside the 512-token sliding window. Passages embed with the project name and the user question in EmbeddingGemma's title slot, and they carry the parent's session, turn index and issue IDs. A deferred embedding batch drops the whole turn, so no parent lands without its passages (SESF-69).
+
+### Changed
+
+- Turns are stored whole up to the 65,535-byte Milvus `document` cap instead of being cut at 8,000 characters. Search output still prints at most 8,000 characters of a turn, and `get_turns` returns all of it (SESF-69).
+- Search keeps one row per turn: the best of the parent and its passages. A passage hit prints its part number (SESF-69).
+- `cleanup.py reembed`, `cleanup.py rewrite` and `cleanup.py sanitize` re-embed passages with the title rebuilt from their parent turn (`rag_engine.document_titles`); `sanitize` redacts that title too (SESF-69).
+- Deleting a turn by doc_id also deletes its passages from Milvus and FTS. The recency listing, `get_turns`, the issue timeline, session listings and the stats turn count skip passages (SESF-69).
+
 ## [0.11.0] - 2026-10-31
 
 ### Changed

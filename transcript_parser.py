@@ -29,13 +29,22 @@ from typing import List, Dict, NamedTuple, Optional, Tuple
 from provider_adapters import REPLACE_SAME_TURN, build_source_id, canonicalize_path
 
 MAX_TURN_CHARS = 8000
+"""Characters of a turn that search output prints; ``get_turns`` prints the rest."""
+
+MAX_TURN_BYTES = 65535
+"""UTF-8 byte cap of a stored turn: the Milvus ``document`` field limit."""
+
+CUT_MARK = "\n\n[truncated]"
+"""Marker appended to a stored turn cut at ``MAX_TURN_BYTES``."""
 
 
-def truncate_turn_text(text: str, max_chars: int = MAX_TURN_CHARS) -> str:
-    """Cut ``text`` to ``max_chars`` and mark the cut with ``[truncated]``."""
-    if len(text) > max_chars:
-        return text[:max_chars] + "\n\n[truncated]"
-    return text
+def truncate_turn_text(text: str, max_bytes: int = MAX_TURN_BYTES) -> str:
+    """Cut ``text`` to ``max_bytes`` of UTF-8, marker included, and mark the cut with ``[truncated]``."""
+    encoded = text.encode()
+    if len(encoded) <= max_bytes:
+        return text
+    keep = max_bytes - len(CUT_MARK.encode())
+    return encoded[:keep].decode(errors="ignore") + CUT_MARK
 
 
 class ParseResult(NamedTuple):
@@ -122,7 +131,7 @@ def parse_transcript(
     transcript_path: str,
     session_id: str,
     start_offset: int = 0,
-    max_turn_chars: int = MAX_TURN_CHARS,
+    max_turn_bytes: int = MAX_TURN_BYTES,
 ) -> Tuple[List[Dict], int]:
     """Parse a transcript and return ``(turns, consumed_offset)``.
 
@@ -130,7 +139,7 @@ def parse_transcript(
     that ingestion must store.
     """
     result = parse_transcript_incremental(
-        transcript_path, session_id, start_offset, max_turn_chars)
+        transcript_path, session_id, start_offset, max_turn_bytes)
     return result.turns, result.consumed_offset
 
 
@@ -138,7 +147,7 @@ def parse_transcript_incremental(
     transcript_path: str,
     session_id: str,
     start_offset: int = 0,
-    max_turn_chars: int = MAX_TURN_CHARS,
+    max_turn_bytes: int = MAX_TURN_BYTES,
 ) -> ParseResult:
     """Parse a Claude Code JSONL transcript into indexable turns.
 
@@ -146,7 +155,7 @@ def parse_transcript_incremental(
         transcript_path: Path to the .jsonl file
         session_id: Session UUID for this transcript
         start_offset: Byte offset to resume reading from
-        max_turn_chars: Maximum characters per turn text (truncate longer)
+        max_turn_bytes: UTF-8 byte cap of a turn text (cut longer)
 
     Returns:
         A ``ParseResult``. Only newline-terminated lines are consumed. A
@@ -219,7 +228,7 @@ def parse_transcript_incremental(
                         session_id, transcript_file,
                         current_user_start_byte,
                         current_timestamp, current_git_branch,
-                        max_turn_chars, "turn",
+                        max_turn_bytes, "turn",
                     )
                     if turn:
                         turns.append(turn)
@@ -270,7 +279,7 @@ def parse_transcript_incremental(
                         session_id, transcript_file,
                         current_user_start_byte,
                         current_timestamp, current_git_branch,
-                        max_turn_chars, "turn",
+                        max_turn_bytes, "turn",
                     )
                     if turn:
                         turns.append(turn)
@@ -310,7 +319,7 @@ def parse_transcript_incremental(
                 session_id, transcript_file,
                 current_user_start_byte,
                 current_timestamp, current_git_branch,
-                max_turn_chars, "turn",
+                max_turn_bytes, "turn",
             )
             if turn:
                 turns.append(turn)
@@ -327,7 +336,7 @@ def _build_turn(
     start_byte: int,
     timestamp: str,
     git_branch: str,
-    max_chars: int,
+    max_bytes: int,
     chunk_type: str,
 ) -> Optional[Dict]:
     """Build a turn dict from user + assistant text.
@@ -345,7 +354,7 @@ def _build_turn(
         combined_assistant = "\n\n".join(assistant_texts)
         parts.append(f"Assistant: {combined_assistant}")
 
-    text = truncate_turn_text("\n\n".join(parts), max_chars)
+    text = truncate_turn_text("\n\n".join(parts), max_bytes)
 
     # Skip very short turns (likely just whitespace or newlines)
     if len(text.strip()) < 20:
