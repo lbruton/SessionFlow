@@ -9,6 +9,8 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-30
+
 ### Added
 
 - `cleanup.py dedupe-codex` deletes Codex rows of the old line-number keys. A session whose rollout is on disk keeps only the rows its parse yields, and only once the backfill has indexed every parsed turn. A session whose rollout is gone keeps one row per distinct turn. It is a dry run by default, `--apply` refuses without `--yes`, and the deleted doc_ids go to `~/.sessionflow/audit/dedupe-codex-<run>.jsonl` (SESF-98).
