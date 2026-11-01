@@ -200,6 +200,17 @@ def test_top_score_comes_from_the_first_kept_row():
     assert scored["top_score"] == pytest.approx(0.8)
 
 
+def test_memory_queries_exclude_by_source_project_root():
+    q = {"id": "m", "group": "paraphrase", "tool": "search_memories", "query": "x",
+         "args": {"project": "*"}, "exclude_roots": ["/x/SessionFlow"], "expected": ["m-b"]}
+    rows = [{"memory_id": "m-a", "source_project_root": "/x/SessionFlow"},
+            {"memory_id": "m-b", "source_project_root": "/y/Other"},
+            {"memory_id": "m-c", "source_project_root": None}]
+    [scored] = ev.run_queries(SearchClient(rows), [q], "hybrid")
+    assert scored["ranked"] == ["m-b", "m-c"]
+    assert scored["dropped"] == 1
+
+
 def test_queries_without_exclude_roots_run_unchanged():
     q = _queries()["q-cross-1"]
     client = SearchClient([_row("eval", 1, "/x/SessionFlow"), _row("s4", 1, "/y/Other")])

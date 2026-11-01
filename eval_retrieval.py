@@ -120,10 +120,11 @@ def result_ids(tool: str, payload: dict) -> list[str]:
     return [f"{r.get('session_id')}:{r.get('turn_index')}" for r in rows]
 
 
-def drop_excluded(payload: dict, roots: list[str]) -> tuple[dict, int]:
-    """Drop rows whose ``project_root`` is an excluded root or below it, then keep ``FETCH_N``.
+def drop_excluded(tool: str, payload: dict, roots: list[str]) -> tuple[dict, int]:
+    """Drop rows from an excluded root or below it, then keep ``FETCH_N``.
 
-    A root matches whole path components, so ``/x/SessionFlow`` keeps ``/x/SessionFlowOld``.
+    Turns carry ``project_root`` and memories ``source_project_root``. A root matches
+    whole path components, so ``/x/SessionFlow`` keeps ``/x/SessionFlowOld``.
 
     Returns:
         The payload with the kept rows, and the number of rows dropped.
@@ -134,7 +135,8 @@ def drop_excluded(payload: dict, roots: list[str]) -> tuple[dict, int]:
         return any(root == p or root.startswith(p + "/") for p in prefixes)
 
     rows = payload.get("results") or []
-    kept = [r for r in rows if not excluded(str(r.get("project_root") or ""))]
+    field = "source_project_root" if tool == "search_memories" else "project_root"
+    kept = [r for r in rows if not excluded(str(r.get(field) or ""))]
     return {**payload, "results": kept[:FETCH_N]}, len(rows) - len(kept)
 
 
@@ -457,7 +459,7 @@ def run_queries(client, queries: list[dict], sort_by: str) -> list[dict]:
         try:
             payload = client.call(q["tool"], args)
             if roots:
-                payload, dropped = drop_excluded(payload, roots)
+                payload, dropped = drop_excluded(q["tool"], payload, roots)
             row = score_query(q, result_ids(q["tool"], payload), top_score(q["tool"], payload))
         except EvalError as exc:
             row = score_query(q, [])
