@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-01
+
+### Added
+
+- `format: "compact"` on `search_all_sessions` and `search_session`. It keeps the `Scope:` line and prints one line per hit: timestamp, provider, project name, full session ID, turn index and the first 150 characters of the user text. A hit with no user text previews its reply, marked `assistant:`, and a passage from the middle of a turn is marked `part N:`. `search_session` also takes `format: "json"` (SESF-89).
+
 ## [0.15.1] - 2026-11-01
 
 ### Fixed
