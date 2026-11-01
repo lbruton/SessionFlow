@@ -57,6 +57,19 @@ PROJECT_ROOT_PROPERTY = {
     ),
 }
 
+RESULT_FORMAT_PROPERTY = {
+    "type": "string",
+    "enum": ["compact", "json", "markdown"],
+    "default": "markdown",
+    "description": (
+        "Output format: 'markdown' (default), 'json' or 'compact'. 'compact' prints one "
+        "line per hit with a short preview and no reply text. Pass its session and turn "
+        "values to get_turns as they are."
+    ),
+}
+
+COMPACT_PREVIEW_CHARS = 150
+
 UNNAMED_SCOPE_ERROR = (
     "No project named. Pass project_root as your current working directory, "
     "or '*' to search every project."
@@ -176,6 +189,50 @@ def format_results(results: list[dict], scope: ProjectScope | None = None) -> st
         output.append("")
 
     return "\n".join(output)
+
+
+def _compact_preview(r: dict) -> str:
+    """Return the start of a hit's user text, or of its other text with a marker."""
+    content = r.get("content", "")
+    marker = ""
+    if content.startswith("User:"):
+        user, _, reply = content[len("User:"):].partition("\n\nAssistant: ")
+        text, marker = (user, "") if user.strip() else (reply, "assistant: ")
+    elif content.startswith("Assistant:"):
+        text, marker = content[len("Assistant:"):], "assistant: "
+    elif r.get("passage_index") is not None:
+        text, marker = content, f"part {r['passage_index'] + 1}: "
+    else:
+        text = content
+    return marker + " ".join(text.split())[:COMPACT_PREVIEW_CHARS]
+
+
+def format_results_compact(results: list[dict], scope: ProjectScope | None = None) -> str:
+    """Format search results as one line per hit, opening with the scope line when ``scope`` is set."""
+    output = [_scope_line(scope), ""] if scope is not None else []
+    if not results:
+        return "\n".join(output + ["No results found."])
+
+    for r in results:
+        parts = [r.get("timestamp", "")[:19], r.get("provider", "")]
+        if r.get("project_root"):
+            parts.append(f"project:{Path(r['project_root']).name}")
+        parts.append(f"session:{r.get('session_id', '')} turn:{r.get('turn_index', 0)}")
+        output.append(f"{' '.join(p for p in parts if p)} | {_compact_preview(r)}")
+
+    return "\n".join(output)
+
+
+def _render_results(fmt: str | None, results: list[dict], scope: ProjectScope) -> str:
+    """Render search results in the ``format`` a search tool was called with."""
+    if fmt == "json":
+        return _json_text({
+            "scope": {"roots": scope.filter_value(), "note": scope.note},
+            "results": results,
+        })
+    if fmt == "compact":
+        return format_results_compact(results, scope)
+    return format_results(results, scope)
 
 
 def format_turns(results: list[dict]) -> str:
@@ -364,12 +421,7 @@ def build_search_all_sessions_schema() -> dict:
                 "type": "string",
                 "description": "Return only turns tagged with this issue ID, for example 'SESF-25'. Case-insensitive.",
             },
-            "format": {
-                "type": "string",
-                "enum": ["markdown", "json"],
-                "default": "markdown",
-                "description": "Output format: 'markdown' (default) or 'json'.",
-            },
+            "format": RESULT_FORMAT_PROPERTY,
         },
         "required": [],
     }
@@ -661,6 +713,7 @@ def register_tools(server: Server):
                             "type": "string",
                             "description": "Return only turns tagged with this issue ID, for example 'SESF-25'. Case-insensitive.",
                         },
+                        "format": RESULT_FORMAT_PROPERTY,
                     },
                     "required": [],
                 },
@@ -910,7 +963,8 @@ def register_tools(server: Server):
                     db_path=db,
                 )
                 await _log_turn_search(name, arguments, scope, results)
-                return [types.TextContent(type="text", text=format_results(results, scope))]
+                text = _render_results(arguments.get("format"), results, scope)
+                return [types.TextContent(type="text", text=text)]
 
             elif name == "search_all_sessions":
                 provider_arg = arguments.get("provider")
@@ -947,13 +1001,8 @@ def register_tools(server: Server):
                     db_path=db,
                 )
                 await _log_turn_search(name, arguments, scope, results)
-                if arguments.get("format") == "json":
-                    payload = {
-                        "scope": {"roots": scope.filter_value(), "note": scope.note},
-                        "results": results,
-                    }
-                    return [types.TextContent(type="text", text=_json_text(payload))]
-                return [types.TextContent(type="text", text=format_results(results, scope))]
+                text = _render_results(arguments.get("format"), results, scope)
+                return [types.TextContent(type="text", text=text)]
 
             elif name == "get_turns":
                 results = rag_engine.get_turns(
