@@ -58,8 +58,8 @@ pip install --quiet --upgrade pip
 echo "  Installing Milvus Lite..."
 pip install --quiet "setuptools>=70.0,<82.0" "pymilvus[milvus-lite]>=2.6.0"
 
-echo "  Installing MLX embeddings..."
-pip install --quiet "mlx>=0.30.0" mlx-embeddings "transformers<5.0"
+echo "  Installing MLX embeddings and the reranker runtime..."
+pip install --quiet "mlx>=0.30.0" mlx-embeddings "mlx-lm>=0.29" "transformers<5.0"
 
 echo "  Installing MCP + HTTP server..."
 pip install --quiet "mcp>=1.0.0,<2.0" starlette uvicorn httpx "watchdog>=4.0.0"
@@ -72,6 +72,13 @@ SESSIONFLOW_MODEL="${SESSIONFLOW_MODEL:-embeddinggemma}"
 echo "Downloading embedding model ($SESSIONFLOW_MODEL)..."
 chmod +x "$SCRIPT_DIR/download-model.sh"
 SESSIONFLOW_MODEL="$SESSIONFLOW_MODEL" "$SCRIPT_DIR/download-model.sh"
+
+# Normalized like reranker.settings: case and surrounding spaces do not matter.
+RERANKER=$(echo "${SESSIONFLOW_RERANKER:-qwen3}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+if [ "$RERANKER" != "off" ]; then
+    echo "Downloading reranker ($RERANKER)..."
+    "$SCRIPT_DIR/download-model.sh" "$RERANKER"
+fi
 
 # --- Test installation ---
 echo ""

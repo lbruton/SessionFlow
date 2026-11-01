@@ -69,6 +69,9 @@ Restart Claude Code after setup to load the MCP server.
 | `SESSIONFLOW_WATCH` | `true` | Turn the transcript file watcher on or off. |
 | `SESSIONFLOW_URL` | `http://127.0.0.1:7102` | Server URL that the hooks call. |
 | `SESSIONFLOW_SEARCH_LOG` | off | Set to `1` to log each search and follow-up call to `~/.sessionflow/search-log.jsonl`. Queries are redacted. |
+| `SESSIONFLOW_RERANKER` | `qwen3` | Reranks the top results of a search with a query: `qwen3`, `jina` or `off`. See [Reranking](#reranking). |
+| `SESSIONFLOW_RERANK_TOP` | `10` | Number of top results the reranker reorders. |
+| `SESSIONFLOW_RERANK_MAX_TOKENS` | `512` | Tokens of each result the reranker reads. |
 
 ## Running
 
@@ -93,6 +96,36 @@ Several harnesses can start at the same time, and their `SessionStart` hooks the
 ```
 
 The `start`, `stop`, `restart` and `status` commands work the same with or without the LaunchAgent. `setup.sh` offers to install it. Set `SESSIONFLOW_INSTALL_AGENT=1` to install it without a prompt.
+
+### Reranking
+
+A reranker reads the top results of a search and reorders them by how well each one answers the query. The default is `qwen3`, which `setup.sh` downloads. It adds a second model of about 1.2 GB, and each search with a query takes about 2 seconds longer. Searches without a query, such as the session-start listing, never use it. Until the model loads, or when it is missing, search runs without it.
+
+On the project's retrieval eval (48 queries), reranking the top 10 results raised MRR from 0.720:
+
+| `SESSIONFLOW_RERANKER` | Model | MRR | License |
+|---|---|---|---|
+| `qwen3` (default) | Qwen3-Reranker-0.6B | 0.808 | Apache 2.0 |
+| `jina` | jina-reranker-v3.5-mlx | 0.870 | CC BY-NC 4.0 |
+| `off` | none | 0.720 | |
+
+`jina` ranks best, and `qwen3` is a little faster. To switch to `jina`, download it, then set the variable for the server:
+
+```bash
+./download-model.sh jina
+SESSIONFLOW_RERANKER=jina ./sessionflow-server.sh restart
+```
+
+Set `SESSIONFLOW_RERANKER=off` the same way to turn reranking off. launchd does not pass shell variables, so under the LaunchAgent add the variable to the plist and reload it:
+
+```bash
+PLIST=~/Library/LaunchAgents/cc.lbruton.sessionflow.plist
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:SESSIONFLOW_RERANKER string jina" "$PLIST"
+launchctl bootout "gui/$(id -u)/cc.lbruton.sessionflow"
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+```
+
+To change the value later, use `Set` in place of `Add`, and reload. `install-agent` rewrites the plist, so add the variable again after it. `curl -s http://127.0.0.1:7102/health` reports the state in `ranking.reranker_state`. It is `ready`, `loading`, or `failed:` with the reason. Each reranked search result shows `Rerank: #k`.
 
 ### Retrieval eval
 
