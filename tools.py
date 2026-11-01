@@ -108,16 +108,20 @@ def _format_signals(r: dict) -> str:
     """Name the signals that ranked a row.
 
     ``distance`` is the vector distance (None when the vector search did not
-    return the row); ``keyword_rank`` is the 1-based FTS position. A row with
-    neither comes from a query-less listing.
+    return the row); ``keyword_rank`` is the 1-based FTS position and
+    ``rerank_rank`` the 1-based reranker position. A row with none of them
+    comes from a query-less listing.
     """
     distance = r.get("distance")
     keyword_rank = r.get("keyword_rank")
+    rerank_rank = r.get("rerank_rank")
     parts = []
     if distance is not None:
         parts.append(f"Semantic: {1 - distance:.2f}")
     if keyword_rank is not None:
         parts.append(f"Keyword: #{keyword_rank}")
+    if rerank_rank is not None:
+        parts.append(f"Rerank: #{rerank_rank}")
     return " · ".join(parts) if parts else "Listing"
 
 

@@ -2,6 +2,7 @@ pymilvus[milvus-lite]>=2.6.0,!=2.6.10  # 2.6.10 breaks unix socket address for m
 setuptools>=78.1.1,<82.0
 mlx>=0.30.0
 mlx-embeddings
+mlx-lm>=0.29  # optional reranker (SESSIONFLOW_RERANKER)
 transformers<5.0
 mcp>=1.30.0,<2.0  # 2.x removed the Server.list_tools() decorator used in tools.py
 starlette

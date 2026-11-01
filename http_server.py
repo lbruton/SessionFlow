@@ -37,6 +37,7 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 
 import client_roots
 import rag_engine
+import reranker
 import transcript_parser
 import file_watcher
 import fts_hybrid
@@ -971,7 +972,7 @@ async def health(request: Request) -> JSONResponse:
         "providers": _provider_health(deep=deep),
         "backfill": _backfill_status_payload(),
         "embedding": _embedding_status_payload(),
-        "ranking": rag_engine.ranking_settings(),
+        "ranking": {**rag_engine.ranking_settings(), "reranker_state": reranker.status()},
         "fts": fts_payload,
     }, status_code=503 if starting else 200)
 
@@ -1296,6 +1297,22 @@ def _blocking_startup(db_path: str) -> None:
         print(f"[HTTP] Warning: Could not init server mode: {e}", file=sys.stderr)
 
 
+async def _load_reranker(executor: concurrent.futures.Executor) -> None:
+    """Download the reranker snapshot on ``executor``, then load it on the ``mlx-embed`` thread.
+
+    Search skips reranking until the load finishes, so startup does not wait for it.
+    """
+    kind = reranker.settings()["reranker"]
+    loop = asyncio.get_running_loop()
+    if not await loop.run_in_executor(executor, reranker.fetch, kind):
+        return
+    mlx_executor = rag_engine._embed_executor
+    if mlx_executor is None:
+        reranker.fail(kind, RuntimeError("the mlx-embed executor is not running"))
+        return
+    await loop.run_in_executor(mlx_executor, reranker.load, kind)
+
+
 async def _background_startup(
     db_path: str,
     executor: concurrent.futures.Executor,
@@ -1310,6 +1327,9 @@ async def _background_startup(
     global _startup_state
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, _blocking_startup, db_path)
+
+    if reranker.settings()["reranker"] != "off":
+        tasks["reranker"] = asyncio.create_task(_load_reranker(executor))
 
     _ensure_backfill_drain_primitives()
     tasks["backfill_drain"] = asyncio.create_task(_backfill_drain_worker())

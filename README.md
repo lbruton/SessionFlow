@@ -69,6 +69,9 @@ Restart Claude Code after setup to load the MCP server.
 | `SESSIONFLOW_WATCH` | `true` | Turn the transcript file watcher on or off. |
 | `SESSIONFLOW_URL` | `http://127.0.0.1:7102` | Server URL that the hooks call. |
 | `SESSIONFLOW_SEARCH_LOG` | off | Set to `1` to log each search and follow-up call to `~/.sessionflow/search-log.jsonl`. Queries are redacted. |
+| `SESSIONFLOW_RERANKER` | `off` | Reranks the top results of a search with a query: `jina` (jina-reranker-v3.5-mlx) or `qwen3` (Qwen3-Reranker-0.6B). The server downloads the pinned model at startup. The Jina model is licensed CC BY-NC 4.0, so do not use it commercially. |
+| `SESSIONFLOW_RERANK_TOP` | `10` | Number of top results the reranker reorders. |
+| `SESSIONFLOW_RERANK_MAX_TOKENS` | `512` | Tokens of each result the reranker reads. |
 
 ## Running
 

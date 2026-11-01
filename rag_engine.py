@@ -62,6 +62,7 @@ from provider_adapters import (
 )
 import boilerplate
 import passages
+import reranker
 import secret_redaction
 from transcript_parser import CUT_MARK, MAX_TURN_CHARS
 
@@ -1623,7 +1624,11 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         r.setdefault("source_class", merge_defaults["source_class"])
         r.setdefault("logical_session_id", r.get("session_id", ""))
 
-    merged = _rank_results(merged, sort_by, n)
+    rerank = sort_by != "recency" and reranker.is_ready()
+    keep = max(n, reranker.settings()["rerank_top"]) if rerank else n
+    merged = _rank_results(merged, sort_by, keep)
+    if rerank:
+        merged = reranker.rerank(query, merged, lock=_mlx_eval_lock)
 
     # If the FTS table was recently dropped + recreated and backfill hasn't
     # caught up, surface a one-line warning on each row's metadata so callers
@@ -2105,11 +2110,12 @@ def _semantic_scores(results: List[Dict]) -> List[float]:
     return [(s - lo) / span for s in raw]
 
 
-def ranking_settings() -> Dict[str, Union[float, int]]:
-    """Return the hybrid ranking settings this process applies, read from the environment.
+def ranking_settings() -> Dict[str, Union[float, int, str]]:
+    """Return the ranking settings this process applies, read from the environment.
 
     ``SESSIONFLOW_RECENCY_WEIGHT`` outside ``[0, 1]`` and an unparsable value fall
-    back to the default; ``SESSIONFLOW_RECENCY_DECAY_DAYS`` is at least 1.
+    back to the default; ``SESSIONFLOW_RECENCY_DECAY_DAYS`` is at least 1. The
+    reranker settings come from ``reranker.settings``.
     """
     return {
         "recency_weight": _env_float(
@@ -2118,6 +2124,7 @@ def ranking_settings() -> Dict[str, Union[float, int]]:
         "recency_decay_days": _env_int(
             "SESSIONFLOW_RECENCY_DECAY_DAYS", RECENCY_DECAY_DAYS_DEFAULT, minimum=1
         ),
+        **reranker.settings(),
     }
 
 
