@@ -165,6 +165,9 @@ def rerank(query: str, rows: List[Dict], *, lock) -> List[Dict]:
     if not is_ready() or not rows or scorer is None:
         return rows
     top = rows[:settings()["rerank_top"]]
+    throttle = embedding_control.get_embed_throttle()
+    # Scoring is a heavy MLX batch, so it keeps the same cooldown as embeds.
+    throttle.wait_blocking()
     try:
         with lock:
             scores = list(scorer(query, [r.get("content") or "" for r in top]))
@@ -174,7 +177,7 @@ def rerank(query: str, rows: List[Dict], *, lock) -> List[Dict]:
         _log_error(exc)
         return rows
     finally:
-        embedding_control.get_embed_throttle().done()
+        throttle.done()
 
     by_score = sorted(range(len(top)), key=lambda i: (-scores[i], i))
     rank = {i: k + 1 for k, i in enumerate(by_score)}

@@ -249,6 +249,22 @@ def test_scoring_stamps_the_embed_throttle(stub_search, monkeypatch):
     assert stamps == [1]
 
 
+
+def test_scoring_waits_out_the_embed_throttle_first(stub_search, monkeypatch):
+    events = []
+    throttle = reranker.embedding_control.get_embed_throttle()
+    monkeypatch.setattr(throttle, "wait_blocking", lambda: events.append("wait"))
+    monkeypatch.setattr(throttle, "done", lambda: events.append("done"))
+
+    class _Recording(_Scorer):
+        def __call__(self, query, docs):
+            events.append("score")
+            return super().__call__(query, docs)
+
+    reranker.install("jina", _Recording())
+    _search()
+    assert events == ["wait", "score", "done"]
+
 # --- output ---------------------------------------------------------------------
 
 
