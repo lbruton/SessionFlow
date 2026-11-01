@@ -27,8 +27,9 @@ def _patch_search(monkeypatch, vector_hits, fts_rows):
     monkeypatch.setattr(rag_engine, "embed_texts", lambda *a, **kw: [[0.0] * 768])
 
     class _Client:
-        def search(self, *a, limit=None, **kw):
+        def search(self, *a, limit=None, search_params=None, **kw):
             seen["vector_limit"] = limit
+            seen["search_params"] = search_params
             return [[{"entity": e, "distance": 0.9 - i * 0.01}
                      for i, e in enumerate(vector_hits)]]
 
@@ -97,6 +98,21 @@ def test_display_row_is_the_best_ranked_row_of_the_turn(monkeypatch):
     assert out[0]["doc_id"] == "s::a::p2"
     assert out[0]["content"] == "passage two"
     assert out[0]["passage_index"] == 2
+
+
+def test_hnsw_ef_covers_the_vector_limit(monkeypatch):
+    # HNSW rejects a search whose limit exceeds ef.
+    seen = _patch_search(monkeypatch, [], [])
+    rag_engine.search("anything", n=30, sort_by="relevance",
+                      db_path="http://milvus.test:19530")
+    assert seen["search_params"]["params"]["ef"] >= seen["vector_limit"] == 180
+
+
+def test_hnsw_ef_keeps_its_floor_for_small_limits(monkeypatch):
+    seen = _patch_search(monkeypatch, [], [])
+    rag_engine.search("anything", n=5, sort_by="relevance",
+                      db_path="http://milvus.test:19530")
+    assert seen["search_params"]["params"]["ef"] == 128
 
 
 def test_each_channel_fetches_extra_rows_before_collapse(monkeypatch):

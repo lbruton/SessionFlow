@@ -1549,7 +1549,8 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
 
     search_params = {"metric_type": "COSINE"}
     if _is_remote_uri(db_path or ""):
-        search_params["params"] = {"ef": 128}  # HNSW search parameter
+        # HNSW rejects a search whose limit exceeds ef.
+        search_params["params"] = {"ef": max(128, channel_n)}
 
     with milvus_client(db_path) as client:
         results = client.search(
