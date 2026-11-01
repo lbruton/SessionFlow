@@ -99,17 +99,19 @@ The `start`, `stop`, `restart` and `status` commands work the same with or witho
 
 ### Reranking
 
-A reranker reads the top results of a search and reorders them by how well each one answers the query. The default is `qwen3`, which `setup.sh` downloads. It adds a second model of about 1.2 GB, and each search with a query takes about 2 seconds longer. Searches without a query, such as the session-start listing, never use it. Until the model loads, or when it is missing, search runs without it.
+A reranker reads the top results of a search and reorders them by how well each one answers the query. The default is `qwen3`, which `setup.sh` downloads. It adds a second model of about 1.2 GB, and each search with a query takes about 2 to 3 seconds longer. Searches without a query, such as the session-start listing, never use it. Until the model loads, or when it is missing, search runs without it.
 
-On the project's retrieval eval (48 queries), reranking the top 10 results raised MRR from 0.720:
+The project's retrieval eval ran each setting against the same running server, 77 queries on an M-series Mac, reranking the top 10 results:
 
-| `SESSIONFLOW_RERANKER` | Model | MRR | License |
-|---|---|---|---|
-| `qwen3` (default) | Qwen3-Reranker-0.6B | 0.808 | Apache 2.0 |
-| `jina` | jina-reranker-v3.5-mlx | 0.870 | CC BY-NC 4.0 |
-| `off` | none | 0.720 | |
+| `SESSIONFLOW_RERANKER` | Model | License | MRR | nDCG@10 | Median search |
+| --- | --- | --- | --- | --- | --- |
+| `off` | none | | 0.766 | 0.730 | 0.15 s |
+| `qwen3` (default) | Qwen3-Reranker-0.6B | Apache 2.0 | 0.828 | 0.783 | 1.99 s |
+| `jina` | jina-reranker-v3.5-mlx | CC BY-NC 4.0 | 0.871 | 0.806 | 2.88 s |
 
-`jina` ranks best, and `qwen3` is a little faster. To switch to `jina`, download it, then set the variable for the server:
+Reranking helps most when the answer names an identifier or sits deep in a long turn. Those queries rose from MRR 0.82 and 0.76 with reranking off to 1.00 and 0.96 with `jina`.
+
+`jina` ranks best, and `qwen3` is faster. To switch to `jina`, download it, then set the variable for the server:
 
 ```bash
 ./download-model.sh jina
