@@ -1304,7 +1304,7 @@ async def _load_reranker() -> None:
     """
     kind = reranker.settings()["reranker"]
     reranker.begin(kind)
-    mlx_executor = rag_engine._embed_executor
+    mlx_executor = getattr(rag_engine, "_embed_executor", None)
     if mlx_executor is None:
         reranker.fail(kind, RuntimeError("the mlx-embed executor is not running"))
         return

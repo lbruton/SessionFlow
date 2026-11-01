@@ -6,7 +6,7 @@ import rag_engine
 
 
 _RERANK_ENV = ("SESSIONFLOW_RERANKER", "SESSIONFLOW_RERANK_TOP", "SESSIONFLOW_RERANK_MAX_TOKENS")
-_RERANK_DEFAULTS = {"reranker": "off", "rerank_top": 10, "rerank_max_tokens": 512}
+_RERANK_DEFAULTS = {"reranker": "qwen3", "rerank_top": 10, "rerank_max_tokens": 512}
 
 
 def test_defaults(monkeypatch):

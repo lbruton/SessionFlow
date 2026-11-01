@@ -236,3 +236,19 @@ def test_shutdown_cancels_the_reranker_load_before_closing_server_mode(
     finally:
         release.set()
     assert events[:2] == ["reranker_cancelled", "close_server_mode"]
+
+
+def test_default_reranker_without_an_mlx_executor_reports_failed(
+    stub_rag_engine, tmp_path, monkeypatch
+):
+    import reranker
+
+    monkeypatch.delenv("SESSIONFLOW_RERANKER", raising=False)
+    monkeypatch.delattr(stub_rag_engine, "_embed_executor", raising=False)
+    release = threading.Event()
+    release.set()
+    with _server(stub_rag_engine, tmp_path, monkeypatch, release) as (_, client, _calls):
+        assert _wait_for(lambda: client.get("/health").status_code == 200)
+        assert _wait_for(lambda: reranker.status().startswith("failed: "))
+        state = client.get("/health").json()["ranking"]["reranker_state"]
+        assert state == "failed: RuntimeError: the mlx-embed executor is not running"

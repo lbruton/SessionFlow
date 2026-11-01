@@ -73,6 +73,12 @@ echo "Downloading embedding model ($SESSIONFLOW_MODEL)..."
 chmod +x "$SCRIPT_DIR/download-model.sh"
 SESSIONFLOW_MODEL="$SESSIONFLOW_MODEL" "$SCRIPT_DIR/download-model.sh"
 
+SESSIONFLOW_RERANKER="${SESSIONFLOW_RERANKER:-qwen3}"
+if [ "$SESSIONFLOW_RERANKER" != "off" ]; then
+    echo "Downloading reranker ($SESSIONFLOW_RERANKER)..."
+    "$SCRIPT_DIR/download-model.sh" "$SESSIONFLOW_RERANKER"
+fi
+
 # --- Test installation ---
 echo ""
 echo "Testing installation..."

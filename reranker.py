@@ -1,6 +1,6 @@
 """Optional MLX reranker that reorders the top hybrid candidates of a query search.
 
-``SESSIONFLOW_RERANKER`` picks ``off`` (the default), ``jina`` or ``qwen3``. The
+``SESSIONFLOW_RERANKER`` picks ``qwen3`` (the default), ``jina`` or ``off``. The
 server loads the model on the ``mlx-embed`` thread; CLI processes never load it,
 so their searches skip reranking.
 """
@@ -22,6 +22,7 @@ from embedding_control import _env_int
 log = logging.getLogger(__name__)
 
 KINDS = ("off", "jina", "qwen3")
+RERANKER_DEFAULT = "qwen3"
 RERANK_TOP_DEFAULT = 10
 RERANK_MAX_TOKENS_DEFAULT = 512
 
@@ -56,7 +57,7 @@ def settings() -> Dict[str, object]:
 
     An unknown ``SESSIONFLOW_RERANKER`` value logs one warning and means ``off``.
     """
-    raw = (os.getenv("SESSIONFLOW_RERANKER") or "off").strip().lower()
+    raw = (os.getenv("SESSIONFLOW_RERANKER") or RERANKER_DEFAULT).strip().lower()
     if raw not in KINDS:
         if raw not in _warned_values:
             _warned_values.add(raw)

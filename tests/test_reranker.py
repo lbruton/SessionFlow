@@ -72,8 +72,14 @@ def _search(n=5, sort_by="relevance", query="what broke"):
 
 
 def test_settings_defaults():
-    assert reranker.settings() == {"reranker": "off", "rerank_top": 10,
+    assert reranker.settings() == {"reranker": "qwen3", "rerank_top": 10,
                                    "rerank_max_tokens": 512}
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", " off "])
+def test_off_turns_the_default_reranker_off(monkeypatch, value):
+    monkeypatch.setenv("SESSIONFLOW_RERANKER", value)
+    assert reranker.settings()["reranker"] == "off"
 
 
 def test_settings_from_env(monkeypatch):

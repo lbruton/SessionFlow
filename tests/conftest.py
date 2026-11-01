@@ -470,6 +470,16 @@ def _no_ambient_memory_dsn(monkeypatch):
     monkeypatch.delenv("SESSIONFLOW_MEMORY_DSN", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_default_reranker(monkeypatch):
+    """Keep the default reranker from loading a model in tests that start the server."""
+    monkeypatch.setenv("SESSIONFLOW_RERANKER", "off")
+    yield
+    module = sys.modules.get("reranker")
+    if module is not None:
+        module.reset()
+
+
 @pytest.fixture
 def memory_pg():
     """Yield a Postgres DSN whose search_path is a fresh, empty schema for one test.
