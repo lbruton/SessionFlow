@@ -609,8 +609,8 @@ class MemoryStore:
         if topic_row is not None and topic_row["content_hash"] != rec.content_hash:
             changes = {
                 "text": rec.text, "content_hash": rec.content_hash, "agent_id": rec.agent_id,
-                "type": rec.type, "extra": rec.extra, "issue_ids": rec.issue_ids,
-                "source_session_id": rec.source_session_id,
+                "type": rec.type, "status": rec.status, "extra": rec.extra,
+                "issue_ids": rec.issue_ids, "source_session_id": rec.source_session_id,
                 "source_provider": rec.source_provider,
                 "source_project_root": rec.source_project_root,
                 "source_started_at": rec.source_started_at,
