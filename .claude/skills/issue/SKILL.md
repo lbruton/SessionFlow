@@ -6,7 +6,7 @@ description: >
   Triggers on: "create issue", "issue", "new issue", "new bug", "file a bug",
   "track this".
 user-invocable: false
-library-version: f0ca78a2b4c9
+library-version: e3dbf30dcd3c
 ---
 
 # Issue Management
@@ -171,7 +171,7 @@ Authoritative source: each project's `.claude/project.json` (`issuePrefix` + `pl
 | `STRK` | StakTrakr |
 | `HXTR` | HexTrackr |
 | `FRGE` | Forge |
-| `WOF` | WhoseOnFirst |
+| `WOF` | WhoIsOnFirst |
 | `MELO` | MyMelo |
 | `CFLOW` | claude-context (retired) |
 | `PAPI` | PAPiTA |
