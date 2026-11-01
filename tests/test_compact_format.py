@@ -161,3 +161,13 @@ def test_schemas_offer_compact_and_name_get_turns(name):
     tool = listed[name]
     assert tool.inputSchema["properties"]["format"]["enum"] == ["compact", "json", "markdown"]
     assert "get_turns" in tool.inputSchema["properties"]["format"]["description"]
+
+
+def test_unprefixed_assistant_row_gets_marker():
+    line = _lines([_row(content="only a reply", chunk_type="assistant")])[-1]
+    assert line.endswith("| assistant: only a reply")
+
+
+def test_unprefixed_user_row_stays_unmarked():
+    line = _lines([_row(content="only a question", chunk_type="user")])[-1]
+    assert line.endswith("| only a question")

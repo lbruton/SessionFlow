@@ -200,6 +200,8 @@ def _compact_preview(r: dict) -> str:
         text, marker = (user, "") if user.strip() else (reply, "assistant: ")
     elif content.startswith("Assistant:"):
         text, marker = content[len("Assistant:"):], "assistant: "
+    elif r.get("chunk_type") == "assistant":
+        text, marker = content, "assistant: "
     elif r.get("passage_index") is not None:
         text, marker = content, f"part {r['passage_index'] + 1}: "
     else:
