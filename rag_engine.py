@@ -1534,8 +1534,10 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
             issue_id=issue_id, db_path=db_path,
         )
 
-    # Expanded candidate pool for both engines
+    # Expanded candidate pool for both engines. Each channel reads twice that,
+    # because _collapse_channel folds sibling passages into one row per turn.
     fetch_n = n * 3
+    channel_n = fetch_n * 2
 
     # --- Vector search ---
     query_embedding = embed_texts([query], is_query=True)[0]
@@ -1553,7 +1555,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         results = client.search(
             collection_name=COLLECTION_NAME,
             data=[query_embedding],
-            limit=fetch_n,
+            limit=channel_n,
             filter=filter_expr,
             search_params=search_params,
             output_fields=_SEARCH_OUTPUT_FIELDS,
@@ -1596,7 +1598,7 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         # FTS results cannot include turns without the issue tag.
         token = _issue_id_containment_token(issue_id)
         fts_filters["issue_ids"] = ("like", f"%,{token},%")
-    fts_results = _fts.search(query, n=fetch_n, filters=fts_filters or None, db_path=db_path)
+    fts_results = _fts.search(query, n=channel_n, filters=fts_filters or None, db_path=db_path)
 
     # --- Merge with RRF ---
     # Route *every* candidate set through rrf_merge (it handles an empty list
@@ -1604,11 +1606,11 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     # the only relevance signal that spans both vector and FTS-only rows. The
     # `_rrf_score` is kept alive until after scoring (see _rank_results).
     fts_weight = IDENTIFIER_FTS_WEIGHT if _is_identifier_query(query) else 1.0
-    # Collapse the whole fused pool before the fetch_n cut, so sibling passages
-    # of one turn cannot push other turns out of it.
+    vector_results = _collapse_channel(vector_results)[:fetch_n]
+    fts_results = _collapse_channel(fts_results)[:fetch_n]
     pool = len(vector_results) + len(fts_results)
-    merged = _collapse_passages(
-        rrf_merge(vector_results, fts_results, n=pool, fts_weight=fts_weight))[:fetch_n]
+    merged = _collapse_passages(_restore_doc_ids(
+        rrf_merge(vector_results, fts_results, n=pool, fts_weight=fts_weight)))[:fetch_n]
 
     if not merged:
         return []
@@ -1640,6 +1642,35 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
 
 
 _DISPLAY_CUT = "\n\n[cut: get_turns shows the whole turn]"
+
+
+def _collapse_channel(rows: List[Dict]) -> List[Dict]:
+    """Keep the best-ranked row of each turn in one channel, keyed by the turn's doc_id.
+
+    ``rrf_merge`` fuses by doc_id, so a passage hit in one channel and a parent
+    hit in the other must share a key to add up. ``_restore_doc_ids`` undoes the rekey.
+    """
+    seen = set()
+    out = []
+    for row in rows:
+        doc_id = row.get("doc_id", "")
+        parent = passages.passage_parent(doc_id)
+        key = parent or doc_id
+        if key in seen:
+            continue
+        seen.add(key)
+        if parent:
+            row = {**row, "doc_id": parent, "_row_doc_id": doc_id}
+        out.append(row)
+    return out
+
+
+def _restore_doc_ids(rows: List[Dict]) -> List[Dict]:
+    """Put back the passage doc_ids that ``_collapse_channel`` replaced."""
+    for row in rows:
+        if "_row_doc_id" in row:
+            row["doc_id"] = row.pop("_row_doc_id")
+    return rows
 
 
 def _collapse_passages(merged: List[Dict]) -> List[Dict]:
