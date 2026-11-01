@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-01
+
+### Added
+
+- Optional MLX reranker for `search_all_sessions` and `search_session` calls with a query. `SESSIONFLOW_RERANKER` selects `off` (default), `jina` (jina-reranker-v3.5-mlx, CC BY-NC 4.0, sorts by its score) or `qwen3` (Qwen3-Reranker-0.6B, Apache 2.0, fused with the hybrid rank by RRF). `SESSIONFLOW_RERANK_TOP` (default 10) and `SESSIONFLOW_RERANK_MAX_TOKENS` (default 512) bound the work. The server downloads the pinned snapshot and loads it on the MLX thread after startup; until it is ready, or when it fails, search skips reranking. `/health` reports the settings under `ranking` and the load state as `ranking.reranker_state`, and each reranked result prints `Rerank: #k`. Recency-sorted searches and query-less listings are not reranked. In-process on the eval set, Jina raised MRR from 0.720 to 0.870 (SESF-100).
+
 ## [0.13.2] - 2026-10-31
 
 ### Fixed
