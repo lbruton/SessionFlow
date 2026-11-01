@@ -61,7 +61,7 @@ _Avoid_: chunk, segment
 ## Search & Retrieval
 
 **RRF (Reciprocal Rank Fusion)**:
-The merge algorithm combining vector and FTS result sets (k=60) into one ranking. FTS ranks count double for identifier-shaped queries (SESF-77).
+The merge algorithm combining vector and FTS result sets (k=60) into one ranking. Identifier tokens get double weight: in the FTS list for a one-token query, else in a third keyword list.
 _Avoid_: fusion, merge
 
 **Hybrid Search**:
