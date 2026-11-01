@@ -206,3 +206,33 @@ def test_failed_dsn_fetch_leaves_transcripts_ready(stub_rag_engine, tmp_path, mo
         assert body["startup"] == "ready" and body["milvus"] is True
         assert body["memory"]["ready"] is False
         assert "memory store not configured" in body["memory"]["error"]
+
+
+
+def test_shutdown_cancels_the_reranker_load_before_closing_server_mode(
+    stub_rag_engine, tmp_path, monkeypatch
+):
+    import asyncio
+
+    monkeypatch.setenv("SESSIONFLOW_RERANKER", "jina")
+    events = []
+    stub_rag_engine.close_server_mode = lambda *a, **kw: events.append("close_server_mode")
+    release = threading.Event()
+    started = threading.Event()
+
+    async def hanging_load():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("reranker_cancelled")
+            raise
+
+    try:
+        with _server(stub_rag_engine, tmp_path, monkeypatch, release) as (http_server, _, _):
+            monkeypatch.setattr(http_server, "_load_reranker", hanging_load)
+            release.set()
+            assert _wait_for(started.is_set)
+    finally:
+        release.set()
+    assert events[:2] == ["reranker_cancelled", "close_server_mode"]

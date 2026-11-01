@@ -1434,6 +1434,13 @@ async def lifespan(app: Starlette):
             memory_store_handle.close()
     _memory_runtime.clear()
     _memory_status.update(ready=False, error=None)
+    # The reranker load runs on mlx-embed, so it must stop before close_server_mode.
+    reranker_task = worker_tasks.get("reranker")
+    if reranker_task is not None:
+        reranker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await reranker_task
+
     provider_backfill_task = worker_tasks.get("provider_backfill")
     if provider_backfill_task is not None:
         provider_backfill_task.cancel()
