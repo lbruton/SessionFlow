@@ -5,3 +5,4 @@
 {"id": "q-cross-1", "group": "cross-project", "tool": "search_all_sessions", "query": "shared deploy script across repos", "args": {"project_root": "*"}, "expected": ["s4:1"]}
 {"id": "q-none-1", "group": "no-answer", "tool": "search_all_sessions", "query": "kubernetes helm chart for the billing service", "args": {"project_root": "/tmp/synthetic"}, "expected": []}
 {"id": "q-super-1", "group": "superseded", "tool": "search_memories", "query": "which embedding model do we use", "args": {"project": "synthetic"}, "expected": ["m-new"], "superseded": ["m-old"]}
+{"id": "q-cross-2", "group": "cross-project", "tool": "search_all_sessions", "query": "lower swappiness on the hypervisor", "args": {"project_root": "*"}, "exclude_roots": ["/x/SessionFlow"], "expected": ["s5:2"]}

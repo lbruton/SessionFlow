@@ -9,6 +9,10 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+### Added
+
+- Eval query sets take an optional `exclude_roots` list of absolute paths. `eval_retrieval.py run` drops rows whose project root (`source_project_root` for memories) is an excluded root or below it from the normal top 10, keeps their order, and fills the gap from a search of 30. The report lists the excluded roots, the rows dropped per query and group, and the queries left with fewer than 10 rows after a full fill, so sessions that quote eval queries no longer outrank cross-project answers (SESF-102).
+
 ## [0.15.0] - 2026-11-01
 
 ### Added

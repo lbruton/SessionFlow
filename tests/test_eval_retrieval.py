@@ -138,6 +138,161 @@ def test_result_ids_for_memories_have_no_score():
     assert ev.top_score("search_all_sessions", {"results": []}) is None
 
 
+# --- Excluded roots ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value,needle", [
+    ("/x/SessionFlow", "exclude_roots"),
+    ([], "exclude_roots"),
+    (["relative/path"], "absolute"),
+    ([42], "absolute"),
+])
+def test_load_queries_rejects_bad_exclude_roots(tmp_path, value, needle):
+    line = {"id": "a", "group": "cross-project", "tool": "search_all_sessions", "query": "x",
+            "args": {"project_root": "*"}, "exclude_roots": value, "expected": ["s:1"]}
+    path = tmp_path / "q.jsonl"
+    path.write_text(json.dumps(line) + "\n")
+    with pytest.raises(ValueError, match=needle):
+        ev.load_queries(path)
+
+
+class SearchClient:
+    def __init__(self, rows):
+        self.rows = rows
+        self.calls = []
+
+    def call(self, name, arguments):
+        self.calls.append((name, arguments))
+        return {"results": self.rows[:arguments["n"]]}
+
+
+def _row(session, turn, root):
+    return {"session_id": session, "turn_index": turn, "project_root": root, "distance": 0.2}
+
+
+def test_excluded_root_and_its_subfolders_are_dropped_before_scoring():
+    q = _queries()["q-cross-2"]
+    rows = [_row("eval", 1, "/x/SessionFlow"),
+            _row("wt", 3, "/x/SessionFlow/.worktrees/a"),
+            _row("old", 4, "/x/SessionFlowOld"),
+            _row("s5", 2, "/y/HomeNetwork")]
+    client = SearchClient(rows)
+    [scored] = ev.run_queries(client, [q], "hybrid")
+    assert scored["ranked"] == ["old:4", "s5:2"]
+    assert scored["rank"] == 2
+    assert scored["dropped"] == 2
+    assert [a["n"] for _, a in client.calls] == [ev.FETCH_N, ev.FETCH_N * 3]
+
+
+def test_excluded_rows_leave_at_most_fetch_n_scored():
+    q = _queries()["q-cross-2"]
+    rows = [_row("eval", i, "/x/SessionFlow") for i in range(5)]
+    rows += [_row("other", i, "/y/Other") for i in range(ev.FETCH_N + 5)]
+    [scored] = ev.run_queries(SearchClient(rows), [q], "hybrid")
+    assert scored["dropped"] == 5
+    assert scored["ranked"] == [f"other:{i}" for i in range(ev.FETCH_N)]
+
+
+def test_full_fill_with_too_few_rows_marks_the_query_short():
+    q = _queries()["q-cross-2"]
+    rows = [_row("eval", i, "/x/SessionFlow") for i in range(ev.FETCH_N * 3 - 2)]
+    rows += [_row("other", i, "/y/Other") for i in range(5)]
+    [scored] = ev.run_queries(SearchClient(rows), [q], "hybrid")
+    assert scored["ranked"] == ["other:0", "other:1"]
+    assert scored["short"] is True
+    report = ev.build_report([scored], run={})
+    assert "Short after exclusion: q-cross-2" in ev.render_markdown(report)
+
+
+def test_a_fill_that_runs_out_of_results_is_not_short():
+    q = _queries()["q-cross-2"]
+    [scored] = ev.run_queries(SearchClient([_row("eval", 1, "/x/SessionFlow"), _row("s", 1, "/y")]),
+                              [q], "hybrid")
+    assert scored["ranked"] == ["s:1"]
+    assert scored["short"] is False
+
+
+def test_no_excluded_row_keeps_the_normal_search():
+    q = _queries()["q-cross-2"]
+    client = SearchClient([_row("s5", 2, "/y/Other"), _row("s6", 1, "/y/Other")])
+    [scored] = ev.run_queries(client, [q], "hybrid")
+    assert [a["n"] for _, a in client.calls] == [ev.FETCH_N]
+    assert scored["ranked"] == ["s5:2", "s6:1"]
+    assert scored["dropped"] == 0
+
+
+def test_fill_keeps_the_order_of_the_normal_top_rows():
+    class Reordering(SearchClient):
+        def call(self, name, arguments):
+            self.calls.append((name, arguments))
+            if arguments["n"] == ev.FETCH_N:
+                return {"results": [_row("eval", 1, "/x/SessionFlow"), _row("b", 1, "/y"),
+                                    _row("a", 1, "/y")]}
+            return {"results": [_row("a", 1, "/y"), _row("c", 1, "/y"), _row("b", 1, "/y")]}
+
+    [scored] = ev.run_queries(Reordering([]), [_queries()["q-cross-2"]], "hybrid")
+    assert scored["ranked"] == ["b:1", "a:1", "c:1"]
+    assert scored["dropped"] == 1
+
+
+@pytest.mark.parametrize("root,row_root,dropped", [
+    ("/x/SessionFlow/.", "/x/SessionFlow", 1),
+    ("/x/SessionFlow/", "/x/SessionFlow/sub/../a", 1),
+    ("/", "/y/Other", 1),
+    ("/", "unknown", 0),
+    ("/", None, 0),
+])
+def test_drop_excluded_normalizes_paths(root, row_root, dropped):
+    payload = {"results": [_row("s", 1, row_root)]}
+    _, count = ev.drop_excluded("search_all_sessions", payload, [root])
+    assert count == dropped
+
+
+def test_top_score_comes_from_the_first_kept_row():
+    q = _queries()["q-cross-2"]
+    rows = [{**_row("eval", 1, "/x/SessionFlow"), "distance": 0.1}, _row("s5", 2, "/y/Other")]
+    [scored] = ev.run_queries(SearchClient(rows), [q], "hybrid")
+    assert scored["top_score"] == pytest.approx(0.8)
+
+
+def test_memory_queries_exclude_by_source_project_root():
+    q = {"id": "m", "group": "paraphrase", "tool": "search_memories", "query": "x",
+         "args": {"project": "*"}, "exclude_roots": ["/x/SessionFlow"], "expected": ["m-b"]}
+    rows = [{"memory_id": "m-a", "source_project_root": "/x/SessionFlow"},
+            {"memory_id": "m-b", "source_project_root": "/y/Other"},
+            {"memory_id": "m-c", "source_project_root": None}]
+    [scored] = ev.run_queries(SearchClient(rows), [q], "hybrid")
+    assert scored["ranked"] == ["m-b", "m-c"]
+    assert scored["dropped"] == 1
+
+
+def test_queries_without_exclude_roots_run_unchanged():
+    q = _queries()["q-cross-1"]
+    client = SearchClient([_row("eval", 1, "/x/SessionFlow"), _row("s4", 1, "/y/Other")])
+    [scored] = ev.run_queries(client, [q], "hybrid")
+    assert client.calls[0][1]["n"] == ev.FETCH_N
+    assert scored["ranked"] == ["eval:1", "s4:1"]
+    assert "dropped" not in scored
+
+
+def test_report_lists_excluded_roots_and_dropped_rows(tmp_path):
+    qs = _queries()
+    client = SearchClient([_row("eval", 1, "/x/SessionFlow"), _row("s5", 2, "/y/Other")])
+
+    class Health(SearchClient):
+        def health(self):
+            return {"version": "0", "ranking": {}}
+
+    client = Health(client.rows)
+    report = ev.evaluate(client, [qs["q-cross-1"], qs["q-cross-2"]], sort_by="hybrid", env={},
+                         queries_file="fixture")
+    assert report["run"]["exclude_roots"] == ["/x/SessionFlow"]
+    assert report["groups"]["cross-project"]["dropped"] == 1
+    md = ev.render_markdown(report)
+    assert "- exclude_roots: /x/SessionFlow" in md
+    assert "Dropped rows: q-cross-2 1" in md
+
+
 # --- Ranking settings ----------------------------------------------------------
 
 
