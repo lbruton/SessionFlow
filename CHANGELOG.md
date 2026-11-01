@@ -13,7 +13,7 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ### Fixed
 
-- `add_memory` with a `topic_key` that matches a superseded record sets the record's status from the new write, so the replacement shows in default reads (SESF-103).
+- `add_memory` with a `topic_key` that matches a superseded record and different text sets the record's status from the new write, so the replacement shows in default reads. Identical text stays deduplicated and superseded (SESF-103).
 
 ## [0.14.0] - 2026-11-01
 
