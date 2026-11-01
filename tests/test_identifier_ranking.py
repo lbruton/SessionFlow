@@ -91,7 +91,7 @@ def test_non_identifier_queries(query):
 def _patch_search(monkeypatch) -> dict:
     seen: dict = {}
 
-    def _spy(vector_results, fts_results, n, k=60, fts_weight=1.0):
+    def _spy(vector_results, fts_results, n, k=60, fts_weight=1.0, **kw):
         seen["fts_weight"] = fts_weight
         return []
 

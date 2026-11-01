@@ -44,7 +44,14 @@ from collection_specs import (
     memories_spec,
     sessions_spec,
 )
-from fts_hybrid import FTSIndex, fts_backfill_required, rrf_merge
+from fts_hybrid import (
+    IDENTIFIER_FTS_WEIGHT,
+    FTSIndex,
+    fts_backfill_required,
+    identifier_search_query,
+    is_identifier_query,
+    rrf_merge,
+)
 from embedding_control import (
     EmbeddingIdentity,
     get_embedding_budget,
@@ -72,10 +79,6 @@ TEMPORAL_RECENCY_WEIGHT_DEFAULT = 0.7
 RECENCY_DECAY_DAYS_DEFAULT = 7
 MISSING_TIMESTAMP_RECENCY = 0.5
 _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_score")
-# FTS weight in RRF for identifier-shaped queries. Rare identifiers
-# are absent from the vector top-k, so at equal weight unrelated vector hits
-# tie with exact keyword hits. 2.0 ranks exact identifier matches first.
-IDENTIFIER_FTS_WEIGHT = 2.0
 
 logger = logging.getLogger("sessionflow.milvus")
 
@@ -1475,11 +1478,8 @@ def _build_milvus_filter(session_id: Optional[str], git_branch: Optional[str],
 
 
 def _is_identifier_query(query: Optional[str]) -> bool:
-    """True for a single token with a digit or ``_-.``: hostnames, ticket IDs, symbols."""
-    q = (query or "").strip()
-    if not q or any(c.isspace() for c in q):
-        return False
-    return any(c.isdigit() or c in "_-." for c in q)
+    """True for a single identifier token; see ``fts_hybrid.is_identifier_query``."""
+    return is_identifier_query(query)
 
 
 _TEMPORAL_CUES = re.compile(
@@ -1625,6 +1625,10 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         token = _issue_id_containment_token(issue_id)
         fts_filters["issue_ids"] = ("like", f"%,{token},%")
     fts_results = _fts.search(query, n=fetch_n, filters=fts_filters or None, db_path=db_path)
+    id_query = identifier_search_query(query)
+    id_results = _fts.search(
+        id_query, n=fetch_n, filters=fts_filters or None, db_path=db_path,
+    ) if id_query else []
 
     # --- Merge with RRF ---
     # Route *every* candidate set through rrf_merge (it handles an empty list
@@ -1634,9 +1638,11 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
     fts_weight = IDENTIFIER_FTS_WEIGHT if _is_identifier_query(query) else 1.0
     # Collapse the whole fused pool before the fetch_n cut, so sibling passages
     # of one turn cannot push other turns out of it.
-    pool = len(vector_results) + len(fts_results)
-    merged = _collapse_passages(
-        rrf_merge(vector_results, fts_results, n=pool, fts_weight=fts_weight))[:fetch_n]
+    pool = len(vector_results) + len(fts_results) + len(id_results)
+    merged = _collapse_passages(rrf_merge(
+        vector_results, fts_results, n=pool, fts_weight=fts_weight,
+        extra_keyword_lists=[(id_results, IDENTIFIER_FTS_WEIGHT)],
+    ))[:fetch_n]
 
     if not merged:
         return []

@@ -549,7 +549,12 @@ class MemoryService:
     async def _search_once(self, query: str, f: MemoryFilters, n: int, fetch: int,
                            sort_by: str) -> tuple[List[Dict[str, Any]], List[str]]:
         import rag_engine
-        from fts_hybrid import rrf_merge
+        from fts_hybrid import (
+            IDENTIFIER_FTS_WEIGHT,
+            identifier_search_query,
+            is_identifier_query,
+            rrf_merge,
+        )
 
         channel_filters = self._channel_filters(f)
         channels: List[str] = []
@@ -567,8 +572,16 @@ class MemoryService:
             channels.append("fts")
         except Exception:  # noqa: BLE001 - a broken FTS file is rebuilt; vectors still answer
             fts_hits = []
+        id_hits: List[Dict[str, Any]] = []
+        id_query = identifier_search_query(query)
+        if id_query and "fts" in channels:
+            try:
+                id_hits = await self.index.fts_search(id_query, filters=channel_filters,
+                                                      limit=fetch)
+            except Exception:  # noqa: BLE001 - the main keyword list still answers
+                id_hits = []
 
-        ids = {h["memory_id"] for h in vector_hits} | {h["memory_id"] for h in fts_hits}
+        ids = {h["memory_id"] for h in [*vector_hits, *fts_hits, *id_hits]}
         rows = await run_db(self.store.get_many, sorted(ids)) if ids else {}
         generation = (await run_db(self.store.index_meta))["generation"] if vector_hits else None
 
@@ -582,7 +595,12 @@ class MemoryService:
 
         valid_vector = [{"doc_id": h["memory_id"]} for h in vector_hits if keep(h, True)]
         valid_fts = [{"doc_id": h["memory_id"]} for h in fts_hits if keep(h, False)]
-        merged = rrf_merge(valid_vector, valid_fts, n=len(valid_vector) + len(valid_fts))
+        valid_id = [{"doc_id": h["memory_id"]} for h in id_hits if keep(h, False)]
+        merged = rrf_merge(
+            valid_vector, valid_fts, n=len(valid_vector) + len(valid_fts) + len(valid_id),
+            fts_weight=IDENTIFIER_FTS_WEIGHT if is_identifier_query(query) else 1.0,
+            extra_keyword_lists=[(valid_id, IDENTIFIER_FTS_WEIGHT)],
+        )
         scored = [{"memory_id": m["doc_id"], "_rrf_score": m["_rrf_score"],
                    "created_at": rows[m["doc_id"]]["created_at"].isoformat()} for m in merged]
         ranked = rag_engine._rank_results(scored, sort_by, n, timestamp_key="created_at",

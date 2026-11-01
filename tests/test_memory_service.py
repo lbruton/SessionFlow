@@ -32,6 +32,7 @@ class StubIndex:
     def __init__(self):
         self.vector_hits: list[dict] = []
         self.fts_hits: list[dict] = []
+        self.fts_by_query: dict[str, list[dict]] = {}
         self.vector_error: Exception | None = None
         self.lag = False
         self.applied: list[str] = []
@@ -54,7 +55,7 @@ class StubIndex:
 
     async def fts_search(self, query, *, filters, limit):
         self.calls.append(("fts", limit))
-        return self.fts_hits[:limit]
+        return self.fts_by_query.get(query, self.fts_hits)[:limit]
 
     def lagging(self):
         return self.lag
@@ -329,6 +330,33 @@ def test_model_mismatch_falls_back_to_keyword_search(svc, index):
     out = asyncio.run(svc.search("keyword", {"project": "sessionflow"}, 5))
     assert out["channels"] == ["fts"]
     assert [r["memory_id"] for r in out["results"]] == [written["memory_id"]]
+
+
+def test_multi_word_identifier_query_ranks_the_identifier_memory_first(svc, index):
+    query = "galenanswan100 East Houston port names Ken Nutanix"
+    near = _add(svc, "Galena Nutanix cluster notes")
+    other = _add(svc, "East Houston port names")
+    host = _add(svc, "galenanswan100 capture details")
+    index.vector_hits = [_hit(near), _hit(other)]
+    index.fts_by_query = {query: [_hit(near), _hit(other), _hit(host)],
+                          "galenanswan100": [_hit(host)]}
+
+    out = asyncio.run(svc.search(query, {"project": "sessionflow"}, 3, sort_by="relevance"))
+
+    assert out["results"][0]["memory_id"] == host["memory_id"]
+
+
+def test_single_token_identifier_query_weights_memory_keyword_hits(svc, index):
+    near = _add(svc, "Galena Nutanix cluster notes")
+    host = _add(svc, "galenanswan100 capture details")
+    index.vector_hits = [_hit(near)]
+    index.fts_hits = [_hit(host)]
+
+    out = asyncio.run(svc.search("galenanswan100", {"project": "sessionflow"}, 2,
+                                 sort_by="relevance"))
+
+    assert [r["memory_id"] for r in out["results"]] == [host["memory_id"], near["memory_id"]]
+    assert [kind for kind, _ in index.calls] == ["vector", "fts"]
 
 
 def test_canonical_filters_are_rechecked(svc, index):
