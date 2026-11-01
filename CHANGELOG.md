@@ -14,7 +14,7 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 ### Fixed
 
 - Reverted the per-turn rank fusion of 0.13.1. Adding a turn's best keyword rank and best vector rank favored long turns, whose many passages place a row in both channels, over short turns that match one channel at rank 1; overall eval MRR fell from 0.790 to 0.738. Search again fuses rows by doc_id and collapses passages after fusion (SESF-99).
-- The HNSW `ef` search parameter is at least the vector search limit, because Milvus rejects a search whose limit exceeds `ef`. Searches with `n` above 42 failed (SESF-99).
+- `search_all_sessions` and `search_session` with `n` above 42 failed on Milvus Standalone, because HNSW rejects a search whose limit exceeds `ef`. The `ef` search parameter is at least the vector search limit (SESF-99).
 
 ## [0.13.1] - 2026-10-31
 
