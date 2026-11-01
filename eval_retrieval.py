@@ -269,6 +269,9 @@ def render_markdown(report: dict, title: str = "Retrieval eval") -> str:
     dropped = [q for q in report["queries"] if q.get("dropped")]
     if dropped:
         lines += ["", "Dropped rows: " + ", ".join(f"{q['id']} {q['dropped']}" for q in dropped)]
+    short = [q["id"] for q in report["queries"] if q.get("short")]
+    if short:
+        lines += ["", "Short after exclusion: " + ", ".join(short)]
     return "\n".join(lines) + "\n"
 
 
@@ -465,13 +468,14 @@ def run_queries(client, queries: list[dict], sort_by: str) -> list[dict]:
 
     A query with ``exclude_roots`` drops matching rows from the normal ``FETCH_N`` and
     fills the gap from a ``FETCH_N * 3`` search. The fill comes second because ``n``
-    changes the server's candidate pool and so the order of the top rows.
+    changes the server's candidate pool and so the order of the top rows. ``short``
+    marks a query whose full fill search still left fewer than ``FETCH_N`` rows.
     """
     scored = []
     for q in queries:
         roots = q.get("exclude_roots")
         args = {**q.get("args", {}), "query": q["query"], "n": FETCH_N, "sort_by": sort_by}
-        dropped = 0
+        dropped, short = 0, False
         try:
             payload = client.call(q["tool"], args)
             if roots:
@@ -479,12 +483,15 @@ def run_queries(client, queries: list[dict], sort_by: str) -> list[dict]:
                 if dropped:
                     wider = client.call(q["tool"], {**args, "n": FETCH_N * 3})
                     payload, _ = drop_excluded(q["tool"], payload, roots, fill=wider)
+                    short = (len(payload["results"]) < FETCH_N
+                             and len(wider.get("results") or []) >= FETCH_N * 3)
             row = score_query(q, result_ids(q["tool"], payload), top_score(q["tool"], payload))
         except EvalError as exc:
             row = score_query(q, [])
             row["error"] = str(exc)
         if roots:
             row["dropped"] = dropped
+            row["short"] = short
         scored.append(row)
     return scored
 

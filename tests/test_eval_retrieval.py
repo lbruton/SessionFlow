@@ -193,6 +193,25 @@ def test_excluded_rows_leave_at_most_fetch_n_scored():
     assert scored["ranked"] == [f"other:{i}" for i in range(ev.FETCH_N)]
 
 
+def test_full_fill_with_too_few_rows_marks_the_query_short():
+    q = _queries()["q-cross-2"]
+    rows = [_row("eval", i, "/x/SessionFlow") for i in range(ev.FETCH_N * 3 - 2)]
+    rows += [_row("other", i, "/y/Other") for i in range(5)]
+    [scored] = ev.run_queries(SearchClient(rows), [q], "hybrid")
+    assert scored["ranked"] == ["other:0", "other:1"]
+    assert scored["short"] is True
+    report = ev.build_report([scored], run={})
+    assert "Short after exclusion: q-cross-2" in ev.render_markdown(report)
+
+
+def test_a_fill_that_runs_out_of_results_is_not_short():
+    q = _queries()["q-cross-2"]
+    [scored] = ev.run_queries(SearchClient([_row("eval", 1, "/x/SessionFlow"), _row("s", 1, "/y")]),
+                              [q], "hybrid")
+    assert scored["ranked"] == ["s:1"]
+    assert scored["short"] is False
+
+
 def test_no_excluded_row_keeps_the_normal_search():
     q = _queries()["q-cross-2"]
     client = SearchClient([_row("s5", 2, "/y/Other"), _row("s6", 1, "/y/Other")])
