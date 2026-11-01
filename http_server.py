@@ -1297,20 +1297,18 @@ def _blocking_startup(db_path: str) -> None:
         print(f"[HTTP] Warning: Could not init server mode: {e}", file=sys.stderr)
 
 
-async def _load_reranker(executor: concurrent.futures.Executor) -> None:
-    """Download the reranker snapshot on ``executor``, then load it on the ``mlx-embed`` thread.
+async def _load_reranker() -> None:
+    """Load the cached reranker snapshot on the ``mlx-embed`` thread.
 
     Search skips reranking until the load finishes, so startup does not wait for it.
     """
     kind = reranker.settings()["reranker"]
-    loop = asyncio.get_running_loop()
-    if not await loop.run_in_executor(executor, reranker.fetch, kind):
-        return
+    reranker.begin(kind)
     mlx_executor = rag_engine._embed_executor
     if mlx_executor is None:
         reranker.fail(kind, RuntimeError("the mlx-embed executor is not running"))
         return
-    await loop.run_in_executor(mlx_executor, reranker.load, kind)
+    await asyncio.get_running_loop().run_in_executor(mlx_executor, reranker.load, kind)
 
 
 async def _background_startup(
@@ -1329,7 +1327,7 @@ async def _background_startup(
     await loop.run_in_executor(executor, _blocking_startup, db_path)
 
     if reranker.settings()["reranker"] != "off":
-        tasks["reranker"] = asyncio.create_task(_load_reranker(executor))
+        tasks["reranker"] = asyncio.create_task(_load_reranker())
 
     _ensure_backfill_drain_primitives()
     tasks["backfill_drain"] = asyncio.create_task(_backfill_drain_worker())

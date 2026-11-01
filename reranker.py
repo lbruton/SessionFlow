@@ -107,30 +107,27 @@ def fail(kind: str, exc: BaseException) -> None:
         _state.update(kind=kind, status=f"failed: {reason}", scorer=None)
 
 
-def _snapshot(repo: str, revision: str) -> str:
+_REPOS = {"jina": (JINA_REPO, JINA_REVISION), "qwen3": (QWEN3_REPO, QWEN3_REVISION)}
+
+
+def _snapshot(kind: str) -> str:
+    """Return the cached snapshot folder; the server never downloads (``download`` does)."""
     from huggingface_hub import snapshot_download
 
+    repo, revision = _REPOS[kind]
     try:
         return snapshot_download(repo, revision=revision, local_files_only=True)
-    except Exception:
-        return snapshot_download(repo, revision=revision)
-
-
-def fetch(kind: str) -> bool:
-    """Download the pinned snapshot for ``kind`` if it is missing; False when that fails.
-
-    Runs off the ``mlx-embed`` thread, because a download can take minutes.
-    """
-    repos = {"jina": (JINA_REPO, JINA_REVISION), "qwen3": (QWEN3_REPO, QWEN3_REVISION)}
-    if kind not in repos:
-        return False
-    begin(kind)
-    try:
-        _snapshot(*repos[kind])
     except Exception as exc:
-        fail(kind, exc)
-        return False
-    return True
+        raise FileNotFoundError(
+            f"{repo} is not downloaded; run ./download-model.sh {kind}") from exc
+
+
+def download(kind: str) -> str:
+    """Download the pinned snapshot for ``kind`` and return its folder (``download-model.sh``)."""
+    from huggingface_hub import snapshot_download
+
+    repo, revision = _REPOS[kind]
+    return snapshot_download(repo, revision=revision)
 
 
 def load(kind: str) -> None:
@@ -251,7 +248,7 @@ class _Qwen3Scorer:
 
 
 def _build_qwen3(max_tokens: int) -> _Qwen3Scorer:
-    return _Qwen3Scorer(_snapshot(QWEN3_REPO, QWEN3_REVISION), max_tokens)
+    return _Qwen3Scorer(_snapshot("qwen3"), max_tokens)
 
 
 def _load_module(name: str, path: Path, aliases: Optional[Dict[str, object]] = None):
@@ -276,7 +273,7 @@ def _load_module(name: str, path: Path, aliases: Optional[Dict[str, object]] = N
 
 
 def _build_jina(max_tokens: int) -> Scorer:
-    folder = Path(_snapshot(JINA_REPO, JINA_REVISION))
+    folder = Path(_snapshot("jina"))
     modeling = _load_module("sessionflow_jina_modeling", folder / "modeling.py")
     # The snapshot's rerank.py imports its sibling as the top-level name "modeling".
     rerank_module = _load_module("sessionflow_jina_rerank", folder / "rerank.py",

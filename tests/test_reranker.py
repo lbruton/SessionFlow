@@ -295,3 +295,19 @@ def test_jina_loads_from_its_snapshot_and_ranks_the_answer_first():
     scores = scorer("why did Milvus reject the search limit", docs)
     assert len(scores) == 2
     assert scores[1] > scores[0]
+
+
+def test_missing_snapshot_names_the_download_command(monkeypatch):
+    import huggingface_hub
+
+    calls = []
+
+    def _offline(repo, revision=None, local_files_only=False, **kw):
+        calls.append(local_files_only)
+        raise FileNotFoundError("not in cache")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _offline)
+    reranker.load("qwen3")
+    assert reranker.status().startswith("failed: ")
+    assert "./download-model.sh qwen3" in reranker.status()
+    assert calls == [True]

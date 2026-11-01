@@ -4,8 +4,8 @@
 # Usage:
 #   ./download-model.sh [model_name]
 #
-# model_name can be "modernbert" (default) or "embeddinggemma".
-# Also respects SESSIONFLOW_MODEL env var.
+# model_name is an embedding model, "embeddinggemma" (default) or "modernbert",
+# or a reranker, "jina" or "qwen3". Also respects SESSIONFLOW_MODEL env var.
 
 set -euo pipefail
 
@@ -14,6 +14,16 @@ PYTHON="${SCRIPT_DIR}/venv/bin/python"
 
 MODEL_NAME="${1:-${SESSIONFLOW_MODEL:-embeddinggemma}}"
 MODEL_NAME=$(echo "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')
+
+# The server never downloads, so the reranker snapshot is fetched here.
+case "$MODEL_NAME" in
+    jina|qwen3)
+        echo "Downloading the $MODEL_NAME reranker into ~/.cache/huggingface/hub/..."
+        PYTHONPATH="$SCRIPT_DIR" "$PYTHON" -c "import reranker; print('  ' + reranker.download('$MODEL_NAME'))"
+        echo "  Download complete. Set SESSIONFLOW_RERANKER=$MODEL_NAME for the server."
+        exit 0
+        ;;
+esac
 
 case "$MODEL_NAME" in
     modernbert)
@@ -28,7 +38,7 @@ case "$MODEL_NAME" in
         ;;
     *)
         echo "Unknown model: $MODEL_NAME"
-        echo "Valid options: modernbert, embeddinggemma"
+        echo "Valid options: embeddinggemma, modernbert, jina, qwen3"
         exit 1
         ;;
 esac

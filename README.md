@@ -69,7 +69,7 @@ Restart Claude Code after setup to load the MCP server.
 | `SESSIONFLOW_WATCH` | `true` | Turn the transcript file watcher on or off. |
 | `SESSIONFLOW_URL` | `http://127.0.0.1:7102` | Server URL that the hooks call. |
 | `SESSIONFLOW_SEARCH_LOG` | off | Set to `1` to log each search and follow-up call to `~/.sessionflow/search-log.jsonl`. Queries are redacted. |
-| `SESSIONFLOW_RERANKER` | `off` | Reranks the top results of a search with a query: `jina` (jina-reranker-v3.5-mlx) or `qwen3` (Qwen3-Reranker-0.6B). The server downloads the pinned model at startup. The Jina model is licensed CC BY-NC 4.0, so do not use it commercially. |
+| `SESSIONFLOW_RERANKER` | `off` | Reranks the top results of a search with a query: `jina` or `qwen3`. See [Reranking](#reranking). |
 | `SESSIONFLOW_RERANK_TOP` | `10` | Number of top results the reranker reorders. |
 | `SESSIONFLOW_RERANK_MAX_TOKENS` | `512` | Tokens of each result the reranker reads. |
 
@@ -96,6 +96,35 @@ Several harnesses can start at the same time, and their `SessionStart` hooks the
 ```
 
 The `start`, `stop`, `restart` and `status` commands work the same with or without the LaunchAgent. `setup.sh` offers to install it. Set `SESSIONFLOW_INSTALL_AGENT=1` to install it without a prompt.
+
+### Reranking
+
+A reranker reads the top results of a search and reorders them by how well each one answers the query. It is off by default, because it adds a second model of about 1.2 GB. Each search with a query also takes about 2 to 3 seconds longer. Searches without a query, such as the session-start listing, never use it.
+
+On the project's retrieval eval (48 queries), reranking the top 10 results raised MRR from 0.720:
+
+| `SESSIONFLOW_RERANKER` | Model | MRR | License |
+|---|---|---|---|
+| `jina` | jina-reranker-v3.5-mlx | 0.870 | CC BY-NC 4.0 |
+| `qwen3` | Qwen3-Reranker-0.6B | 0.808 | Apache 2.0 |
+
+`jina` ranks best. `qwen3` is a little faster. To turn on `jina`, download it, then set the variable for the server:
+
+```bash
+./download-model.sh jina
+SESSIONFLOW_RERANKER=jina ./sessionflow-server.sh restart
+```
+
+launchd does not pass shell variables, so under the LaunchAgent add the variable to the plist and reload it:
+
+```bash
+PLIST=~/Library/LaunchAgents/cc.lbruton.sessionflow.plist
+/usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:SESSIONFLOW_RERANKER string jina" "$PLIST"
+launchctl bootout "gui/$(id -u)/cc.lbruton.sessionflow"
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+```
+
+To switch models, run `./download-model.sh qwen3`, change `Add` to `Set` with the new value, and reload. `install-agent` rewrites the plist, so add the variable again after it. `curl -s http://127.0.0.1:7102/health` reports the state in `ranking.reranker_state`. It is `ready`, `loading`, or `failed:` with the reason. Each reranked search result shows `Rerank: #k`.
 
 ### Retrieval eval
 
