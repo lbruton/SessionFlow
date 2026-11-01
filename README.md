@@ -69,7 +69,7 @@ Restart Claude Code after setup to load the MCP server.
 | `SESSIONFLOW_WATCH` | `true` | Turn the transcript file watcher on or off. |
 | `SESSIONFLOW_URL` | `http://127.0.0.1:7102` | Server URL that the hooks call. |
 | `SESSIONFLOW_SEARCH_LOG` | off | Set to `1` to log each search and follow-up call to `~/.sessionflow/search-log.jsonl`. Queries are redacted. |
-| `SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT` | `0.7` | Recency weight of a search whose query asks for the latest state, with words such as "latest", "most recent" or "now". Other searches use `SESSIONFLOW_RECENCY_WEIGHT`. |
+| `SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT` | `0.7` | Recency weight of a hybrid search whose query asks for the latest state, with words such as "latest", "most recent" or "now". Other hybrid searches use `SESSIONFLOW_RECENCY_WEIGHT`. |
 | `SESSIONFLOW_RERANKER` | `qwen3` | Reranks the top results of a search with a query: `qwen3`, `jina` or `off`. See [Reranking](#reranking). |
 | `SESSIONFLOW_RERANK_TOP` | `10` | Number of top results the reranker reorders. |
 | `SESSIONFLOW_RERANK_MAX_TOKENS` | `512` | Tokens of each result the reranker reads. |

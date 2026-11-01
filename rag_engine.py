@@ -1493,6 +1493,12 @@ def is_temporal_query(query: Optional[str]) -> bool:
     """Return True when the query asks for the latest state, such as "latest" or "now".
 
     Cues match whole words only, so "nowhere" and "currency" do not count.
+
+    Args:
+        query: The search query; None counts as an empty query.
+
+    Returns:
+        True when the query holds a temporal cue, else False.
     """
     return bool(_TEMPORAL_CUES.search(query or ""))
 

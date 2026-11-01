@@ -149,7 +149,8 @@ def load(kind: str) -> None:
     log.info("Reranker %s ready", kind)
 
 
-def rerank(query: str, rows: List[Dict], *, lock, fuse: bool = False) -> List[Dict]:
+def rerank(query: str, rows: List[Dict], *, lock: threading.Lock,
+           fuse: bool = False) -> List[Dict]:
     """Reorder the first ``SESSIONFLOW_RERANK_TOP`` rows; rows past them keep their order.
 
     ``jina`` sorts those rows by score. ``qwen3``, and any kind with ``fuse``, sorts
@@ -162,6 +163,10 @@ def rerank(query: str, rows: List[Dict], *, lock, fuse: bool = False) -> List[Di
         rows: Ranked search rows with ``content``.
         lock: Held while the scorer runs MLX.
         fuse: Keep the incoming order as a signal, for an order the scorer cannot see.
+
+    Returns:
+        The reranked top rows followed by the rest in their incoming order, or
+        ``rows`` unchanged when scoring fails.
     """
     scorer = _state["scorer"]
     if not is_ready() or not rows or scorer is None:
