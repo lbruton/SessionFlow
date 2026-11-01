@@ -133,6 +133,35 @@ def test_qwen3_fuses_hybrid_and_reranker_ranks(stub_search, monkeypatch):
     assert {r["doc_id"]: r["rerank_rank"] for r in rows} == rerank
 
 
+def test_retrieval_covers_the_rerank_count_when_n_is_small(stub_search, monkeypatch):
+    seen = {}
+
+    def _fts(*a, n=10, **kw):
+        seen["fts_n"] = n
+        return _rows(15)
+
+    monkeypatch.setattr(rag_engine._fts, "search", _fts)
+    monkeypatch.setenv("SESSIONFLOW_RERANK_TOP", "10")
+    scorer = _Scorer()
+    reranker.install("jina", scorer)
+    rows = _search(n=1)
+    assert seen["fts_n"] >= 10
+    assert len(scorer.calls[0][1]) == 10
+    assert _ids(rows) == ["d9"]
+
+
+def test_retrieval_pool_is_unchanged_when_reranking_is_off(stub_search, monkeypatch):
+    seen = {}
+
+    def _fts(*a, n=10, **kw):
+        seen["fts_n"] = n
+        return _rows(15)
+
+    monkeypatch.setattr(rag_engine._fts, "search", _fts)
+    _search(n=1)
+    assert seen["fts_n"] == 3
+
+
 def test_reranks_more_candidates_than_n(stub_search, monkeypatch):
     monkeypatch.setenv("SESSIONFLOW_RERANK_TOP", "4")
     scorer = _Scorer()

@@ -1535,8 +1535,11 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
             issue_id=issue_id, db_path=db_path,
         )
 
-    # Expanded candidate pool for both engines
-    fetch_n = n * 3
+    # Expanded candidate pool for both engines. With the reranker on, the pool
+    # covers its row count too, so a small n still gives it every candidate.
+    rerank = sort_by != "recency" and reranker.is_ready()
+    keep = max(n, reranker.settings()["rerank_top"]) if rerank else n
+    fetch_n = keep * 3
 
     # --- Vector search ---
     query_embedding = embed_texts([query], is_query=True)[0]
@@ -1624,8 +1627,6 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         r.setdefault("source_class", merge_defaults["source_class"])
         r.setdefault("logical_session_id", r.get("session_id", ""))
 
-    rerank = sort_by != "recency" and reranker.is_ready()
-    keep = max(n, reranker.settings()["rerank_top"]) if rerank else n
     merged = _rank_results(merged, sort_by, keep)
     if rerank:
         merged = reranker.rerank(query, merged, lock=_mlx_eval_lock)
