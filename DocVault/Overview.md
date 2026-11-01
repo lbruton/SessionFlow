@@ -109,4 +109,3 @@ Turn text is scanned at ingestion for tracker issue tokens (`[A-Z][A-Z0-9]+-\d+`
 _(none yet — add deep dives as documentation lands)_
 
 Pre-Plane issues: [[../../Archive/Issues-Pre-Plane/SessionFlow/SessionFlow|Archive/Issues-Pre-Plane/SessionFlow]].
-SESF-1 probe — simply here.
