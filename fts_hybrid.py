@@ -25,7 +25,7 @@ import sqlite3
 import string
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Set, Union
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 logger = logging.getLogger("fts-hybrid")
 
@@ -60,6 +60,13 @@ those to was we were what when where which who whom why will with would you your
 _IDENTIFIER_CHARS = frozenset("_-.")
 _IDENTIFIER_MIN_LEN = 4
 _WORD_RE = re.compile(r"\w+")
+# Commas and semicolons separate list items ("SESF-57,SESF-58"); other punctuation
+# stays inside a chunk, where it can belong to an identifier.
+_CHUNK_SPLIT_RE = re.compile(r"[\s,;]+")
+
+# RRF weight of keyword ranks for identifiers. Rare identifiers are absent from the
+# vector top-k, so at equal weight unrelated vector hits tie with exact keyword hits.
+IDENTIFIER_FTS_WEIGHT = 2.0
 
 
 def is_identifier_token(token: str) -> bool:
@@ -67,6 +74,62 @@ def is_identifier_token(token: str) -> bool:
     return len(token) >= _IDENTIFIER_MIN_LEN and any(
         c.isdigit() or c in _IDENTIFIER_CHARS for c in token
     )
+
+
+def _chunks(query: Optional[str]) -> List[str]:
+    """Split ``query`` on whitespace, commas and semicolons; strip edge punctuation."""
+    stripped = (c.strip(string.punctuation) for c in _CHUNK_SPLIT_RE.split(query or ""))
+    return [c for c in stripped if c]
+
+
+def identifier_tokens(query: Optional[str]) -> List[str]:
+    """Return the identifier tokens of a query.
+
+    Args:
+        query: The search query; None counts as empty.
+
+    Returns:
+        The tokens that pass ``is_identifier_token``, in query order, with edge
+        punctuation stripped. Repeats that differ only in case count once.
+    """
+    tokens: List[str] = []
+    seen: Set[str] = set()
+    for token in _chunks(query):
+        if is_identifier_token(token) and token.lower() not in seen:
+            seen.add(token.lower())
+            tokens.append(token)
+    return tokens
+
+
+def is_identifier_query(query: Optional[str]) -> bool:
+    """Return True when a query is one identifier token.
+
+    Args:
+        query: The search query; None counts as empty.
+
+    Returns:
+        True for a single hostname, ticket ID or symbol, else False.
+    """
+    chunks = _chunks(query)
+    return len(chunks) == 1 and is_identifier_token(chunks[0])
+
+
+def identifier_search_query(query: Optional[str]) -> str:
+    """Return the FTS query for the identifier list of a multi-word query.
+
+    ``build_match_query`` keeps each identifier token a quoted phrase.
+
+    Args:
+        query: The search query; None counts as empty.
+
+    Returns:
+        The identifier tokens joined by spaces. Empty for a single-token query,
+        whose main keyword list already takes ``IDENTIFIER_FTS_WEIGHT``, and for
+        a query without identifier tokens.
+    """
+    if is_identifier_query(query):
+        return ""
+    return " ".join(identifier_tokens(query))
 
 
 def build_match_query(query: Optional[str]) -> str:
@@ -78,8 +141,7 @@ def build_match_query(query: Optional[str]) -> str:
     """
     terms: List[str] = []
     seen: Set[str] = set()
-    for chunk in (query or "").split():
-        chunk = chunk.strip(string.punctuation)
+    for chunk in _chunks(query):
         words = [chunk] if is_identifier_token(chunk) else _WORD_RE.findall(chunk)
         for word in words:
             key = word.lower()
@@ -434,26 +496,30 @@ class FTSIndex:
 
 
 def rrf_merge(vector_results: List[Dict], fts_results: List[Dict],
-              n: int, k: int = 60, fts_weight: float = 1.0) -> List[Dict]:
-    """Reciprocal Rank Fusion: merge two ranked result lists.
+              n: int, k: int = 60, fts_weight: float = 1.0,
+              extra_keyword_lists: Sequence[Tuple[List[Dict], float]] = ()) -> List[Dict]:
+    """Reciprocal Rank Fusion: merge ranked result lists.
 
-    score(doc) = sum(w / (k + rank)) across both lists, where w is 1.0 for the
-    vector list and ``fts_weight`` for the FTS list. k=60 is the standard
-    constant from the original RRF paper. Results are keyed by doc_id (falls
-    back to enumeration index).
+    score(doc) = sum(w / (k + rank)) across the lists, where w is 1.0 for the
+    vector list, ``fts_weight`` for the FTS list and the paired weight for each
+    extra keyword list. k=60 is the standard constant from the original RRF
+    paper. Results are keyed by doc_id (falls back to enumeration index).
 
     Args:
         vector_results: Vector hits, best first.
         fts_results: FTS hits, best first.
         n: Number of merged rows to return.
         k: RRF rank constant.
-        fts_weight: Multiplier on FTS contributions. ``search`` raises it for
-            identifier-shaped queries, where only FTS finds exact matches.
+        fts_weight: Multiplier on FTS contributions. Search raises it for a
+            single-token identifier query (``is_identifier_query``).
+        extra_keyword_lists: ``(hits, weight)`` pairs of further keyword lists,
+            such as the identifier list (``identifier_search_query``).
 
     Returns:
-        Merged rows, best first, each with ``_rrf_score``. Rows found by FTS
-        also carry ``keyword_rank`` (1-based FTS position). A row in both lists
-        keeps the vector row's fields, including its ``distance``.
+        Merged rows, best first, each with ``_rrf_score``. Rows found by a
+        keyword list carry ``keyword_rank``: the 1-based position in the FTS
+        list, else in the first extra list that holds the row. A row in several
+        lists keeps the vector row's fields, including its ``distance``.
     """
     scores: Dict[str, float] = {}
     docs: Dict[str, Dict] = {}
@@ -465,12 +531,13 @@ def rrf_merge(vector_results: List[Dict], fts_results: List[Dict],
         if key not in docs:
             docs[key] = r
 
-    for rank, r in enumerate(fts_results):
-        key = r.get("doc_id", str(rank))
-        scores[key] = scores.get(key, 0) + fts_weight / (k + rank + 1)
-        keyword_ranks.setdefault(key, rank + 1)
-        if key not in docs:
-            docs[key] = r
+    for hits, weight in [(fts_results, fts_weight), *extra_keyword_lists]:
+        for rank, r in enumerate(hits):
+            key = r.get("doc_id", str(rank))
+            scores[key] = scores.get(key, 0) + weight / (k + rank + 1)
+            keyword_ranks.setdefault(key, rank + 1)
+            if key not in docs:
+                docs[key] = r
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 

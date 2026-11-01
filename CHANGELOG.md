@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-01
+
+### Fixed
+
+- Identifier boost for multi-word queries. When a query names an identifier (a token of 4 or more characters with a digit or `_-.`, such as a hostname or ticket ID) among other words, `search_all_sessions`, `search_session` and `search_memories` run one extra keyword search for those tokens and fuse it at the identifier weight, so the row that holds the identifier outranks older rows that are only close in meaning. `search_memories` also weights a single-token identifier query, as transcript search does. Tokens under 4 characters, such as `v1`, no longer count as identifiers. In-process on the eval set without a reranker, identifier MRR rose from 0.819 to 0.958 and overall MRR from 0.740 to 0.780 (SESF-92).
+
 ### Added
 
 - Eval query sets take an optional `exclude_roots` list of absolute paths. `eval_retrieval.py run` drops rows whose project root (`source_project_root` for memories) is an excluded root or below it from the normal top 10, keeps their order, and fills the gap from a search of 30. The report lists the excluded roots, the rows dropped per query and group, and the queries left with fewer than 10 rows after a full fill, so sessions that quote eval queries no longer outrank cross-project answers (SESF-102).
