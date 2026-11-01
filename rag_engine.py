@@ -67,6 +67,8 @@ import secret_redaction
 from transcript_parser import CUT_MARK, MAX_TURN_CHARS
 
 RECENCY_WEIGHT_DEFAULT = 0.15
+# Hybrid recency weight for queries that ask for the latest state (is_temporal_query).
+TEMPORAL_RECENCY_WEIGHT_DEFAULT = 0.7
 RECENCY_DECAY_DAYS_DEFAULT = 7
 MISSING_TIMESTAMP_RECENCY = 0.5
 _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_score")
@@ -1480,6 +1482,27 @@ def _is_identifier_query(query: Optional[str]) -> bool:
     return any(c.isdigit() or c in "_-." for c in q)
 
 
+_TEMPORAL_CUES = re.compile(
+    r"\b(?:latest|most\s+recent|newest|recent|recently|last\s+time|current|currently"
+    r"|now|today|yesterday|this\s+week)\b",
+    re.IGNORECASE,
+)
+
+
+def is_temporal_query(query: Optional[str]) -> bool:
+    """Return True when the query asks for the latest state, such as "latest" or "now".
+
+    Cues match whole words only, so "nowhere" and "currency" do not count.
+
+    Args:
+        query: The search query; None counts as an empty query.
+
+    Returns:
+        True when the query holds a temporal cue, else False.
+    """
+    return bool(_TEMPORAL_CUES.search(query or ""))
+
+
 def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
            git_branch: Optional[str] = None, project_root: Optional[ProjectRoots] = None,
            sort_by: str = "hybrid",
@@ -1627,9 +1650,17 @@ def search(query: Optional[str], n: int = 5, session_id: Optional[str] = None,
         r.setdefault("source_class", merge_defaults["source_class"])
         r.setdefault("logical_session_id", r.get("session_id", ""))
 
-    merged = _rank_results(merged, sort_by, keep)
+    temporal = sort_by == "hybrid" and is_temporal_query(query)
+    if temporal:
+        weight = ranking_settings()["temporal_recency_weight"]
+        merged = _rank_results(merged, sort_by, keep, recency_weight=weight)
+        for r in merged:
+            r["temporal"] = True
+    else:
+        merged = _rank_results(merged, sort_by, keep)
     if rerank:
-        merged = reranker.rerank(query, merged, lock=_mlx_eval_lock)
+        # A temporal order keeps its recency signal through the reranker.
+        merged = reranker.rerank(query, merged, lock=_mlx_eval_lock, fuse=temporal)
 
     # If the FTS table was recently dropped + recreated and backfill hasn't
     # caught up, surface a one-line warning on each row's metadata so callers
@@ -2114,13 +2145,17 @@ def _semantic_scores(results: List[Dict]) -> List[float]:
 def ranking_settings() -> Dict[str, Union[float, int, str]]:
     """Return the ranking settings this process applies, read from the environment.
 
-    ``SESSIONFLOW_RECENCY_WEIGHT`` outside ``[0, 1]`` and an unparsable value fall
-    back to the default; ``SESSIONFLOW_RECENCY_DECAY_DAYS`` is at least 1. The
-    reranker settings come from ``reranker.settings``.
+    ``SESSIONFLOW_RECENCY_WEIGHT`` and ``SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT`` outside
+    ``[0, 1]`` and an unparsable value fall back to the default;
+    ``SESSIONFLOW_RECENCY_DECAY_DAYS`` is at least 1. The reranker settings come
+    from ``reranker.settings``.
     """
     return {
         "recency_weight": _env_float(
             "SESSIONFLOW_RECENCY_WEIGHT", RECENCY_WEIGHT_DEFAULT, 0.0, 1.0
+        ),
+        "temporal_recency_weight": _env_float(
+            "SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT", TEMPORAL_RECENCY_WEIGHT_DEFAULT, 0.0, 1.0
         ),
         "recency_decay_days": _env_int(
             "SESSIONFLOW_RECENCY_DECAY_DAYS", RECENCY_DECAY_DAYS_DEFAULT, minimum=1
@@ -2132,12 +2167,14 @@ def ranking_settings() -> Dict[str, Union[float, int, str]]:
 def _rank_results(results: List[Dict], sort_by: str, n: int,
                   now: Optional[datetime] = None, *,
                   timestamp_key: str = "timestamp",
-                  tie_break: Optional[str] = None) -> List[Dict]:
+                  tie_break: Optional[str] = None,
+                  recency_weight: Optional[float] = None) -> List[Dict]:
     """Order the merged candidate pool by the chosen strategy, then truncate.
 
     - ``relevance``: keep the post-RRF order (no recency re-rank).
     - ``recency``: re-rank by ``timestamp_key`` descending; missing-timestamp rows last.
-    - ``hybrid``: final = (1-w)*semantic_score + w*recency_score.
+    - ``hybrid``: final = (1-w)*semantic_score + w*recency_score, where ``w`` is
+      ``recency_weight`` when given, else ``SESSIONFLOW_RECENCY_WEIGHT``.
 
     ``tie_break`` names a key that orders exact ties descending; without it,
     ties keep their incoming order. Strips ranking scratch keys (`_rrf_score`,
@@ -2163,7 +2200,7 @@ def _rank_results(results: List[Dict], sort_by: str, n: int,
         )
     else:  # hybrid
         settings = ranking_settings()
-        weight = settings["recency_weight"]
+        weight = settings["recency_weight"] if recency_weight is None else recency_weight
         decay_days = settings["recency_decay_days"]
         semantic = _semantic_scores(results)
         for r, sem in zip(results, semantic, strict=True):

@@ -71,6 +71,7 @@ Hosted/OpenAI embeddings are **explicitly deferred**. Embedding stays local MLX 
 | `SESSIONFLOW_EMBED_COOLDOWN_MS` | Inter-batch cooldown to protect MLX Metal driver |
 | `SESSIONFLOW_BACKFILL_MODE` | `recent` \| `incremental` \| `full` |
 | `SESSIONFLOW_RECENCY_WEIGHT` | Hybrid blend weight `w` in `[0,1]` (SESF-24); default `0.15`, silent fallback if unparseable/out-of-range |
+| `SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT` | Hybrid blend weight for queries with a temporal cue (`rag_engine.is_temporal_query`: latest, most recent, now and similar, whole words) (SESF-101); default `0.7`, same fallback rules |
 | `SESSIONFLOW_RECENCY_DECAY_DAYS` | Exponential decay constant for `recency_score = exp(-days_old/decay_days)` (SESF-24); default `7`, min `1` |
 | `SESSIONFLOW_REDACT` | Secret-redaction guard on/off (SESF-41); default **on** when unset |
 | `SESSIONFLOW_REDACT_MODE` | `enforce` (mask) \| `report` (detect + count, store raw) (SESF-41); default `report` when unset |
@@ -81,6 +82,8 @@ Hosted/OpenAI embeddings are **explicitly deferred**. Embedding stays local MLX 
 `mcp__sessionflow__search_all_sessions`, `search_session`, `get_turns`, `get_session_stats`, `cleanup_sessions`, `get_issue_timeline`. All search tools accept optional `provider` and `source_kind` filters; legacy callers without those args continue to work (defaults preserve Claude behavior). Always pass `session_id` from `CLAUDE_SESSION_ID` env when scoping to the current session — auto-resolution is not supported.
 
 Both search tools also accept an optional `sort_by` (SESF-24): `relevance` (pure RRF), `recency` (timestamp-desc re-rank of the candidate pool), or `hybrid` (blended semantic + recency). Omitting it defaults to `hybrid` — this changed `search_all_sessions`' prior pure-relevance default. Tune the blend via `SESSIONFLOW_RECENCY_WEIGHT` / `SESSIONFLOW_RECENCY_DECAY_DAYS`.
+
+Temporal queries (SESF-101): a hybrid search whose query has a temporal cue uses `SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT`, and the reranker fuses its order with that hybrid order by RRF for both `jina` and `qwen3`, so the recency signal survives reranking. Results print `Temporal: yes`.
 
 Identifier queries (SESF-77): when the query is a single token with a digit or one of `_-.` (hostnames, ticket IDs, symbols), RRF weights FTS ranks ×2 (`IDENTIFIER_FTS_WEIGHT`). Rare identifiers never reach the vector top-k, so at equal weight unrelated vector hits tied with exact keyword hits. Plain-word and multi-word queries keep equal weights.
 

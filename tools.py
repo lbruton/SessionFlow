@@ -109,8 +109,9 @@ def _format_signals(r: dict) -> str:
 
     ``distance`` is the vector distance (None when the vector search did not
     return the row); ``keyword_rank`` is the 1-based FTS position and
-    ``rerank_rank`` the 1-based reranker position. A row with none of them
-    comes from a query-less listing.
+    ``rerank_rank`` the 1-based reranker position; ``temporal`` marks a query
+    ranked with the temporal recency weight. A row with none of them comes from
+    a query-less listing.
     """
     distance = r.get("distance")
     keyword_rank = r.get("keyword_rank")
@@ -122,6 +123,8 @@ def _format_signals(r: dict) -> str:
         parts.append(f"Keyword: #{keyword_rank}")
     if rerank_rank is not None:
         parts.append(f"Rerank: #{rerank_rank}")
+    if r.get("temporal"):
+        parts.append("Temporal: yes")
     return " · ".join(parts) if parts else "Listing"
 
 

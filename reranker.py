@@ -149,17 +149,24 @@ def load(kind: str) -> None:
     log.info("Reranker %s ready", kind)
 
 
-def rerank(query: str, rows: List[Dict], *, lock) -> List[Dict]:
+def rerank(query: str, rows: List[Dict], *, lock: threading.Lock,
+           fuse: bool = False) -> List[Dict]:
     """Reorder the first ``SESSIONFLOW_RERANK_TOP`` rows; rows past them keep their order.
 
-    ``jina`` sorts those rows by score. ``qwen3`` sorts them by RRF of their
-    incoming rank and the reranker rank. Each reranked row gets ``rerank_rank``.
-    A scoring error logs at most once a minute and returns ``rows`` unchanged.
+    ``jina`` sorts those rows by score. ``qwen3``, and any kind with ``fuse``, sorts
+    them by RRF of their incoming rank and the reranker rank. Each reranked row gets
+    ``rerank_rank``. A scoring error logs at most once a minute and returns ``rows``
+    unchanged.
 
     Args:
         query: The search query.
         rows: Ranked search rows with ``content``.
         lock: Held while the scorer runs MLX.
+        fuse: Keep the incoming order as a signal, for an order the scorer cannot see.
+
+    Returns:
+        The reranked top rows followed by the rest in their incoming order, or
+        ``rows`` unchanged when scoring fails.
     """
     scorer = _state["scorer"]
     if not is_ready() or not rows or scorer is None:
@@ -181,7 +188,7 @@ def rerank(query: str, rows: List[Dict], *, lock) -> List[Dict]:
 
     by_score = sorted(range(len(top)), key=lambda i: (-scores[i], i))
     rank = {i: k + 1 for k, i in enumerate(by_score)}
-    if _state["kind"] == "qwen3":
+    if fuse or _state["kind"] == "qwen3":
         order = sorted(range(len(top)), key=lambda i: (
             -(1.0 / (QWEN3_RRF_K + i + 1) + 1.0 / (QWEN3_RRF_K + rank[i])), i))
     else:

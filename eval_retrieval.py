@@ -45,6 +45,7 @@ EVAL_CLIENT_NAME = "eval-retrieval"
 # Ranking env vars the server reports under /health "ranking", and their keys there.
 RANKING_ENV = {
     "SESSIONFLOW_RECENCY_WEIGHT": ("recency_weight", float),
+    "SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT": ("temporal_recency_weight", float),
     "SESSIONFLOW_RECENCY_DECAY_DAYS": ("recency_decay_days", int),
 }
 METRICS = (("recall_at_5", "recall@5"), ("mrr", "MRR"), ("ndcg_at_10", "nDCG@10"))

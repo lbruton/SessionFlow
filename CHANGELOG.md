@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-01
+
+### Added
+
+- Temporal queries. A hybrid search whose query asks for the latest state ("latest", "most recent", "newest", "recent", "recently", "last time", "current", "currently", "now", "today", "yesterday", "this week", matched as whole words) ranks with `SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT` (default 0.7) instead of `SESSIONFLOW_RECENCY_WEIGHT`. The reranker fuses its order with that hybrid order by RRF for both `jina` and `qwen3`, so the recency signal survives reranking. `/health` reports the weight under `ranking`, and each result of such a query prints `Temporal: yes`. Relevance and recency sorts are unchanged. In-process on the eval set with `jina`, temporal MRR rose from 0.738 to 0.757 and nDCG@10 from 0.477 to 0.528; other groups do not change (SESF-101).
+
 ## [0.14.1] - 2026-11-01
 
 ### Fixed
