@@ -150,6 +150,28 @@ def test_topic_match_replaces_in_place(store):
     assert row["version"] == 2
 
 
+def test_topic_replace_reactivates_a_superseded_record(store):
+    old = store.add(_rec("old handoff", topic_key="handoff:next"))
+    newer = store.add(_rec("newer note", supersedes=[old.memory_id]))
+    assert store.get(old.memory_id)["status"] == "superseded"
+
+    replaced = store.add(_rec("fresh handoff", topic_key="handoff:next"))
+
+    assert replaced.outcome == "replaced" and replaced.memory_id == old.memory_id
+    row = store.get(old.memory_id)
+    assert row["text"] == "fresh handoff" and row["status"] == "active"
+    assert [h["status"] for h in store.versions(old.memory_id)] == ["active", "superseded", "active"]
+    active, _ = store.list(MemoryFilters(project="sessionflow", status="active"), limit=10)
+    assert {r["memory_id"] for r in active} == {old.memory_id, newer.memory_id}
+
+
+def test_topic_replace_takes_the_status_of_the_new_record(store):
+    first = store.add(_rec("imported text", topic_key="import:1"))
+    second = store.add(_rec("imported again", topic_key="import:1", status="superseded"))
+    assert second.memory_id == first.memory_id
+    assert store.get(first.memory_id)["status"] == "superseded"
+
+
 def test_hash_match_returns_the_existing_record(memory_pg, store):
     first = store.add(_rec("duplicate"))
     second = store.add(_rec("duplicate"))
