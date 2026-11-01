@@ -78,13 +78,13 @@ Docstring policy (enforced by `ruff`; config in `ruff.toml`, `D1` rules, Google 
 CI (`.github/workflows/`):
 
 - `tests.yml` runs `ruff check .` and `pytest -rs` on Ubuntu with a Postgres 17 service (`SESSIONFLOW_TEST_PG_DSN`, `SESSIONFLOW_TEST_PG_RESTORE_DSN`, `pg_dump`/`pg_restore` 17). MLX installs with the `cpu` extra; tests that need the cached EmbeddingGemma model skip, and the job summary lists every skip.
-- `vale.yml` runs the Prose style (`.vale.ini`, deployed by `skills-deploy` as `vale:Prose`) on `README.md` and `.context/`. Warnings on lines a PR adds fail the check; existing alerts do not.
+- `vale.yml` runs the Prose style (`.vale.ini`, deployed by `skills-deploy` as `vale:Prose`) on `README.md`, `.context/`, DocVault docs outside `specs/` and `Reviews/`, and Python comments and docstrings outside `tests/`. Warnings on lines a PR adds fail the check; existing alerts do not.
 
 Pre-PR:
 
 - `pip install -r requirements-dev.txt`.
 - Run `ruff check .` and `python -m pytest -rs`. Set the two DSNs to a local Postgres 17 to run the memory-store tests.
-- Run `vale` on the docs you changed.
+- Run `vale` on the docs and Python files you changed.
 
 ## Issue Tracking
 
