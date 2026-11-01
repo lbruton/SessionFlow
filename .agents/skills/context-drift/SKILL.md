@@ -11,7 +11,7 @@ description: >-
   `/vault-drift` for projects migrated to `.context/` (DEVS-37). Triggers: "context drift", "vault drift", "drift audit", "drift check",
   "context-drift", "audit .context", "check context docs", "foundation drift", "verify foundation",
   "what should be in .context".
-library-version: 04dbfc6b5d14
+library-version: 995aa5c33005
 ---
 
 # Context Drift
