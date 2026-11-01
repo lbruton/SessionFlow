@@ -159,6 +159,15 @@ def test_check_ranking_reports_mismatch_and_unverified():
     assert problems and "ranking" in problems[0]
 
 
+def test_check_ranking_verifies_the_temporal_weight():
+    health = {"ranking": {"recency_weight": 0.15, "temporal_recency_weight": 0.7}}
+    var = "SESSIONFLOW_TEMPORAL_RECENCY_WEIGHT"
+    assert ev.check_ranking({var: "0.7"}, health) == ([], [])
+    problems, unverified = ev.check_ranking({var: "0.5"}, health)
+    assert len(problems) == 1 and "0.5" in problems[0]
+    assert unverified == []
+
+
 # --- Reports -------------------------------------------------------------------
 
 
