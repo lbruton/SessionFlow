@@ -5,7 +5,7 @@ license: MIT
 metadata:
   author: Codacy
   version: 1.5.0
-library-version: f0ca78a2b4c9
+library-version: e3dbf30dcd3c
 ---
 
 # Codacy Code Review
