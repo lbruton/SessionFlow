@@ -101,7 +101,7 @@ The `start`, `stop`, `restart` and `status` commands work the same with or witho
 
 A reranker reads the top results of a search and reorders them by how well each one answers the query. The default is `qwen3`, which `setup.sh` downloads. It adds a second model of about 1.2 GB, and each search with a query takes about 2 to 3 seconds longer. Searches without a query, such as the session-start listing, never use it. Until the model loads, or when it is missing, search runs without it.
 
-The project's retrieval eval ran each setting against the same running server, 77 queries on an M-series Mac, reranking the top 10 results:
+The project's retrieval eval ran each setting on version 0.14.0 on 2026-11-01. It used one running server on an M-series Mac, 77 queries, and reranked the top 10 results:
 
 | `SESSIONFLOW_RERANKER` | Model | License | MRR | nDCG@10 | Median search |
 | --- | --- | --- | --- | --- | --- |
