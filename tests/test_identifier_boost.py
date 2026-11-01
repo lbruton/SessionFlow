@@ -34,6 +34,7 @@ COWORK_QUERY = "galenanswan100 East Houston port names Ken Nutanix"
     ("what closed INC1262779?", ["INC1262779"]),
     ("rag_engine.py and cc.lbruton.sessionflow", ["rag_engine.py", "cc.lbruton.sessionflow"]),
     ("SESF-57 padding sesf-57", ["SESF-57"]),
+    ("fix SESF-57,SESF-58; galenanswan100", ["SESF-57", "SESF-58", "galenanswan100"]),
     ("retag project folders", []),
     ("v1 of the bridge", []),
     ("", []),
@@ -67,6 +68,19 @@ def test_identifier_search_query_matches_only_identifier_rows(tmp_path):
 
     rows = fts.search(identifier_search_query(COWORK_QUERY), n=5, db_path=db_path)
     assert [r["doc_id"] for r in rows] == ["host"]
+
+
+def test_comma_separated_identifiers_match_rows_with_one_of_them(tmp_path):
+    fts = FTSIndex("turns_fts", ["session_id", "project_root"])
+    db_path = str(tmp_path / "milvus.db")
+    conn = fts.connection(db_path)
+    try:
+        fts.insert(conn, [{"doc_id": "one", "content": "only SESF-57 here"}])
+    finally:
+        fts.close_ephemeral(conn)
+
+    for query in ("fix SESF-57,SESF-58", identifier_search_query("fix SESF-57,SESF-58")):
+        assert [r["doc_id"] for r in fts.search(query, n=5, db_path=db_path)] == ["one"]
 
 
 @pytest.mark.parametrize("query", ["v1", "a.b", "INC1262779", "  galenanswan70  "])

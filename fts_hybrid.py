@@ -60,6 +60,9 @@ those to was we were what when where which who whom why will with would you your
 _IDENTIFIER_CHARS = frozenset("_-.")
 _IDENTIFIER_MIN_LEN = 4
 _WORD_RE = re.compile(r"\w+")
+# Commas and semicolons separate list items ("SESF-57,SESF-58"); other punctuation
+# stays inside a chunk, where it can belong to an identifier.
+_CHUNK_SPLIT_RE = re.compile(r"[\s,;]+")
 
 # RRF weight of keyword ranks for identifiers. Rare identifiers are absent from the
 # vector top-k, so at equal weight unrelated vector hits tie with exact keyword hits.
@@ -73,15 +76,25 @@ def is_identifier_token(token: str) -> bool:
     )
 
 
-def identifier_tokens(query: Optional[str]) -> List[str]:
-    """Return the identifier tokens of ``query`` in order, edge punctuation stripped.
+def _chunks(query: Optional[str]) -> List[str]:
+    """Split ``query`` on whitespace, commas and semicolons; strip edge punctuation."""
+    stripped = (c.strip(string.punctuation) for c in _CHUNK_SPLIT_RE.split(query or ""))
+    return [c for c in stripped if c]
 
-    Repeats that differ only in case count once.
+
+def identifier_tokens(query: Optional[str]) -> List[str]:
+    """Return the identifier tokens of a query.
+
+    Args:
+        query: The search query; None counts as empty.
+
+    Returns:
+        The tokens that pass ``is_identifier_token``, in query order, with edge
+        punctuation stripped. Repeats that differ only in case count once.
     """
     tokens: List[str] = []
     seen: Set[str] = set()
-    for chunk in (query or "").split():
-        token = chunk.strip(string.punctuation)
+    for token in _chunks(query):
         if is_identifier_token(token) and token.lower() not in seen:
             seen.add(token.lower())
             tokens.append(token)
@@ -89,18 +102,30 @@ def identifier_tokens(query: Optional[str]) -> List[str]:
 
 
 def is_identifier_query(query: Optional[str]) -> bool:
-    """True when ``query`` is one identifier token: a hostname, ticket ID or symbol."""
-    chunks = (query or "").split()
-    return len(chunks) == 1 and bool(identifier_tokens(chunks[0]))
+    """Return True when a query is one identifier token.
+
+    Args:
+        query: The search query; None counts as empty.
+
+    Returns:
+        True for a single hostname, ticket ID or symbol, else False.
+    """
+    chunks = _chunks(query)
+    return len(chunks) == 1 and is_identifier_token(chunks[0])
 
 
 def identifier_search_query(query: Optional[str]) -> str:
     """Return the FTS query for the identifier list of a multi-word query.
 
-    The identifier tokens of ``query`` joined by spaces; ``build_match_query``
-    keeps each one a quoted phrase. Empty for a single-token query, whose
-    main keyword list already takes ``IDENTIFIER_FTS_WEIGHT``, and for a query
-    without identifier tokens.
+    ``build_match_query`` keeps each identifier token a quoted phrase.
+
+    Args:
+        query: The search query; None counts as empty.
+
+    Returns:
+        The identifier tokens joined by spaces. Empty for a single-token query,
+        whose main keyword list already takes ``IDENTIFIER_FTS_WEIGHT``, and for
+        a query without identifier tokens.
     """
     if is_identifier_query(query):
         return ""
@@ -116,8 +141,7 @@ def build_match_query(query: Optional[str]) -> str:
     """
     terms: List[str] = []
     seen: Set[str] = set()
-    for chunk in (query or "").split():
-        chunk = chunk.strip(string.punctuation)
+    for chunk in _chunks(query):
         words = [chunk] if is_identifier_token(chunk) else _WORD_RE.findall(chunk)
         for word in words:
             key = word.lower()
