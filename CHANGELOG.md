@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-10-31
+
+### Fixed
+
+- Search counts one vector rank and one keyword rank per turn. Passages were collapsed only after RRF fusion, so a turn found by keyword on its full row and by vector on one of its passages never added the two ranks, and sibling passages filled the candidate pool. Each channel now keeps the best-ranked row of each turn before fusion and reads twice the candidate count before the cut. The HNSW `ef` search parameter rises with that count, because Milvus rejects a search whose limit exceeds `ef` (SESF-99).
+
 ## [0.13.0] - 2026-10-31
 
 ### Added
