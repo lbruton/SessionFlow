@@ -94,6 +94,11 @@ def _query_problem(q) -> Optional[str]:
         return f"tool must be one of {', '.join(TOOLS)}"
     if not isinstance(q.get("args", {}), dict):
         return "args must be an object"
+    if "exclude_roots" in q:
+        roots = q["exclude_roots"]
+        if not isinstance(roots, list) or not roots or not all(
+                isinstance(r, str) and r.startswith("/") for r in roots):
+            return "exclude_roots must be a non-empty list of absolute paths"
     expected = q.get("expected")
     if not isinstance(expected, list) or not all(isinstance(e, str) for e in expected):
         return "expected must be a list of IDs"
@@ -113,6 +118,24 @@ def result_ids(tool: str, payload: dict) -> list[str]:
     if tool == "search_memories":
         return [str(r.get("memory_id")) for r in rows]
     return [f"{r.get('session_id')}:{r.get('turn_index')}" for r in rows]
+
+
+def drop_excluded(payload: dict, roots: list[str]) -> tuple[dict, int]:
+    """Drop rows whose ``project_root`` is an excluded root or below it, then keep ``FETCH_N``.
+
+    A root matches whole path components, so ``/x/SessionFlow`` keeps ``/x/SessionFlowOld``.
+
+    Returns:
+        The payload with the kept rows, and the number of rows dropped.
+    """
+    prefixes = [r.rstrip("/") for r in roots]
+
+    def excluded(root: str) -> bool:
+        return any(root == p or root.startswith(p + "/") for p in prefixes)
+
+    rows = payload.get("results") or []
+    kept = [r for r in rows if not excluded(str(r.get("project_root") or ""))]
+    return {**payload, "results": kept[:FETCH_N]}, len(rows) - len(kept)
 
 
 def top_score(tool: str, payload: dict) -> Optional[float]:
@@ -175,6 +198,7 @@ def _group_summary(rows: list[dict]) -> dict:
         "current_first": _mean(r.get("current_first") for r in rows),
         "top_score": _mean(r.get("top_score") for r in rows),
         "errors": sum(1 for r in rows if r.get("error")),
+        "dropped": sum(r.get("dropped") or 0 for r in rows),
     }
 
 
@@ -213,6 +237,8 @@ def render_markdown(report: dict, title: str = "Retrieval eval") -> str:
         lines.append("- env: " + ", ".join(f"{k}={v}" for k, v in run["env"].items()))
     if run.get("ranking"):
         lines.append("- ranking: " + ", ".join(f"{k}={v}" for k, v in run["ranking"].items()))
+    if run.get("exclude_roots"):
+        lines.append("- exclude_roots: " + ", ".join(run["exclude_roots"]))
     lines += ["", "| group | n | recall@5 | MRR | nDCG@10 | current first | top score | errors |",
               "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for group, s in report["groups"].items():
@@ -222,6 +248,9 @@ def render_markdown(report: dict, title: str = "Retrieval eval") -> str:
     misses = [q for q in report["queries"] if q["expected"] and not q["rank"]]
     if misses:
         lines += ["", "Misses: " + ", ".join(q["id"] for q in misses)]
+    dropped = [q for q in report["queries"] if q.get("dropped")]
+    if dropped:
+        lines += ["", "Dropped rows: " + ", ".join(f"{q['id']} {q['dropped']}" for q in dropped)]
     return "\n".join(lines) + "\n"
 
 
@@ -414,16 +443,27 @@ def _host(health: dict) -> str:
 
 
 def run_queries(client, queries: list[dict], sort_by: str) -> list[dict]:
-    """Run every query and score it; a failed call scores as a miss and keeps its error."""
+    """Run every query and score it; a failed call scores as a miss and keeps its error.
+
+    A query with ``exclude_roots`` fetches ``FETCH_N * 3`` rows so ``drop_excluded``
+    still leaves ``FETCH_N`` to score.
+    """
     scored = []
     for q in queries:
-        args = {**q.get("args", {}), "query": q["query"], "n": FETCH_N, "sort_by": sort_by}
+        roots = q.get("exclude_roots")
+        n = FETCH_N * 3 if roots else FETCH_N
+        args = {**q.get("args", {}), "query": q["query"], "n": n, "sort_by": sort_by}
+        dropped = 0
         try:
             payload = client.call(q["tool"], args)
+            if roots:
+                payload, dropped = drop_excluded(payload, roots)
             row = score_query(q, result_ids(q["tool"], payload), top_score(q["tool"], payload))
         except EvalError as exc:
             row = score_query(q, [])
             row["error"] = str(exc)
+        if roots:
+            row["dropped"] = dropped
         scored.append(row)
     return scored
 
@@ -443,7 +483,8 @@ def evaluate(client, queries: list[dict], *, sort_by: str, env: dict, queries_fi
     run = {"started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
            "server_version": health.get("version"), "host": _host(health), "sort_by": sort_by,
            "env": env, "env_unverified": unverified, "ranking": health.get("ranking"),
-           "queries_file": queries_file}
+           "queries_file": queries_file,
+           "exclude_roots": sorted({r for q in queries for r in q.get("exclude_roots", [])})}
     return build_report(scored, run)
 
 
