@@ -15,6 +15,7 @@ import fcntl
 import json
 import math
 import os
+import posixpath
 import secrets
 import socket
 import subprocess
@@ -120,24 +121,39 @@ def result_ids(tool: str, payload: dict) -> list[str]:
     return [f"{r.get('session_id')}:{r.get('turn_index')}" for r in rows]
 
 
-def drop_excluded(tool: str, payload: dict, roots: list[str]) -> tuple[dict, int]:
+def drop_excluded(tool: str, payload: dict, roots: list[str],
+                  fill: Optional[dict] = None) -> tuple[dict, int]:
     """Drop rows from an excluded root or below it, then keep ``FETCH_N``.
 
-    Turns carry ``project_root`` and memories ``source_project_root``. A root matches
-    whole path components, so ``/x/SessionFlow`` keeps ``/x/SessionFlowOld``.
+    Turns carry ``project_root`` and memories ``source_project_root``. Paths are
+    normalized and match whole components, so ``/x/SessionFlow`` keeps ``/x/SessionFlowOld``;
+    a row without an absolute root never matches. Rows of ``fill`` not already kept are
+    appended in order up to ``FETCH_N``.
 
     Returns:
-        The payload with the kept rows, and the number of rows dropped.
+        The payload with the kept rows, and the number of ``payload`` rows dropped.
     """
-    prefixes = [r.rstrip("/") for r in roots]
+    prefixes = [posixpath.normpath(r).rstrip("/") + "/" for r in roots]
+    field = "source_project_root" if tool == "search_memories" else "project_root"
 
-    def excluded(root: str) -> bool:
-        return any(root == p or root.startswith(p + "/") for p in prefixes)
+    def excluded(row: dict) -> bool:
+        root = row.get(field)
+        if not isinstance(root, str) or not root.startswith("/"):
+            return False
+        root = posixpath.normpath(root).rstrip("/") + "/"
+        return any(root.startswith(p) for p in prefixes)
 
     rows = payload.get("results") or []
-    field = "source_project_root" if tool == "search_memories" else "project_root"
-    kept = [r for r in rows if not excluded(str(r.get(field) or ""))]
-    return {**payload, "results": kept[:FETCH_N]}, len(rows) - len(kept)
+    kept = [r for r in rows if not excluded(r)]
+    dropped = len(rows) - len(kept)
+    if fill is not None:
+        seen = set(result_ids(tool, {"results": kept}))
+        for r in fill.get("results") or []:
+            rid = result_ids(tool, {"results": [r]})[0]
+            if len(kept) < FETCH_N and rid not in seen and not excluded(r):
+                kept.append(r)
+                seen.add(rid)
+    return {**payload, "results": kept[:FETCH_N]}, dropped
 
 
 def top_score(tool: str, payload: dict) -> Optional[float]:
@@ -447,19 +463,22 @@ def _host(health: dict) -> str:
 def run_queries(client, queries: list[dict], sort_by: str) -> list[dict]:
     """Run every query and score it; a failed call scores as a miss and keeps its error.
 
-    A query with ``exclude_roots`` fetches ``FETCH_N * 3`` rows so ``drop_excluded``
-    still leaves ``FETCH_N`` to score.
+    A query with ``exclude_roots`` drops matching rows from the normal ``FETCH_N`` and
+    fills the gap from a ``FETCH_N * 3`` search. The fill comes second because ``n``
+    changes the server's candidate pool and so the order of the top rows.
     """
     scored = []
     for q in queries:
         roots = q.get("exclude_roots")
-        n = FETCH_N * 3 if roots else FETCH_N
-        args = {**q.get("args", {}), "query": q["query"], "n": n, "sort_by": sort_by}
+        args = {**q.get("args", {}), "query": q["query"], "n": FETCH_N, "sort_by": sort_by}
         dropped = 0
         try:
             payload = client.call(q["tool"], args)
             if roots:
                 payload, dropped = drop_excluded(q["tool"], payload, roots)
+                if dropped:
+                    wider = client.call(q["tool"], {**args, "n": FETCH_N * 3})
+                    payload, _ = drop_excluded(q["tool"], payload, roots, fill=wider)
             row = score_query(q, result_ids(q["tool"], payload), top_score(q["tool"], payload))
         except EvalError as exc:
             row = score_query(q, [])

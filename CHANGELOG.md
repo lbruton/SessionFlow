@@ -11,7 +11,7 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ### Added
 
-- Eval query sets take an optional `exclude_roots` list of absolute paths. `eval_retrieval.py run` fetches three times the rows for such a query, drops rows whose `project_root` is an excluded root or below it, and scores the first 10 that remain. The report lists the excluded roots and the rows dropped per query and group, so sessions that quote eval queries no longer outrank cross-project answers (SESF-102).
+- Eval query sets take an optional `exclude_roots` list of absolute paths. `eval_retrieval.py run` drops rows whose project root (`source_project_root` for memories) is an excluded root or below it from the normal top 10, keeps their order, and fills the gap from a search of 30. The report lists the excluded roots and the rows dropped per query and group, so sessions that quote eval queries no longer outrank cross-project answers (SESF-102).
 
 ## [0.15.0] - 2026-11-01
 

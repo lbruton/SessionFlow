@@ -181,7 +181,7 @@ def test_excluded_root_and_its_subfolders_are_dropped_before_scoring():
     assert scored["ranked"] == ["old:4", "s5:2"]
     assert scored["rank"] == 2
     assert scored["dropped"] == 2
-    assert client.calls[0][1]["n"] == ev.FETCH_N * 3
+    assert [a["n"] for _, a in client.calls] == [ev.FETCH_N, ev.FETCH_N * 3]
 
 
 def test_excluded_rows_leave_at_most_fetch_n_scored():
@@ -191,6 +191,42 @@ def test_excluded_rows_leave_at_most_fetch_n_scored():
     [scored] = ev.run_queries(SearchClient(rows), [q], "hybrid")
     assert scored["dropped"] == 5
     assert scored["ranked"] == [f"other:{i}" for i in range(ev.FETCH_N)]
+
+
+def test_no_excluded_row_keeps_the_normal_search():
+    q = _queries()["q-cross-2"]
+    client = SearchClient([_row("s5", 2, "/y/Other"), _row("s6", 1, "/y/Other")])
+    [scored] = ev.run_queries(client, [q], "hybrid")
+    assert [a["n"] for _, a in client.calls] == [ev.FETCH_N]
+    assert scored["ranked"] == ["s5:2", "s6:1"]
+    assert scored["dropped"] == 0
+
+
+def test_fill_keeps_the_order_of_the_normal_top_rows():
+    class Reordering(SearchClient):
+        def call(self, name, arguments):
+            self.calls.append((name, arguments))
+            if arguments["n"] == ev.FETCH_N:
+                return {"results": [_row("eval", 1, "/x/SessionFlow"), _row("b", 1, "/y"),
+                                    _row("a", 1, "/y")]}
+            return {"results": [_row("a", 1, "/y"), _row("c", 1, "/y"), _row("b", 1, "/y")]}
+
+    [scored] = ev.run_queries(Reordering([]), [_queries()["q-cross-2"]], "hybrid")
+    assert scored["ranked"] == ["b:1", "a:1", "c:1"]
+    assert scored["dropped"] == 1
+
+
+@pytest.mark.parametrize("root,row_root,dropped", [
+    ("/x/SessionFlow/.", "/x/SessionFlow", 1),
+    ("/x/SessionFlow/", "/x/SessionFlow/sub/../a", 1),
+    ("/", "/y/Other", 1),
+    ("/", "unknown", 0),
+    ("/", None, 0),
+])
+def test_drop_excluded_normalizes_paths(root, row_root, dropped):
+    payload = {"results": [_row("s", 1, row_root)]}
+    _, count = ev.drop_excluded("search_all_sessions", payload, [root])
+    assert count == dropped
 
 
 def test_top_score_comes_from_the_first_kept_row():
