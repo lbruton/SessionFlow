@@ -36,3 +36,4 @@ This file sets the dials for `.claude/rules/prose-core.md`. Terms come from `.co
 
 - `CHANGELOG.md` and `UPSTREAM-README.md` keep their history and wording.
 - The `CLAUDE.md` and `AGENTS.md` gotcha lists keep issue IDs as the index into Plane.
+- The README Reranking section may quote retrieval-eval results, the reranker model size and the added search time. Name the version and date they were measured on. Refresh them after a ranking change.
