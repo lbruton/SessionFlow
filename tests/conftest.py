@@ -444,6 +444,7 @@ def stub_rag_engine(monkeypatch):
         list_sessions=lambda *args, **kwargs: [],
         clear_collection=lambda *args, **kwargs: None,
         init_server_mode=lambda *args, **kwargs: None,
+        refresh_known_project_roots=lambda *args, **kwargs: None,
         close_server_mode=lambda *args, **kwargs: None,
         add_turns_async=add_turns_async,
         backfill_fts=lambda *args, **kwargs: 0,
