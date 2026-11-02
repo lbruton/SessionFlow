@@ -111,6 +111,20 @@ def test_ambiguous_prefix_lists_at_most_five(db, stored):
     assert text.count("\n- ") == 5
 
 
+def test_candidates_order_by_utc_time_across_timestamp_forms(db):
+    conn = rag_engine._fts.connection(db)
+    rag_engine._fts.insert(conn, [
+        _record("e1", "abcdef12-early", "2026-01-01T12:00:00+05:00"),
+        _record("l1", "abcdef12-late", "2026-01-01T10:00:00+05:00"),
+        _record("l2", "abcdef12-late", "2026-01-01T09:30:00Z"),
+    ])
+    rag_engine._fts.close_ephemeral(conn)
+    assert rag_engine.sessions_with_prefix("abcdef12", db_path=db) == [
+        ("abcdef12-late", "2026-01-01T09:30:00Z"),
+        ("abcdef12-early", "2026-01-01T12:00:00+05:00"),
+    ]
+
+
 def test_unknown_id_returns_the_explanatory_error(db, stored):
     text = _call("get_turns", {"session_id": "deadbeef", "turn_index": 7})
     assert text == "Unknown session ID deadbeef. Pass the full session_id from a search result."

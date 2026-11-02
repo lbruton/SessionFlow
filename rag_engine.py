@@ -2406,13 +2406,22 @@ def sessions_with_prefix(prefix: str, limit: int = 5,
     escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     conn = _fts.connection(db_path)
     try:
-        return _fts.select_where(
-            conn, ["session_id", "MAX(timestamp)"],
-            "session_id LIKE ? ESCAPE '\\' GROUP BY session_id ORDER BY 2 DESC LIMIT ?",
-            (f"{escaped}%", limit),
+        rows = _fts.select_where(
+            conn, ["DISTINCT session_id", "timestamp"],
+            "session_id LIKE ? ESCAPE '\\'", (f"{escaped}%",),
         )
     finally:
         _fts.close_ephemeral(conn)
+
+    # Stored timestamps mix ISO forms, so SQL text order is not time order.
+    epoch = datetime.fromtimestamp(0, timezone.utc)
+    latest: Dict[str, tuple] = {}
+    for session, ts in rows:
+        key = (_parse_timestamp_utc(str(ts or "")) or epoch, session)
+        if session not in latest or key > latest[session][0]:
+            latest[session] = (key, ts)
+    ordered = sorted(latest.items(), key=lambda item: item[1][0], reverse=True)
+    return [(session, ts) for session, (_, ts) in ordered[:limit]]
 
 
 def get_turns(session_id: str, turn_index: int, context: int = 2,
