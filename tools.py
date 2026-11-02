@@ -76,6 +76,10 @@ UNNAMED_SCOPE_ERROR = (
 )
 
 
+MIN_SESSION_PREFIX = 8
+"""Shortest session ID prefix that get_turns expands."""
+
+
 def get_db_path() -> str:
     """Milvus URI — remote Standalone if SESSIONFLOW_MILVUS_URI is set, else local Lite."""
     return os.getenv("SESSIONFLOW_MILVUS_URI", str(Path.home() / ".sessionflow" / "milvus.db"))
@@ -238,11 +242,8 @@ def _render_results(fmt: str | None, results: list[dict], scope: ProjectScope) -
 
 
 def format_turns(results: list[dict]) -> str:
-    """Format get_turns results as markdown."""
-    if not results:
-        return "No turns found."
-
-    output = []
+    """Format get_turns results as markdown, opening with the full session ID."""
+    output = [f"Session: {results[0].get('session_id', '')}", ""]
     for r in results:
         turn_index = r.get("turn_index", 0)
         ts = r.get("timestamp", "")[:19]
@@ -264,6 +265,25 @@ def format_turns(results: list[dict]) -> str:
         output.append("")
 
     return "\n".join(output)
+
+
+def _turns_or_error(session_id: str, turn_index: int, context: int,
+                    db: str) -> tuple[list[dict], str]:
+    """Return the turns of a session ID or unique prefix, or the text that explains a miss."""
+    results = rag_engine.get_turns(session_id, turn_index, context=context, db_path=db)
+    if results:
+        return results, ""
+    if len(session_id) >= MIN_SESSION_PREFIX:
+        matches = rag_engine.sessions_with_prefix(session_id, db_path=db)
+        if len(matches) > 1:
+            listed = "\n".join(f"- {sid} (last turn {(ts or '')[:19]})" for sid, ts in matches)
+            return [], (f"Session ID {session_id} matches several sessions. "
+                        f"Pass one full session_id:\n{listed}")
+        if matches:
+            results = rag_engine.get_turns(matches[0][0], turn_index, context=context, db_path=db)
+            if results:
+                return results, ""
+    return [], f"Unknown session ID {session_id}. Pass the full session_id from a search result."
 
 
 def format_stats(stats: dict, db_path: str, scope: ProjectScope | None = None) -> str:
@@ -743,11 +763,18 @@ def register_tools(server: Server):
                     "properties": {
                         "session_id": {
                             "type": "string",
-                            "description": "Session ID from a search result.",
+                            "description": (
+                                "Session ID from a search result, or a unique prefix of at "
+                                f"least {MIN_SESSION_PREFIX} characters."
+                            ),
                         },
                         "turn_index": {
                             "type": "integer",
-                            "description": "Turn index from a search result. The window is centered on this turn.",
+                            "description": (
+                                "The turn_index value printed by a search result, not a "
+                                "position in the session. The window is centered on the "
+                                "closest turn."
+                            ),
                         },
                         "context": {
                             "type": "integer",
@@ -1007,16 +1034,17 @@ def register_tools(server: Server):
                 return [types.TextContent(type="text", text=text)]
 
             elif name == "get_turns":
-                results = rag_engine.get_turns(
+                results, miss = _turns_or_error(
                     arguments["session_id"],
                     arguments["turn_index"],
-                    context=arguments.get("context", 2),
-                    db_path=db,
+                    arguments.get("context", 2),
+                    db,
                 )
+                session = results[0]["session_id"] if results else arguments["session_id"]
                 await search_log.log_follow_up(
                     name, client=_client_key(),
-                    item_id=f"{arguments['session_id']}:{arguments['turn_index']}")
-                return [types.TextContent(type="text", text=format_turns(results))]
+                    item_id=f"{session}:{arguments['turn_index']}")
+                return [types.TextContent(type="text", text=miss or format_turns(results))]
 
             elif name == "get_session_stats":
                 scope = await _scope(arguments.get("project_root"), db)

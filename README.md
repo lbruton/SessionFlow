@@ -32,7 +32,7 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 |------|---------|
 | `search_session` | Turns that match a query in one project, or in one session with `session_id`. Omit `query` to list recent turns. |
 | `search_all_sessions` | Turns that match a query, with `project_root`, `git_branch`, `provider`, `date_from`, `date_to` and `issue_id` filters. |
-| `get_turns` | The turns around one turn of a session. Requires `session_id` and `turn_index` from a search result. |
+| `get_turns` | The turns around one turn of a session. Requires `session_id` and `turn_index` from a search result. A unique `session_id` prefix of at least 8 characters also works, and the output prints the full ID. |
 | `get_session_stats` | Turn, session, branch and provider counts for one project, or for the index with `"*"`. |
 | `get_issue_timeline` | Every turn that mentions an issue ID, oldest first. Requires `issue_id`. |
 | `cleanup_sessions` | Deletes turns by age, session ID or git branch, across every project. |

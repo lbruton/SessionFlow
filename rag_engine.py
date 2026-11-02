@@ -2391,6 +2391,30 @@ def memory_threshold_search(client, vector: List[float], *, project: str, user_i
     return sorted(hits, key=lambda h: h["score"], reverse=True)
 
 
+def sessions_with_prefix(prefix: str, limit: int = 5,
+                         db_path: Optional[str] = None) -> List[tuple]:
+    """Return ``(session_id, last_timestamp)`` for sessions whose ID starts with ``prefix``.
+
+    Args:
+        prefix: the start of a session ID, matched literally.
+        limit: the maximum number of sessions to return.
+        db_path: Milvus DB path, used to derive the FTS path.
+
+    Returns:
+        Matching sessions, most recently active first.
+    """
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    conn = _fts.connection(db_path)
+    try:
+        return _fts.select_where(
+            conn, ["session_id", "MAX(timestamp)"],
+            "session_id LIKE ? ESCAPE '\\' GROUP BY session_id ORDER BY 2 DESC LIMIT ?",
+            (f"{escaped}%", limit),
+        )
+    finally:
+        _fts.close_ephemeral(conn)
+
+
 def get_turns(session_id: str, turn_index: int, context: int = 2,
               db_path: Optional[str] = None) -> List[Dict]:
     """Retrieve turns around a specific turn_index within a session.
