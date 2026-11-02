@@ -198,19 +198,37 @@ def test_empty_cache_waits_for_the_scan_in_flight(setup):
     assert fts.scans == 1
 
 
-def test_empty_cache_scans_itself_when_the_shared_scan_fails(setup, monkeypatch):
+def test_failed_shared_scan_raises_to_waiters_and_the_next_read_retries(setup, monkeypatch):
     fts = _SlowFts(["/new"])
     setup(fts)
     results = iter([RuntimeError("scan failed"), ["/retry"]])
+    scans = []
 
     def _scan(db_path):
+        scans.append(db_path)
         result = next(results)
         if isinstance(result, Exception):
             raise result
         return result
 
     monkeypatch.setattr(rag_engine, "_scan_project_roots", _scan)
+    with pytest.raises(RuntimeError, match="scan failed"):
+        rag_engine.known_project_roots("db")
+    assert len(scans) == 1
     assert rag_engine.known_project_roots("db") == ["/retry"]
+
+
+def test_empty_string_root_stays_a_filter(tmp_path):
+    fts = fts_hybrid.FTSIndex("t_fts", ["project_root"])
+    conn = fts.connection(str(tmp_path / "milvus.db"))
+    try:
+        fts.insert(conn, [{"doc_id": "a", "content": "x", "project_root": ""},
+                          {"doc_id": "b", "content": "x", "project_root": "/a"}])
+        conn.commit()
+        assert fts.count_rows(conn, project_root="") == 1
+        assert fts.count_rows(conn, project_root=[]) == 2
+    finally:
+        conn.close()
 
 
 def test_unfiltered_count_reads_docsize_not_the_table(tmp_path):

@@ -357,17 +357,17 @@ class FTSIndex:
         Returns:
             int: row count, optionally filtered by project_root.
         """
-        if not project_root:
-            # A count on the FTS table walks every row; docsize holds one small row per doc.
-            return int(conn.execute(f"SELECT count(*) FROM {self.table_name}_docsize").fetchone()[0])
         sql = f"SELECT count(*) FROM {self.table_name}"
         params: tuple = ()
         if isinstance(project_root, str):
             sql += " WHERE project_root = ?"
             params = (project_root,)
-        else:
+        elif project_root:
             sql += f" WHERE project_root IN ({', '.join('?' for _ in project_root)})"
             params = tuple(project_root)
+        else:
+            # A count on the FTS table walks every row; docsize holds one small row per doc.
+            sql += "_docsize"
         return int(conn.execute(sql, params).fetchone()[0])
 
     def distinct_values(self, conn: sqlite3.Connection, column: str) -> List[str]:

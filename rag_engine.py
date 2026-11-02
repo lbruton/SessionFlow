@@ -30,7 +30,7 @@ os.environ['TRANSFORMERS_OFFLINE'] = '1'
 from pymilvus import MilvusClient, CollectionSchema, FieldSchema
 from pymilvus.exceptions import MilvusException
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Iterator, List, Dict, NamedTuple, Optional, Sequence, Union
 import asyncio
 import logging
@@ -503,7 +503,7 @@ _fts = FTSIndex("turns_fts", [
 ProjectRoots = Union[str, Sequence[str]]
 # db_path -> (monotonic time, roots); see known_project_roots.
 _known_roots_cache: Dict[Optional[str], tuple] = {}
-_known_roots_refreshing: Dict[Optional[str], threading.Event] = {}
+_known_roots_refreshing: Dict[Optional[str], Future] = {}
 _known_roots_lock = threading.Lock()
 KNOWN_ROOTS_TTL_S = 300.0
 _write_lock: Optional[asyncio.Lock] = None
@@ -2679,35 +2679,35 @@ def known_project_roots(db_path: Optional[str] = None) -> List[str]:
     """
     cached = _known_roots_cache.get(db_path)
     if cached is None:
-        refresh_known_project_roots(db_path).wait()
-        cached = _known_roots_cache.get(db_path)
-        # A failed shared scan leaves no list; scanning here gives the caller its error.
-        return cached[1] if cached else _scan_project_roots(db_path)
+        return refresh_known_project_roots(db_path).result()
     if time.monotonic() - cached[0] >= KNOWN_ROOTS_TTL_S:
         refresh_known_project_roots(db_path)
     return cached[1]
 
 
-def refresh_known_project_roots(db_path: Optional[str] = None) -> threading.Event:
+def refresh_known_project_roots(db_path: Optional[str] = None) -> Future:
     """Rescan the project roots on a background thread; one scan runs per ``db_path``.
 
-    A failed scan keeps the cached list, and the next stale read tries again.
+    A failed scan keeps the cached list, and the next read tries again.
 
     Returns:
-        threading.Event: set when the running scan ends, whether it passed or failed.
+        Future: the running scan, which every waiter shares. It holds the roots or the scan's error.
     """
     with _known_roots_lock:
         running = _known_roots_refreshing.get(db_path)
         if running is not None:
             return running
-        finished = threading.Event()
-        _known_roots_refreshing[db_path] = finished
+        scan: Future = Future()
+        _known_roots_refreshing[db_path] = scan
 
     def run() -> None:
+        roots, error = None, None
         try:
-            _known_roots_cache[db_path] = (time.monotonic(), _scan_project_roots(db_path))
+            roots = _scan_project_roots(db_path)
+            _known_roots_cache[db_path] = (time.monotonic(), roots)
         except Exception as e:
             logger.warning("Project root refresh failed: %s", _scrub_exception(e))
+            error = e
         finally:
             try:
                 # FTS connections are per thread, and this thread ends here.
@@ -2715,10 +2715,13 @@ def refresh_known_project_roots(db_path: Optional[str] = None) -> threading.Even
             finally:
                 with _known_roots_lock:
                     del _known_roots_refreshing[db_path]
-                finished.set()
+                if error is None:
+                    scan.set_result(roots)
+                else:
+                    scan.set_exception(error)
 
     threading.Thread(target=run, name="known-roots", daemon=True).start()
-    return finished
+    return scan
 
 
 def _scan_project_roots(db_path: Optional[str]) -> List[str]:
