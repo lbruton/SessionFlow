@@ -9,6 +9,12 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-01
+
+### Changed
+
+- `get_turns` accepts a unique session ID prefix of at least 8 characters. An ambiguous prefix lists up to 5 sessions with their last timestamp and returns no turns, and an unknown ID returns an error that says what to pass instead of "No turns found." The output opens with `Session: <full id>`, and the tool schema says `turn_index` is the value from a search result, not a position in the session (SESF-91).
+
 ## [0.16.0] - 2026-11-01
 
 ### Added
