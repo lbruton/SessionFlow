@@ -503,7 +503,7 @@ _fts = FTSIndex("turns_fts", [
 ProjectRoots = Union[str, Sequence[str]]
 # db_path -> (monotonic time, roots); see known_project_roots.
 _known_roots_cache: Dict[Optional[str], tuple] = {}
-_known_roots_refreshing: set = set()
+_known_roots_refreshing: Dict[Optional[str], threading.Event] = {}
 _known_roots_lock = threading.Lock()
 KNOWN_ROOTS_TTL_S = 300.0
 _write_lock: Optional[asyncio.Lock] = None
@@ -2675,27 +2675,33 @@ def known_project_roots(db_path: Optional[str] = None) -> List[str]:
 
     The result is cached per ``db_path``. A list older than ``KNOWN_ROOTS_TTL_S``
     is returned at once and refreshed in the background, so only a caller with
-    no cached list waits for ``_scan_project_roots``.
+    no cached list waits, and it shares any scan already running.
     """
     cached = _known_roots_cache.get(db_path)
     if cached is None:
-        roots = _scan_project_roots(db_path)
-        _known_roots_cache[db_path] = (time.monotonic(), roots)
-        return roots
+        refresh_known_project_roots(db_path).wait()
+        cached = _known_roots_cache.get(db_path)
+        # A failed shared scan leaves no list; scanning here gives the caller its error.
+        return cached[1] if cached else _scan_project_roots(db_path)
     if time.monotonic() - cached[0] >= KNOWN_ROOTS_TTL_S:
         refresh_known_project_roots(db_path)
     return cached[1]
 
 
-def refresh_known_project_roots(db_path: Optional[str] = None) -> None:
+def refresh_known_project_roots(db_path: Optional[str] = None) -> threading.Event:
     """Rescan the project roots on a background thread; one scan runs per ``db_path``.
 
     A failed scan keeps the cached list, and the next stale read tries again.
+
+    Returns:
+        threading.Event: set when the running scan ends, whether it passed or failed.
     """
     with _known_roots_lock:
-        if db_path in _known_roots_refreshing:
-            return
-        _known_roots_refreshing.add(db_path)
+        running = _known_roots_refreshing.get(db_path)
+        if running is not None:
+            return running
+        finished = threading.Event()
+        _known_roots_refreshing[db_path] = finished
 
     def run() -> None:
         try:
@@ -2703,12 +2709,16 @@ def refresh_known_project_roots(db_path: Optional[str] = None) -> None:
         except Exception as e:
             logger.warning("Project root refresh failed: %s", _scrub_exception(e))
         finally:
-            # FTS connections are per thread, and this thread ends here.
-            _fts.close_all()
-            with _known_roots_lock:
-                _known_roots_refreshing.discard(db_path)
+            try:
+                # FTS connections are per thread, and this thread ends here.
+                _fts.close_all()
+            finally:
+                with _known_roots_lock:
+                    del _known_roots_refreshing[db_path]
+                finished.set()
 
     threading.Thread(target=run, name="known-roots", daemon=True).start()
+    return finished
 
 
 def _scan_project_roots(db_path: Optional[str]) -> List[str]:

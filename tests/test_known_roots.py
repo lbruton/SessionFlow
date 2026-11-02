@@ -25,6 +25,9 @@ class _FakeFts:
     def close_ephemeral(self, conn):
         pass
 
+    def close_all(self):
+        pass
+
     def distinct_values(self, conn, column):
         if self.raises:
             raise RuntimeError("fts down")
@@ -177,6 +180,37 @@ def test_refresh_fills_an_empty_cache_without_blocking(setup):
     fts.release.set()
     _wait_for_refresh()
     assert rag_engine._known_roots_cache["db"][1] == ["/new"]
+
+
+def test_empty_cache_waits_for_the_scan_in_flight(setup):
+    fts = _SlowFts(["/new"])
+    setup(fts)
+    rag_engine.refresh_known_project_roots("db")
+    seen = []
+    caller = threading.Thread(target=lambda: seen.append(rag_engine.known_project_roots("db")))
+    caller.start()
+    time.sleep(0.05)
+    assert seen == []
+
+    fts.release.set()
+    caller.join(5)
+    assert seen == [["/new"]]
+    assert fts.scans == 1
+
+
+def test_empty_cache_scans_itself_when_the_shared_scan_fails(setup, monkeypatch):
+    fts = _SlowFts(["/new"])
+    setup(fts)
+    results = iter([RuntimeError("scan failed"), ["/retry"]])
+
+    def _scan(db_path):
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(rag_engine, "_scan_project_roots", _scan)
+    assert rag_engine.known_project_roots("db") == ["/retry"]
 
 
 def test_unfiltered_count_reads_docsize_not_the_table(tmp_path):
