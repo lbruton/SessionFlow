@@ -9,6 +9,15 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-11-02
+
+### Fixed
+
+- An unfiltered FTS row count reads the `docsize` table instead of walking every row, which shortens `/health`
+  and project scope lookups (SESF-110).
+- Server startup fills the project roots cache, and a stale list is returned at once while a background thread
+  refreshes it, so session-start recall does not wait for a scan (SESF-110).
+
 ## [0.17.1] - 2026-11-02
 
 ### Fixed
