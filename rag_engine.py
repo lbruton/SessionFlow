@@ -493,6 +493,7 @@ def _embed_texts_local(texts: List[str], is_query: bool = False,
 # --- Milvus client management ---
 
 _persistent_clients: Dict[str, MilvusClient] = {}
+_persistent_clients_lock = threading.Lock()
 _fts = FTSIndex("turns_fts", [
     "session_id", "git_branch", "turn_index", "timestamp", "chunk_type",
     "project_root", "logical_session_id", "provider", "source_kind",
@@ -553,39 +554,48 @@ def close_server_mode():
 def _get_persistent_client(db_path: str) -> MilvusClient:
     """Get or create a persistent client for the given DB path.
     On failure, evicts the stale client and retries once."""
-    if db_path in _persistent_clients:
+    client = _persistent_clients.get(db_path)
+    if client is not None:
         try:
-            _persistent_clients[db_path].has_collection(COLLECTION_NAME)
-            return _persistent_clients[db_path]
+            client.has_collection(COLLECTION_NAME)
+            return client
         except Exception as e:
             logger.warning("Stale Milvus client for %s: %s — reconnecting", db_path, _scrub_exception(e))
+
+    # The health check stays outside the lock. Opening stays inside it, so only
+    # one client connects per path. A thread that lost the race reuses that client.
+    with _persistent_clients_lock:
+        current = _persistent_clients.get(db_path)
+        if current is not None and current is not client:
+            return current
+        if current is not None:
             try:
-                _persistent_clients[db_path].close()
+                current.close()
             except Exception:
                 pass
             del _persistent_clients[db_path]
 
-    if not _is_remote_uri(db_path):
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if _is_remote_uri(db_path):
-            # Remote Milvus Standalone — default gRPC settings are fine.
-            _persistent_clients[db_path] = MilvusClient(db_path)
-        else:
-            # Milvus Lite — increase gRPC keepalive to 120s to prevent
-            # GOAWAY/ENHANCE_YOUR_CALM (Lite rejects default 10s as too_many_pings).
-            _persistent_clients[db_path] = MilvusClient(
-                db_path,
-                grpc_options={
-                    "grpc.keepalive_time_ms": 120_000,
-                    "grpc.keepalive_timeout_ms": 20_000,
-                },
-            )
-        logger.info("Opened client: %s", db_path)
-    except Exception as e:
-        logger.error("Failed to connect to Milvus at %s: %s", db_path, _scrub_exception(e))
-        raise
-    return _persistent_clients[db_path]
+        if not _is_remote_uri(db_path):
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if _is_remote_uri(db_path):
+                # Remote Milvus Standalone: default gRPC settings are fine.
+                _persistent_clients[db_path] = MilvusClient(db_path)
+            else:
+                # Milvus Lite: raise the gRPC keepalive to 120s to prevent
+                # GOAWAY/ENHANCE_YOUR_CALM (Lite rejects the default 10s as too_many_pings).
+                _persistent_clients[db_path] = MilvusClient(
+                    db_path,
+                    grpc_options={
+                        "grpc.keepalive_time_ms": 120_000,
+                        "grpc.keepalive_timeout_ms": 20_000,
+                    },
+                )
+            logger.info("Opened client: %s", db_path)
+        except Exception as e:
+            logger.error("Failed to connect to Milvus at %s: %s", db_path, _scrub_exception(e))
+            raise
+        return _persistent_clients[db_path]
 
 
 def _resolve_db_path(db_path: Optional[str]) -> str:
@@ -1715,6 +1725,9 @@ def _cap_for_display(row: Dict) -> Dict:
 
 _NOT_PASSAGE = f'chunk_type != "{passages.PASSAGE_CHUNK_TYPE}"'
 
+_LISTING_SCAN_FIELDS = ["doc_id", "timestamp"]
+_LISTING_FETCH_CHUNK = 200
+
 
 def _without_passages(filter_expr: Optional[str]) -> str:
     """Return ``filter_expr`` restricted to rows that are not passages."""
@@ -1740,6 +1753,9 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     size``. Rows therefore stream through ``_query_batches`` into a
     ``_NewestN`` bounded heap: memory stays O(n) and the kept set is the true
     global newest-``n`` regardless of collection size.
+
+    The scan reads ``_LISTING_SCAN_FIELDS`` only, because ``document`` is most
+    of the bytes. A second pass fetches the full rows of the newest ``n``.
     """
     if n <= 0:
         return []
@@ -1749,12 +1765,20 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
         date_from, date_to, issue_id,
     ))
 
-    collector = _NewestN(n)
+    newest = _NewestN(n)
     for batch in _query_batches(
-        _SEARCH_OUTPUT_FIELDS, filter_expr=filter_expr, db_path=db_path,
+        _LISTING_SCAN_FIELDS, filter_expr=filter_expr, db_path=db_path,
     ):
         for row in batch:
-            collector.add(row)
+            newest.add(row)
+
+    pks = [_pk_from_doc_id(row.get("doc_id") or "") for row in newest.result()]
+    collector = _NewestN(n)
+    for start in range(0, len(pks), _LISTING_FETCH_CHUNK):
+        id_filter = f"({filter_expr}) && id in {json.dumps(pks[start:start + _LISTING_FETCH_CHUNK])}"
+        for batch in _query_batches(_SEARCH_OUTPUT_FIELDS, filter_expr=id_filter, db_path=db_path):
+            for row in batch:
+                collector.add(row)
 
     rows = collector.result()
     if not rows:
@@ -3511,6 +3535,9 @@ async def search_async(query: str, n: int = 5, session_id: Optional[str] = None,
             issue_id=issue_id, db_path=db_path,
         )
 
+    if not query or not query.strip():
+        # A listing uses no MLX, so it does not queue behind searches and embeds.
+        return await asyncio.to_thread(run)
     if semaphore is None or executor is None:
         # Before init_server_mode (server still starting, or no server): keep the
         # event loop free. _mlx_eval_lock still serializes any MLX work.

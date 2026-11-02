@@ -6,6 +6,7 @@ Requirements: 6.6, 6.7, 7, 8.
 import importlib
 import json
 import asyncio
+import threading
 from contextlib import contextmanager
 
 import pytest
@@ -22,6 +23,85 @@ async def test_health_payload_reports_providers_queue_and_local_embedding(stub_r
     assert "backfill" in payload
     assert "embedding" in payload
     assert "local_mlx" in payload
+
+
+@pytest.mark.anyio
+async def test_health_runs_provider_checks_off_the_event_loop(stub_rag_engine, monkeypatch):
+    http_server = importlib.import_module("http_server")
+    seen = {}
+
+    def fake_provider_health(deep=False):
+        seen.update(thread=threading.get_ident(), deep=deep)
+        return {}
+
+    monkeypatch.setattr(http_server, "_provider_health", fake_provider_health)
+    await http_server.health(None)
+
+    assert seen["thread"] != threading.get_ident()
+    assert seen["deep"] is False
+
+
+@pytest.mark.anyio
+async def test_concurrent_health_calls_share_one_provider_scan(stub_rag_engine, monkeypatch):
+    http_server = importlib.import_module("http_server")
+    release = threading.Event()
+    calls = []
+
+    def fake_provider_health(deep=False):
+        calls.append(deep)
+        release.wait(5)
+        return {"scan": len(calls)}
+
+    monkeypatch.setattr(http_server, "_provider_health", fake_provider_health)
+    waiters = [asyncio.ensure_future(http_server._shared_provider_health(False)) for _ in range(3)]
+    await asyncio.sleep(0.05)
+    release.set()
+
+    assert await asyncio.gather(*waiters) == [{"scan": 1}] * 3
+    assert calls == [False]
+    assert await http_server._shared_provider_health(False) == {"scan": 2}
+
+
+@pytest.mark.anyio
+async def test_deep_health_runs_its_own_provider_scan(stub_rag_engine, monkeypatch):
+    http_server = importlib.import_module("http_server")
+    release = threading.Event()
+    calls = []
+
+    def fake_provider_health(deep=False):
+        calls.append(deep)
+        if not deep:
+            release.wait(5)
+        return {}
+
+    monkeypatch.setattr(http_server, "_provider_health", fake_provider_health)
+    cached = asyncio.ensure_future(http_server._shared_provider_health(False))
+    await asyncio.sleep(0.05)
+    await http_server._shared_provider_health(True)
+    release.set()
+    await cached
+
+    assert sorted(calls) == [False, True]
+
+
+@pytest.mark.anyio
+async def test_cancelled_caller_leaves_the_shared_scan_running(stub_rag_engine, monkeypatch):
+    http_server = importlib.import_module("http_server")
+    release = threading.Event()
+
+    def fake_provider_health(deep=False):
+        release.wait(5)
+        return {"ok": True}
+
+    monkeypatch.setattr(http_server, "_provider_health", fake_provider_health)
+    first = asyncio.ensure_future(http_server._shared_provider_health(False))
+    second = asyncio.ensure_future(http_server._shared_provider_health(False))
+    await asyncio.sleep(0.05)
+    first.cancel()
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await second == {"ok": True}
 
 
 def test_local_backfill_control_endpoint_exists(stub_rag_engine):

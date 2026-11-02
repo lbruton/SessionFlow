@@ -9,6 +9,19 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-02
+
+### Fixed
+
+- A query-less `search_all_sessions` or `search_session` call no longer waits on the `mlx-embed` thread, so
+  session-start recall does not queue behind reranked searches and embeds (SESF-109).
+- The query-less listing scans `doc_id` and `timestamp`, then fetches the full rows of the newest results, so
+  it no longer streams `document` for every matching row (SESF-109).
+- `/health` runs the provider checks on an executor, and concurrent calls share one scan, so a cache miss no
+  longer blocks the event loop (SESF-109).
+- `_get_persistent_client` guards its cache with a lock, so concurrent callers cannot raise `KeyError` on a
+  stale client or leak a second client (SESF-109).
+
 ## [0.17.0] - 2026-11-01
 
 ### Changed

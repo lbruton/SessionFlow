@@ -193,9 +193,9 @@ def test_listing_streams_via_query_iterator(monkeypatch):
     single-shot capped query() (which overflows Milvus's result buffer)."""
     client = _patch_listing(monkeypatch, [_qrow("a", 1)])
     rag_engine.search("", n=5, db_path=DB)
-    assert len(client.query_calls) == 1
-    assert "limit" not in client.query_calls[0]
-    assert client.iterators[0].closed
+    assert len(client.query_calls) == 2  # the scan, then the fetch of the newest rows
+    assert all("limit" not in call for call in client.query_calls)
+    assert all(iterator.closed for iterator in client.iterators)
 
 
 def test_listing_large_filtered_set_returns_n_newest(monkeypatch):
