@@ -493,6 +493,7 @@ def _embed_texts_local(texts: List[str], is_query: bool = False,
 # --- Milvus client management ---
 
 _persistent_clients: Dict[str, MilvusClient] = {}
+_persistent_clients_lock = threading.Lock()
 _fts = FTSIndex("turns_fts", [
     "session_id", "git_branch", "turn_index", "timestamp", "chunk_type",
     "project_root", "logical_session_id", "provider", "source_kind",
@@ -553,39 +554,48 @@ def close_server_mode():
 def _get_persistent_client(db_path: str) -> MilvusClient:
     """Get or create a persistent client for the given DB path.
     On failure, evicts the stale client and retries once."""
-    if db_path in _persistent_clients:
+    client = _persistent_clients.get(db_path)
+    if client is not None:
         try:
-            _persistent_clients[db_path].has_collection(COLLECTION_NAME)
-            return _persistent_clients[db_path]
+            client.has_collection(COLLECTION_NAME)
+            return client
         except Exception as e:
             logger.warning("Stale Milvus client for %s: %s — reconnecting", db_path, _scrub_exception(e))
+
+    # The health check stays outside the lock, so a slow Milvus call never
+    # serializes callers. A thread that lost the race reuses the winner's client.
+    with _persistent_clients_lock:
+        current = _persistent_clients.get(db_path)
+        if current is not None and current is not client:
+            return current
+        if current is not None:
             try:
-                _persistent_clients[db_path].close()
+                current.close()
             except Exception:
                 pass
             del _persistent_clients[db_path]
 
-    if not _is_remote_uri(db_path):
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if _is_remote_uri(db_path):
-            # Remote Milvus Standalone — default gRPC settings are fine.
-            _persistent_clients[db_path] = MilvusClient(db_path)
-        else:
-            # Milvus Lite — increase gRPC keepalive to 120s to prevent
-            # GOAWAY/ENHANCE_YOUR_CALM (Lite rejects default 10s as too_many_pings).
-            _persistent_clients[db_path] = MilvusClient(
-                db_path,
-                grpc_options={
-                    "grpc.keepalive_time_ms": 120_000,
-                    "grpc.keepalive_timeout_ms": 20_000,
-                },
-            )
-        logger.info("Opened client: %s", db_path)
-    except Exception as e:
-        logger.error("Failed to connect to Milvus at %s: %s", db_path, _scrub_exception(e))
-        raise
-    return _persistent_clients[db_path]
+        if not _is_remote_uri(db_path):
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if _is_remote_uri(db_path):
+                # Remote Milvus Standalone: default gRPC settings are fine.
+                _persistent_clients[db_path] = MilvusClient(db_path)
+            else:
+                # Milvus Lite: raise the gRPC keepalive to 120s to prevent
+                # GOAWAY/ENHANCE_YOUR_CALM (Lite rejects the default 10s as too_many_pings).
+                _persistent_clients[db_path] = MilvusClient(
+                    db_path,
+                    grpc_options={
+                        "grpc.keepalive_time_ms": 120_000,
+                        "grpc.keepalive_timeout_ms": 20_000,
+                    },
+                )
+            logger.info("Opened client: %s", db_path)
+        except Exception as e:
+            logger.error("Failed to connect to Milvus at %s: %s", db_path, _scrub_exception(e))
+            raise
+        return _persistent_clients[db_path]
 
 
 def _resolve_db_path(db_path: Optional[str]) -> str:
