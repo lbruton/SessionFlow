@@ -562,8 +562,8 @@ def _get_persistent_client(db_path: str) -> MilvusClient:
         except Exception as e:
             logger.warning("Stale Milvus client for %s: %s — reconnecting", db_path, _scrub_exception(e))
 
-    # The health check stays outside the lock, so a slow Milvus call never
-    # serializes callers. A thread that lost the race reuses the winner's client.
+    # The health check stays outside the lock. Opening stays inside it, so only
+    # one client connects per path. A thread that lost the race reuses that client.
     with _persistent_clients_lock:
         current = _persistent_clients.get(db_path)
         if current is not None and current is not client:
