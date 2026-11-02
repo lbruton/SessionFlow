@@ -957,6 +957,10 @@ async def health(request: Request) -> JSONResponse:
     memory_payload = await asyncio.get_running_loop().run_in_executor(
         None, _memory_health_payload
     )
+    # A cache miss in _provider_health walks every provider's sources.
+    providers_payload = await asyncio.get_running_loop().run_in_executor(
+        None, _provider_health, deep
+    )
     return JSONResponse({
         "memory": jsonable(memory_payload),
         "status": "starting" if starting else "ok",
@@ -969,7 +973,7 @@ async def health(request: Request) -> JSONResponse:
         "milvus": _server_mode_ready,
         "milvus_backend": "standalone" if MILVUS_URI.startswith("http") else "lite",
         "watchers": {k: v for k, v in watchers.items()},
-        "providers": _provider_health(deep=deep),
+        "providers": providers_payload,
         "backfill": _backfill_status_payload(),
         "embedding": _embedding_status_payload(),
         "ranking": {**rag_engine.ranking_settings(), "reranker_state": reranker.status()},

@@ -1715,6 +1715,9 @@ def _cap_for_display(row: Dict) -> Dict:
 
 _NOT_PASSAGE = f'chunk_type != "{passages.PASSAGE_CHUNK_TYPE}"'
 
+_LISTING_SCAN_FIELDS = ["doc_id", "timestamp"]
+_LISTING_FETCH_CHUNK = 200
+
 
 def _without_passages(filter_expr: Optional[str]) -> str:
     """Return ``filter_expr`` restricted to rows that are not passages."""
@@ -1740,6 +1743,9 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
     size``. Rows therefore stream through ``_query_batches`` into a
     ``_NewestN`` bounded heap: memory stays O(n) and the kept set is the true
     global newest-``n`` regardless of collection size.
+
+    The scan reads ``_LISTING_SCAN_FIELDS`` only, because ``document`` is most
+    of the bytes. A second pass fetches the full rows of the newest ``n``.
     """
     if n <= 0:
         return []
@@ -1749,12 +1755,20 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
         date_from, date_to, issue_id,
     ))
 
-    collector = _NewestN(n)
+    newest = _NewestN(n)
     for batch in _query_batches(
-        _SEARCH_OUTPUT_FIELDS, filter_expr=filter_expr, db_path=db_path,
+        _LISTING_SCAN_FIELDS, filter_expr=filter_expr, db_path=db_path,
     ):
         for row in batch:
-            collector.add(row)
+            newest.add(row)
+
+    doc_ids = [row.get("doc_id") or "" for row in newest.result()]
+    collector = _NewestN(n)
+    for start in range(0, len(doc_ids), _LISTING_FETCH_CHUNK):
+        id_filter = f"({filter_expr}) && doc_id in {json.dumps(doc_ids[start:start + _LISTING_FETCH_CHUNK])}"
+        for batch in _query_batches(_SEARCH_OUTPUT_FIELDS, filter_expr=id_filter, db_path=db_path):
+            for row in batch:
+                collector.add(row)
 
     rows = collector.result()
     if not rows:
@@ -3511,6 +3525,9 @@ async def search_async(query: str, n: int = 5, session_id: Optional[str] = None,
             issue_id=issue_id, db_path=db_path,
         )
 
+    if not query or not query.strip():
+        # A listing uses no MLX, so it does not queue behind searches and embeds.
+        return await asyncio.to_thread(run)
     if semaphore is None or executor is None:
         # Before init_server_mode (server still starting, or no server): keep the
         # event loop free. _mlx_eval_lock still serializes any MLX work.
