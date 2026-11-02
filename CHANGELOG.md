@@ -17,7 +17,8 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
   session-start recall does not queue behind reranked searches and embeds (SESF-109).
 - The query-less listing scans `doc_id` and `timestamp`, then fetches the full rows of the newest results, so
   it no longer streams `document` for every matching row (SESF-109).
-- `/health` runs the provider checks on an executor, so a cache miss no longer blocks the event loop (SESF-109).
+- `/health` runs the provider checks on an executor, and concurrent calls share one scan, so a cache miss no
+  longer blocks the event loop (SESF-109).
 
 ## [0.17.0] - 2026-11-01
 

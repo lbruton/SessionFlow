@@ -339,6 +339,7 @@ _fts_heal_executor: concurrent.futures.ThreadPoolExecutor | None = None
 _PROVIDER_HEALTH_TTL = 30  # seconds
 _provider_health_cache: dict | None = None
 _provider_health_cache_ts: float = 0.0
+_provider_scan: asyncio.Future | None = None  # touched only on the event loop
 
 # TTL cache for the FTS-lag block — a full Milvus count on every /health probe
 # would be wasteful, so cache it for a few seconds (mirrors provider health).
@@ -875,6 +876,29 @@ def _provider_health(deep: bool = False) -> dict:
     return health
 
 
+async def _shared_provider_health(deep: bool) -> dict:
+    """Run ``_provider_health`` on an executor; concurrent non-deep calls share one scan.
+
+    The default executor also runs query-less listings, so a burst of cache
+    misses must not fill it. ``shield`` keeps the scan alive for other waiters
+    when one caller is cancelled.
+    """
+    global _provider_scan
+    loop = asyncio.get_running_loop()
+    if deep:
+        return await loop.run_in_executor(None, _provider_health, True)
+    if _provider_scan is None:
+        scan = loop.run_in_executor(None, _provider_health, False)
+
+        def _clear_scan(_done: asyncio.Future) -> None:
+            global _provider_scan
+            _provider_scan = None
+
+        scan.add_done_callback(_clear_scan)
+        _provider_scan = scan
+    return await asyncio.shield(_provider_scan)
+
+
 def _backfill_status_payload() -> dict:
     status = _backfill_manager.status()
     return {
@@ -957,10 +981,7 @@ async def health(request: Request) -> JSONResponse:
     memory_payload = await asyncio.get_running_loop().run_in_executor(
         None, _memory_health_payload
     )
-    # A cache miss in _provider_health walks every provider's sources.
-    providers_payload = await asyncio.get_running_loop().run_in_executor(
-        None, _provider_health, deep
-    )
+    providers_payload = await _shared_provider_health(deep)
     return JSONResponse({
         "memory": jsonable(memory_payload),
         "status": "starting" if starting else "ok",
