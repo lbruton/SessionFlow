@@ -1762,10 +1762,10 @@ def _recent_listing(n: int, session_id: Optional[str] = None,
         for row in batch:
             newest.add(row)
 
-    doc_ids = [row.get("doc_id") or "" for row in newest.result()]
+    pks = [_pk_from_doc_id(row.get("doc_id") or "") for row in newest.result()]
     collector = _NewestN(n)
-    for start in range(0, len(doc_ids), _LISTING_FETCH_CHUNK):
-        id_filter = f"({filter_expr}) && doc_id in {json.dumps(doc_ids[start:start + _LISTING_FETCH_CHUNK])}"
+    for start in range(0, len(pks), _LISTING_FETCH_CHUNK):
+        id_filter = f"({filter_expr}) && id in {json.dumps(pks[start:start + _LISTING_FETCH_CHUNK])}"
         for batch in _query_batches(_SEARCH_OUTPUT_FIELDS, filter_expr=id_filter, db_path=db_path):
             for row in batch:
                 collector.add(row)

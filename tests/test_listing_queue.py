@@ -70,8 +70,13 @@ def test_query_search_still_waits_for_the_mlx_thread(monkeypatch, mlx_executor):
         _search_on_busy_mlx(monkeypatch, mlx_executor, "real query")
 
 
+def _fetched_pks(filter_expr):
+    match = re.search(r"\bid in (\[.*\])", filter_expr)
+    return set(json.loads(match.group(1))) if match else None
+
+
 class _ProjectingClient:
-    """Fake Milvus client that honors ``output_fields`` and a ``doc_id in`` filter."""
+    """Fake Milvus client that honors ``output_fields`` and an ``id in`` filter."""
 
     def __init__(self, rows):
         self._rows = rows
@@ -83,10 +88,9 @@ class _ProjectingClient:
     def query_iterator(self, *args, **kwargs):
         self.calls.append(kwargs)
         rows = self._rows
-        match = re.search(r"doc_id in (\[.*\])", kwargs.get("filter") or "")
-        if match:
-            wanted = set(json.loads(match.group(1)))
-            rows = [r for r in rows if r["doc_id"] in wanted]
+        wanted = _fetched_pks(kwargs.get("filter") or "")
+        if wanted is not None:
+            rows = [r for r in rows if rag_engine._pk_from_doc_id(r["doc_id"]) in wanted]
         fields = kwargs["output_fields"]
         return _FakeIterator([{k: r[k] for k in fields if k in r} for r in rows],
                              kwargs.get("batch_size", 1000))
@@ -119,7 +123,7 @@ def test_full_rows_are_fetched_for_the_newest_only(monkeypatch):
     fetch = client.calls[1]
     assert "document" in fetch["output_fields"]
     assert 'provider == "codex"' in fetch["filter"]
-    assert set(json.loads(re.search(r"doc_id in (\[.*\])", fetch["filter"]).group(1))) == {"d0", "d1"}
+    assert _fetched_pks(fetch["filter"]) == {rag_engine._pk_from_doc_id(d) for d in ("d0", "d1")}
 
 
 def test_fetch_splits_a_long_doc_id_list(monkeypatch):
@@ -144,7 +148,7 @@ def test_row_deleted_between_scan_and_fetch_is_dropped(monkeypatch):
 
     def delete_after_scan(*args, **kwargs):
         iterator = original(*args, **kwargs)
-        if "doc_id in" not in (kwargs.get("filter") or ""):
+        if _fetched_pks(kwargs.get("filter") or "") is None:
             client._rows = rows[1:]
         return iterator
 
