@@ -755,8 +755,9 @@ def register_tools(server: Server):
                 name="get_turns",
                 description=(
                     "Return the turns before and after one turn of a session. Requires "
-                    "'session_id' and 'turn_index', both from a search result. Call it after "
-                    "search_session or search_all_sessions to read a hit in context."
+                    "'session_id' and 'turn_index', both from a search result. 'session_id' "
+                    f"may be a unique prefix of at least {MIN_SESSION_PREFIX} characters. Call it "
+                    "after search_session or search_all_sessions to read a hit in context."
                 ),
                 inputSchema={
                     "type": "object",
