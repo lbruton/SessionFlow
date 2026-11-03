@@ -9,6 +9,22 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-02
+
+### Added
+
+- An embedding fingerprint records the model ID, snapshot revision, tokenizer hash, prefixes, pooling, token
+  limit, dimension and implementation version of the stored vectors. A fingerprint that differs from the active
+  model logs a warning and shows in `/health` under `embedding.fingerprint` and `memory.index.fingerprint_drift`;
+  a model ID or dimension change still refuses to start (SESF-95).
+- Milvus Standalone keeps the transcript stamp in the `sessions` collection property `sessionflow.embedding`,
+  so every host sharing the server sees one stamp. Milvus Lite keeps `~/.sessionflow/model_identity.json`
+  (SESF-95).
+- Memory migration `002_embedding_fingerprint` adds `memory_index_meta.fingerprint`. A finished
+  `cleanup.py reembed run` records the new fingerprint for transcripts and memories (SESF-95).
+- `tests/test_embedding_parity.py` compares MLX vectors with the sentence-transformers reference model and
+  skips unless both are cached (SESF-95).
+
 ## [0.17.2] - 2026-11-02
 
 ### Fixed
