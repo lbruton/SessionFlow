@@ -289,6 +289,7 @@ class MemoryIndex:
         model_name: Optional[str] = None,
         milvus_uri: str = "",
         spec: Optional[Any] = None,
+        fingerprint: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Bind the store, the Milvus client and this machine's FTS file."""
         self.store = store
@@ -299,8 +300,11 @@ class MemoryIndex:
         self.model_name = model_name or rag_engine.get_model_name()
         self.milvus_uri = milvus_uri
         self.spec = spec or rag_engine.MEMORIES_SPEC
+        self.fingerprint = fingerprint or rag_engine.current_fingerprint()
         self.fts: Optional[MemoryFTS] = None
         self.milvus_blocked: Optional[str] = None
+        self.fingerprint_drift: List[str] = []
+        self._stored_fingerprint: Optional[Dict[str, Any]] = None
         self.last_tick: Optional[datetime] = None
         self._lagging = True
 
@@ -312,20 +316,32 @@ class MemoryIndex:
     async def start(self) -> None:
         """Ensure the collection, check the memory model, and rebuild a missing or damaged FTS file."""
         await run_db(rag_engine._ensure_collection, self.milvus, self.milvus_uri, spec=self.spec)
-        meta = await run_db(self.store.claim_index_model, self.model_name, self.spec.vector_dim())
+        meta = await run_db(self.store.claim_index_model, self.model_name, self.spec.vector_dim(),
+                            self._claimable_fingerprint())
+        self._set_fingerprint_drift(meta.get("fingerprint"))
         self._set_model_block(meta["model_name"], meta["vector_dim"])
         self.fts = await run_db(MemoryFTS, self.fts_path)
         if self.fts.recreated:
             await self._rebuild_fts()
 
     def _model_mismatch(self, model_name: Any, vector_dim: Any) -> Optional[str]:
-        if model_name == self.model_name and vector_dim == self.spec.vector_dim():
-            return None
-        return (
-            f"local model {self.model_name} ({self.spec.vector_dim()} dims) does not match "
-            f"the memory model {model_name} ({vector_dim} dims); "
-            "memory vectors are not written from this machine"
-        )
+        """Name a model, model ID or dimension difference; other fingerprint fields only warn."""
+        if model_name != self.model_name or vector_dim != self.spec.vector_dim():
+            return (
+                f"local model {self.model_name} ({self.spec.vector_dim()} dims) does not match "
+                f"the memory model {model_name} ({vector_dim} dims); "
+                "memory vectors are not written from this machine"
+            )
+        stored = self._stored_fingerprint
+        if isinstance(stored, dict) and any(stored.get(k) != self.fingerprint.get(k)
+                                            for k in ("model_id", "embed_dim")):
+            return (
+                f"local model ID {self.fingerprint.get('model_id')} "
+                f"({self.fingerprint.get('embed_dim')} dims) does not match the memory model ID "
+                f"{stored.get('model_id')} ({stored.get('embed_dim')} dims); "
+                "memory vectors are not written from this machine"
+            )
+        return None
 
     def _set_model_block(self, model_name: Any, vector_dim: Any) -> None:
         reason = self._model_mismatch(model_name, vector_dim)
@@ -333,20 +349,43 @@ class MemoryIndex:
             logger.warning("Memory Milvus writes refused: %s", reason)
         self.milvus_blocked = reason
 
+    def _claimable_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """Return the fingerprint to record, or None while the model cache cannot resolve it."""
+        return self.fingerprint if rag_engine.fingerprint_resolved(self.fingerprint) else None
+
+    def _set_fingerprint_drift(self, stored: Any) -> None:
+        """Record which fingerprint fields differ from the stored memory vectors.
+
+        Call it before ``_set_model_block``, which blocks on a stored model ID or dimension.
+        """
+        self._stored_fingerprint = stored
+        drift = rag_engine.fingerprint_drift(stored, self.fingerprint)
+        if drift and drift != self.fingerprint_drift:
+            logger.warning(
+                "Embedding fingerprint differs from the stored memory vectors in %s; "
+                "memory search mixes vectors until `cleanup.py reembed run` starts a new generation",
+                ", ".join(drift),
+            )
+        self.fingerprint_drift = drift
+
     async def _refresh_model_block(self) -> None:
         """Compare the stored memory model with this machine's and set or clear the block."""
         meta = await run_db(self.store.index_meta)
-        if meta["model_name"] is None:
+        adoptable = meta.get("fingerprint") is None and not self._model_mismatch(
+            meta["model_name"], meta["vector_dim"])
+        if meta["model_name"] is None or adoptable:
             meta = await run_db(self.store.claim_index_model, self.model_name,
-                                self.spec.vector_dim())
+                                self.spec.vector_dim(), self._claimable_fingerprint())
+        self._set_fingerprint_drift(meta.get("fingerprint"))
         self._set_model_block(meta["model_name"], meta["vector_dim"])
 
     def health(self) -> Dict[str, Any]:
-        """Return the consumer names, the Milvus block reason and the last tick time."""
+        """Return the consumer names, the Milvus block and fingerprint drift, and the last tick time."""
         return {
             "host": self.host,
             "consumers": [MILVUS_CONSUMER, self.fts_consumer],
             "milvus_blocked": self.milvus_blocked,
+            "fingerprint_drift": list(self.fingerprint_drift),
             "last_tick": self.last_tick.isoformat() if self.last_tick else None,
         }
 
@@ -396,8 +435,8 @@ class MemoryIndex:
 
         Returns the row written, or None when the text changed after it was
         embedded, so the caller embeds again. A vector is refused, and the
-        block set, when the stored memory model is not this machine's model:
-        the check reads the model under the same lock as the write.
+        block set, when the stored memory model or fingerprint model ID is not
+        this machine's: the check reads both under the same lock as the write.
         """
         pk = rag_engine._pk_from_doc_id(memory_id)
         with self.store.locked_canonical(memory_id) as row:
@@ -408,6 +447,7 @@ class MemoryIndex:
                 return row
             if vector is None or row["content_hash"] != embedded_hash:
                 return None
+            self._set_fingerprint_drift(row.get("index_fingerprint"))
             self._set_model_block(row["index_model_name"], row["index_vector_dim"])
             if self.milvus_blocked:
                 return None
@@ -508,6 +548,7 @@ class MemoryIndex:
         active record in the project has a current-generation vector, and
         ``pending`` otherwise, so an empty list never hides missing vectors.
         """
+        await self._refresh_model_block()
         state = "pending" if self.milvus_blocked or await run_db(
             self.store.vectors_pending, project, user_id) else "ok"
         if self.milvus_blocked:

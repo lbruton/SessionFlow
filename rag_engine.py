@@ -205,6 +205,7 @@ _MODEL_REGISTRY = {
         "max_tokens": 8192,
         "search_prefix": "search_query: ",
         "document_prefix": "search_document: ",
+        "pooling": "mean",
         "cache_subdir": "models--nomic-ai--modernbert-embed-base",
     },
     "embeddinggemma": {
@@ -213,9 +214,13 @@ _MODEL_REGISTRY = {
         "max_tokens": 2048,
         "search_prefix": "task: search result | query: ",
         "document_prefix": "title: none | text: ",
+        "pooling": "mean",
         "cache_subdir": "models--mlx-community--embeddinggemma-300m-bf16",
     },
 }
+
+# Raise when _embed_gemma or _embed_texts_local changes the vectors they return.
+EMBED_IMPL_VERSION = 1
 
 _MODEL_NAME = os.getenv("SESSIONFLOW_MODEL", "embeddinggemma").lower()
 if _MODEL_NAME not in _MODEL_REGISTRY:
@@ -235,52 +240,309 @@ SESSIONS_SPEC = sessions_spec(_EMBED_DIM)
 MEMORIES_SPEC = memories_spec(_EMBED_DIM)
 COLLECTION_NAME = SESSIONS_SPEC.name
 
-# --- Model identity check ---
+# --- Embedding fingerprint ---
+
+
+def _snapshot_revision(cache: Path) -> Optional[str]:
+    try:
+        return (cache / "refs" / "main").read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _file_sha256(path: Path) -> Optional[str]:
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def embedding_fingerprint(cfg: Optional[Dict[str, object]] = None, cache: Optional[Path] = None,
+                          impl_version: Optional[int] = None) -> Dict[str, object]:
+    """Return every input that shapes a stored vector.
+
+    The revision and tokenizer hash come from the Hugging Face cache and are None
+    when the model is not cached. Defaults describe the active model.
+    """
+    cfg = cfg or _MODEL_CFG
+    cache = cache or _MODEL_CACHE
+    revision = _snapshot_revision(cache)
+    tokenizer = cache / "snapshots" / revision / "tokenizer.json" if revision else None
+    return {
+        "model_id": cfg["model_id"],
+        "revision": revision,
+        "tokenizer_sha256": _file_sha256(tokenizer) if tokenizer else None,
+        "search_prefix": cfg["search_prefix"],
+        "document_prefix": cfg["document_prefix"],
+        "pooling": cfg["pooling"],
+        "max_tokens": cfg["max_tokens"],
+        "embed_dim": cfg["embed_dim"],
+        "impl_version": EMBED_IMPL_VERSION if impl_version is None else impl_version,
+    }
+
+
+_current_fingerprint: Optional[Dict[str, object]] = None
+
+
+def fingerprint_resolved(fingerprint: Dict[str, object]) -> bool:
+    """True when the fingerprint names a cached snapshot and its tokenizer."""
+    return bool(fingerprint.get("revision") and fingerprint.get("tokenizer_sha256"))
+
+
+def current_fingerprint() -> Dict[str, object]:
+    """Return the active model's fingerprint, cached once the model cache resolves it."""
+    global _current_fingerprint
+    if _current_fingerprint is not None:
+        return dict(_current_fingerprint)
+    fingerprint = embedding_fingerprint()
+    if fingerprint_resolved(fingerprint):
+        _current_fingerprint = fingerprint
+    return dict(fingerprint)
+
+
+def fingerprint_hash(fingerprint: Dict[str, object]) -> str:
+    """Return a short stable hash of a fingerprint for logs and /health."""
+    return hashlib.sha256(json.dumps(fingerprint, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def fingerprint_drift(stored: Optional[Dict[str, object]], current: Dict[str, object]) -> List[str]:
+    """Return the fingerprint fields that differ; empty when nothing is stored."""
+    if not isinstance(stored, dict):
+        return []
+    return [key for key in current if stored.get(key) != current.get(key)]
+
+
+# --- Transcript stamp ---
 
 _IDENTITY_FILE = Path.home() / ".sessionflow" / "model_identity.json"
+# Milvus Standalone collection property that holds the transcript stamp.
+STAMP_PROPERTY = "sessionflow.embedding"
+# The last stamp check: the current and stored fingerprints and their drift.
+_stamp_status: Optional[Dict[str, object]] = None
+# The Milvus path the server checked; embedding_stamp_status re-reads its stamp.
+_stamp_db_path: Optional[str] = None
+_stamp_refresh_lock = threading.Lock()
+_stamp_refreshing = False
+STAMP_STATUS_TTL_S = 300.0
+
+
+def _index_has_data(db_path: Optional[str]) -> bool:
+    if not db_path:
+        return False
+    try:
+        client = MilvusClient(db_path)
+        try:
+            if not client.has_collection(COLLECTION_NAME):
+                return False
+            return bool(client.query(collection_name=COLLECTION_NAME, filter="",
+                                     limit=1, output_fields=["id"]))
+        finally:
+            client.close()
+    except Exception as exc:
+        # An unreadable index keeps a model-change refusal in place.
+        logger.warning("Could not check whether the index holds data; assuming it does: %s",
+                       _scrub_exception(exc))
+        return True
+
+
+def _read_file_stamp() -> Optional[Dict[str, object]]:
+    """Return the identity file stamp; None when the file is missing or unreadable.
+
+    A file that is not a JSON object returns a stamp marked ``malformed``, which
+    ``_model_changed`` treats as another model, so stored vectors stay protected.
+    """
+    try:
+        text = _IDENTITY_FILE.read_text()
+    except OSError:
+        return None
+    try:
+        stamp = json.loads(text)
+    except ValueError:
+        stamp = None
+    return stamp if isinstance(stamp, dict) else {"malformed": True}
+
+
+def _read_property_stamp(client: MilvusClient) -> Optional[Dict[str, object]]:
+    raw = (client.describe_collection(COLLECTION_NAME).get("properties") or {}).get(STAMP_PROPERTY)
+    return json.loads(raw) if raw else None
+
+
+def _write_stamp(client: Optional[MilvusClient], stamp: Dict[str, object]) -> None:
+    """Write the stamp to collection properties on Standalone, else to the identity file.
+
+    Milvus Lite does not implement collection properties, and a Lite index is per host.
+    """
+    if client is not None:
+        client.alter_collection_properties(COLLECTION_NAME, properties={STAMP_PROPERTY: json.dumps(stamp)})
+        return
+    _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _IDENTITY_FILE.write_text(json.dumps(stamp))
+
+
+def _current_stamp() -> Dict[str, object]:
+    return {"model_name": _MODEL_NAME, "collection": COLLECTION_NAME,
+            "fingerprint": current_fingerprint()}
+
+
+def _record_stamp_status(stored_fp: Optional[Dict[str, object]]) -> List[str]:
+    global _stamp_status
+    current = current_fingerprint()
+    drift = fingerprint_drift(stored_fp, current)
+    _stamp_status = {
+        "hash": fingerprint_hash(current),
+        "fingerprint": current,
+        "stored_hash": fingerprint_hash(stored_fp) if isinstance(stored_fp, dict) else None,
+        "drift": drift,
+        "checked_at": time.monotonic(),
+    }
+    return drift
+
+
+def _stored_stamp(client: Optional[MilvusClient]) -> Optional[Dict[str, object]]:
+    """Return the Standalone property stamp, else the identity file stamp."""
+    return (_read_property_stamp(client) if client is not None else None) or _read_file_stamp()
+
+
+def _model_changed(stored: Dict[str, object]) -> bool:
+    if stored.get("malformed"):
+        return True
+    if stored.get("model_name") and stored["model_name"] != _MODEL_NAME:
+        return True
+    stored_fp = stored.get("fingerprint")
+    if not isinstance(stored_fp, dict):
+        return False
+    current = current_fingerprint()
+    return any(stored_fp.get(k) != current[k] for k in ("model_id", "embed_dim"))
 
 
 def _check_model_identity(db_path: Optional[str] = None):
-    """Verify that the active model matches what was used to build the index.
+    """Refuse a model or dimension change over stored vectors; warn on fingerprint drift.
 
-    On first run, stamps model_identity.json. On subsequent runs, if the stored
-    model differs and the index has data, raises an error to prevent mixing
-    incompatible vectors.
+    The stamp keeps the fingerprint the stored vectors were built with, so drift
+    stays visible in /health until ``write_embedding_stamp`` records a re-embed. A
+    Standalone collection without a stamp property reads the legacy identity file.
     """
-    _IDENTITY_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    if _IDENTITY_FILE.exists():
-        stored = json.loads(_IDENTITY_FILE.read_text())
-        stored_model = stored.get("model_name", "")
-        if stored_model and stored_model != _MODEL_NAME:
-            # Check if the index actually has data before raising
-            has_data = False
-            if db_path:
-                try:
-                    client = MilvusClient(db_path)
-                    if client.has_collection(COLLECTION_NAME):
-                        count = client.query(
-                            collection_name=COLLECTION_NAME,
-                            filter="",
-                            limit=1,
-                            output_fields=["id"],
-                        )
-                        has_data = len(count) > 0
-                    client.close()
-                except Exception:
-                    pass
-            if has_data:
+    global _stamp_db_path
+    _stamp_db_path = db_path
+    client = MilvusClient(db_path) if db_path and _is_remote_uri(db_path) else None
+    try:
+        if client is not None and not client.has_collection(COLLECTION_NAME):
+            # _create_collection stamps a new collection.
+            _record_stamp_status(None)
+            return
+        property_stamp = _read_property_stamp(client) if client is not None else None
+        stored = property_stamp or _read_file_stamp()
+        new = _current_stamp()
+        if stored and _model_changed(stored):
+            if stored.get("malformed") and _index_has_data(db_path):
                 raise RuntimeError(
-                    f"Model mismatch: index was built with '{stored_model}' but "
-                    f"SESSIONFLOW_MODEL is '{_MODEL_NAME}'. "
+                    f"{_IDENTITY_FILE} is not a JSON object, so the model of the stored vectors "
+                    f"is unknown. Restore the file, or run cleanup.py reset before indexing again."
+                )
+            if _index_has_data(db_path):
+                raise RuntimeError(
+                    f"Model mismatch: index was built with '{stored.get('model_name')}' "
+                    f"({(stored.get('fingerprint') or {}).get('model_id', 'unknown model ID')}) "
+                    f"but SESSIONFLOW_MODEL is '{_MODEL_NAME}' ({_MODEL_ID}, {_EMBED_DIM} dims). "
                     f"Run cleanup.py reset or clear the index before switching models."
                 )
-            # Index is empty — safe to overwrite the stamp
-    # The stamp covers the transcript collection only; the memory model
-    # generation lives in Postgres memory_index_meta.
-    _IDENTITY_FILE.write_text(
-        json.dumps({"model_name": _MODEL_NAME, "collection": COLLECTION_NAME})
-    )
+        elif stored and isinstance(stored.get("fingerprint"), dict) and _index_has_data(db_path):
+            new = stored
+        drift = _record_stamp_status(new["fingerprint"])
+        if drift:
+            logger.warning(
+                "Embedding fingerprint differs from the stored transcript vectors in %s; "
+                "search mixes vectors until `cleanup.py reembed run` finishes",
+                ", ".join(drift),
+            )
+        stamp_store = property_stamp if client is not None else _read_file_stamp()
+        # Without a cached model the fingerprint has no revision; the next start stamps it.
+        if stamp_store != new and fingerprint_resolved(new["fingerprint"]):
+            _write_stamp(client, new)
+            # Milvus has no compare-and-set: a server that starts at the same time
+            # can overwrite the first stamp, so read it back before indexing.
+            written = _read_property_stamp(client) if client is not None else new
+            if written and written != new and _model_changed(written):
+                raise RuntimeError(
+                    f"Model mismatch: another server stamped the index with "
+                    f"'{written.get('model_name')}' while SESSIONFLOW_MODEL is '{_MODEL_NAME}'. "
+                    f"Run every server with one model, or clear the index before switching."
+                )
+    finally:
+        if client is not None:
+            client.close()
+
+
+def write_embedding_stamp(db_path: Optional[str] = None) -> None:
+    """Record the current fingerprint as the one every stored transcript vector uses.
+
+    Call it only after every row is re-embedded with the active model.
+    """
+    path = _resolve_db_path(db_path)
+    client = MilvusClient(path) if _is_remote_uri(path) else None
+    try:
+        _write_stamp(client, _current_stamp())
+    finally:
+        if client is not None:
+            client.close()
+    _record_stamp_status(current_fingerprint())
+
+
+def _refresh_stamp_status() -> None:
+    """Re-read the stored stamp of the checked index; writes nothing."""
+    path = _stamp_db_path
+    if not path:
+        return
+    client = MilvusClient(path) if _is_remote_uri(path) else None
+    try:
+        if client is not None and not client.has_collection(COLLECTION_NAME):
+            return
+        stored = _stored_stamp(client)
+    finally:
+        if client is not None:
+            client.close()
+    _record_stamp_status((stored or {}).get("fingerprint"))
+
+
+def _schedule_stamp_refresh() -> None:
+    """Run ``_refresh_stamp_status`` on a daemon thread unless one is running."""
+    global _stamp_refreshing
+    with _stamp_refresh_lock:
+        if _stamp_refreshing:
+            return
+        _stamp_refreshing = True
+
+    def _run():
+        global _stamp_refreshing
+        try:
+            _refresh_stamp_status()
+        except Exception as exc:  # noqa: BLE001 - /health keeps the previous status
+            logger.warning("Embedding stamp refresh failed: %s", _scrub_exception(exc))
+        finally:
+            with _stamp_refresh_lock:
+                _stamp_refreshing = False
+
+    threading.Thread(target=_run, name="stamp-refresh", daemon=True).start()
+
+
+def embedding_stamp_status() -> Dict[str, object]:
+    """Return the current fingerprint, the stored one's hash and the fields that differ.
+
+    Answers from the last check at once. A check older than ``STAMP_STATUS_TTL_S``
+    schedules a re-read, so a re-embed by another process shows on a later call.
+    """
+    status = _stamp_status
+    if status is None:
+        current = current_fingerprint()
+        return {"hash": fingerprint_hash(current), "fingerprint": current,
+                "stored_hash": None, "drift": []}
+    if _stamp_db_path and time.monotonic() - status["checked_at"] > STAMP_STATUS_TTL_S:
+        _schedule_stamp_refresh()
+    return {k: v for k, v in status.items() if k != "checked_at"}
 
 
 def get_model_name() -> str:
@@ -805,6 +1067,9 @@ def _create_collection(client: MilvusClient, db_path: str = "",
     if _is_remote_uri(db_path):
         client.load_collection(collection_name=spec.name)
         print(f"Collection loaded: {spec.name}", file=sys.stderr)
+        if spec.name == COLLECTION_NAME and fingerprint_resolved(current_fingerprint()):
+            _write_stamp(client, _current_stamp())
+            _record_stamp_status(current_fingerprint())
 
 
 @contextmanager

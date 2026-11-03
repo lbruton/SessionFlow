@@ -126,6 +126,13 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(rag_engine, "upsert_rows", fake_upsert_rows, raising=False)
     monkeypatch.setattr(rag_engine, "embed_texts", fake_embed)
     monkeypatch.setattr(rag_engine, "upsert_document", forbidden)
+    cap["stamps"] = []
+    monkeypatch.setattr(rag_engine, "write_embedding_stamp",
+                        lambda db_path=None: cap["stamps"].append(db_path), raising=False)
+    monkeypatch.setattr(reembed, "_server_fingerprint_hash", lambda: None, raising=False)
+    # A runner without the cached model has an unresolved fingerprint, which holds the stamp.
+    resolved = dict(rag_engine.current_fingerprint(), revision="rev", tokenizer_sha256="t" * 64)
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(resolved))
     monkeypatch.setattr(reembed, "get_embedding_budget", lambda: cap["budget"])
     monkeypatch.setattr(reembed, "_monotonic", lambda: cap["clock"][0])
     monkeypatch.setattr(reembed, "_sleep", lambda s: None)
@@ -181,6 +188,18 @@ def test_full_run_reembeds_every_row_in_place(env):
     # Batched per the budget, through the budget.
     assert env["budget"].before == [2, 2, 2, 1]
     assert [t for t, _ in env["budget"].after] == [2, 2, 2, 1]
+
+
+def test_finished_run_restamps_the_embedding_fingerprint(env):
+    env["module"].run(confirmed=True)
+
+    assert env["stamps"] == [env["module"]._db_path()]
+
+
+def test_paused_run_keeps_the_old_stamp(env):
+    env["module"].run(confirmed=True, max_turns=4)
+
+    assert env["stamps"] == []
 
 
 def test_state_file_is_private_and_complete(env):
@@ -278,6 +297,123 @@ def test_resume_refuses_on_model_change(env, monkeypatch):
     report = env["module"].run(confirmed=True)
     assert report.status == "refused"
     assert _state(env)["cursor"] == 2
+
+
+def test_resume_refuses_on_fingerprint_change(env, monkeypatch):
+    env["module"].run(confirmed=True, max_turns=2)
+    changed = dict(rag_engine.current_fingerprint(), revision="newer-snapshot")
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(changed))
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "refused"
+    assert "fingerprint" in report.message
+    assert env["stamps"] == []
+
+
+def test_checkpoint_without_a_fingerprint_finishes_without_stamping(env):
+    env["module"].run(confirmed=True, max_turns=2)
+    path = env["home"] / ".sessionflow" / "reembed_state.json"
+    state = json.loads(path.read_text())
+    del state["fingerprint"]
+    path.write_text(json.dumps(state))
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "done"
+    assert env["stamps"] == []
+    assert "stamp" in report.message
+
+
+def test_failed_stamp_keeps_the_run_open_until_a_retry_writes_it(env, monkeypatch):
+    calls = []
+
+    def flaky(db_path=None):
+        calls.append(db_path)
+        if len(calls) == 1:
+            raise RuntimeError("milvus unavailable")
+
+    monkeypatch.setattr(rag_engine, "write_embedding_stamp", flaky)
+
+    first = env["module"].run(confirmed=True)
+    assert first.status == "error"
+    assert "stamp" in first.message
+    assert _state(env)["status"] != "done"
+
+    second = env["module"].run(confirmed=True)
+    assert second.status == "done"
+    assert len(calls) == 2
+    assert _state(env)["status"] == "done"
+
+
+def test_fresh_run_refuses_while_the_server_embeds_with_another_fingerprint(env, monkeypatch):
+    monkeypatch.setattr(env["module"], "_server_fingerprint_hash", lambda: "0000000000000000")
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "refused"
+    assert "restart" in report.message
+    assert env["snapshots"] == 0
+    assert env["stamps"] == []
+
+
+def test_server_mismatch_at_the_end_needs_a_fresh_sweep(env, monkeypatch):
+    current = rag_engine.fingerprint_hash(rag_engine.current_fingerprint())
+    answers = iter([current, "0000000000000000"])
+    monkeypatch.setattr(env["module"], "_server_fingerprint_hash", lambda: next(answers, current))
+
+    first = env["module"].run(confirmed=True)
+    assert "--restart" in first.message
+    assert env["stamps"] == []
+
+    # Rows the stale server wrote after the snapshot are outside the worklist.
+    second = env["module"].run(confirmed=True)
+    assert env["stamps"] == []
+    assert "--restart" in second.message
+
+
+def test_unresolved_fingerprint_holds_the_stamp(env, monkeypatch):
+    unresolved = dict(rag_engine.current_fingerprint(), revision=None, tokenizer_sha256=None)
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(unresolved))
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "error"
+    assert "cache" in report.message
+    assert env["stamps"] == []
+    assert _state(env)["status"] != "done"
+
+
+def test_running_server_with_the_same_fingerprint_allows_the_stamp(env, monkeypatch):
+    current = rag_engine.fingerprint_hash(rag_engine.current_fingerprint())
+    monkeypatch.setattr(env["module"], "_server_fingerprint_hash", lambda: current)
+
+    assert env["module"].run(confirmed=True).status == "done"
+    assert len(env["stamps"]) == 1
+
+
+def test_server_fingerprint_hash_reads_health(monkeypatch):
+    import io
+    import urllib.request
+
+    reembed = importlib.import_module("reembed")
+    body = json.dumps({"embedding": {"fingerprint": {"hash": "abc123"}}}).encode()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout: io.BytesIO(body))
+
+    assert reembed._server_fingerprint_hash() == "abc123"
+
+
+def test_server_fingerprint_hash_is_none_without_a_server(monkeypatch):
+    import urllib.request
+
+    reembed = importlib.import_module("reembed")
+
+    def refused(url, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refused)
+
+    assert reembed._server_fingerprint_hash() is None
 
 
 def test_restart_flag_takes_a_fresh_snapshot(env):
@@ -465,6 +601,9 @@ def test_cli_reembed_covers_memories_without_embedding_them(env, monkeypatch, me
         assert cleanup.cmd_reembed(args) == 0
 
         assert store.index_meta()["generation"] == 2
+        fingerprint = rag_engine.current_fingerprint()
+        expected = fingerprint if rag_engine.fingerprint_resolved(fingerprint) else None
+        assert store.index_meta()["fingerprint"] == expected
         assert [r["memory_id"] for r in store.pending("milvus")] == [written.memory_id]
         flat = [t for batch in env["embed_inputs"] for t in batch]
         assert all("memory text" not in t for t in flat)

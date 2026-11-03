@@ -123,6 +123,10 @@ _Avoid_: index state, sync flag
 The number in `memory_index_meta` that names the model and dimension of the memory vectors. A re-embed starts a new generation, which makes every older Milvus acknowledgement pending.
 _Avoid_: model version
 
+**Embedding Fingerprint**:
+The inputs that shape a stored vector: model ID, snapshot revision, tokenizer hash, prefixes, pooling, token limit, dimension and `EMBED_IMPL_VERSION`. The transcript stamp and `memory_index_meta` keep the fingerprint the stored vectors were built with. A difference warns; a model ID or dimension change refuses.
+_Avoid_: model identity, embedding version
+
 **Supersede**:
 Mark older memories in the same project as replaced by a new one. A superseded memory keeps its history and is left out of default reads.
 _Avoid_: delete, archive, overwrite

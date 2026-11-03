@@ -109,9 +109,10 @@ def milvus():
     return FakeMilvus()
 
 
-def _index(store, milvus, tmp_path, host="minitron", embed=_embed, model_name="embeddinggemma"):
+def _index(store, milvus, tmp_path, host="minitron", embed=_embed, model_name="embeddinggemma",
+           fingerprint=None):
     idx = MemoryIndex(store=store, milvus=milvus, fts_path=tmp_path / f"{host}-memories_fts.db",
-                      host=host, embed=embed, model_name=model_name)
+                      host=host, embed=embed, model_name=model_name, fingerprint=fingerprint)
     asyncio.run(idx.start())
     return idx
 
@@ -350,6 +351,106 @@ def test_running_index_stops_writing_after_the_stored_model_changes(store, milvu
 
     assert idx.health()["milvus_blocked"] is None
     assert second.memory_id in milvus.rows()
+
+
+FP = {"model_id": "m", "revision": "r1", "tokenizer_sha256": "t", "search_prefix": "q: ",
+      "document_prefix": "d: ", "pooling": "mean", "max_tokens": 2048, "embed_dim": 768,
+      "impl_version": 1}
+
+
+def test_first_index_records_its_fingerprint(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path, fingerprint=FP)
+
+    assert store.index_meta()["fingerprint"] == FP
+    assert idx.health()["fingerprint_drift"] == []
+
+
+def test_unresolved_fingerprint_is_not_recorded(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path, fingerprint=dict(FP, revision=None, tokenizer_sha256=None))
+
+    assert store.index_meta()["fingerprint"] is None
+    assert idx.health()["fingerprint_drift"] == []
+
+
+def test_stored_meta_without_a_fingerprint_adopts_the_current_one(store, milvus, tmp_path):
+    store.claim_index_model("embeddinggemma", 768)
+    assert store.index_meta()["fingerprint"] is None
+
+    _index(store, milvus, tmp_path, fingerprint=FP)
+
+    assert store.index_meta()["fingerprint"] == FP
+
+
+def test_fingerprint_drift_warns_and_still_writes_memory_vectors(store, milvus, tmp_path, caplog):
+    _index(store, milvus, tmp_path, host="minitron", fingerprint=FP)
+    newer = dict(FP, revision="r2")
+    with caplog.at_level("WARNING", logger=memory_index.logger.name):
+        other = _index(store, milvus, tmp_path, host="blue", fingerprint=newer)
+    written = store.add(_rec("drifted fingerprint"))
+
+    asyncio.run(other.tick())
+
+    assert other.health()["fingerprint_drift"] == ["revision"]
+    assert other.health()["milvus_blocked"] is None
+    assert written.memory_id in milvus.rows()
+    assert "revision" in caplog.text
+    assert store.index_meta()["fingerprint"] == FP
+
+
+@pytest.mark.parametrize("field, value", [("model_id", "google/embeddinggemma-300m"), ("embed_dim", 512)])
+def test_fingerprint_model_id_or_dimension_change_blocks_memory_vectors(store, milvus, tmp_path,
+                                                                        field, value):
+    _index(store, milvus, tmp_path, host="minitron", fingerprint=FP)
+    other = _index(store, milvus, tmp_path, host="blue", fingerprint=dict(FP, **{field: value}))
+    written = store.add(_rec("other model ID"))
+
+    asyncio.run(other.tick())
+
+    assert written.memory_id not in milvus.rows()
+    assert str(value) in other.health()["milvus_blocked"]
+    assert store.pending("fts:blue") == []
+
+
+def test_write_rereads_the_fingerprint_under_the_row_lock(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path, fingerprint=FP)
+
+    async def stale_refresh():
+        pass
+
+    idx._refresh_model_block = stale_refresh
+    store.bump_generation(model_name="embeddinggemma", vector_dim=768,
+                          fingerprint=dict(FP, model_id="other-model"))
+    written = store.add(_rec("written after another host changed the model ID"))
+
+    asyncio.run(idx.tick())
+
+    assert written.memory_id not in milvus.rows()
+    assert "other-model" in idx.health()["milvus_blocked"]
+
+
+def test_similar_refreshes_the_model_block_first(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path, fingerprint=FP)
+    store.bump_generation(model_name="embeddinggemma", vector_dim=768,
+                          fingerprint=dict(FP, model_id="other-model"))
+
+    hits, state = asyncio.run(idx.similar("anything", project="sessionflow", user_id="lbruton",
+                                          threshold=0.5))
+
+    assert (hits, state) == ([], "pending")
+    assert "other-model" in idx.health()["milvus_blocked"]
+
+
+def test_generation_bump_records_the_new_fingerprint_and_clears_drift(store, milvus, tmp_path):
+    _index(store, milvus, tmp_path, host="minitron", fingerprint=FP)
+    newer = dict(FP, impl_version=2)
+    idx = _index(store, milvus, tmp_path, host="blue", fingerprint=newer)
+    assert idx.health()["fingerprint_drift"] == ["impl_version"]
+
+    store.bump_generation(model_name="embeddinggemma", vector_dim=768, fingerprint=newer)
+    asyncio.run(idx.tick())
+
+    assert store.index_meta()["fingerprint"] == newer
+    assert idx.health()["fingerprint_drift"] == []
 
 
 def test_fts_is_applied_even_while_the_milvus_embed_hangs(store, milvus, tmp_path):

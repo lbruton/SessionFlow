@@ -473,6 +473,20 @@ def _no_ambient_memory_dsn(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_embedding_stamp(monkeypatch, tmp_path):
+    """Keep tests off the developer's identity file and running server.
+
+    ``rag_engine._IDENTITY_FILE`` is fixed at import, so a stamp write would land
+    in the real ``~/.sessionflow``. Port 9 refuses at once, so a server lookup
+    returns no fingerprint.
+    """
+    monkeypatch.setenv("SESSIONFLOW_URL", "http://127.0.0.1:9")
+    module = sys.modules.get("rag_engine")
+    if module is not None and hasattr(module, "_IDENTITY_FILE"):
+        monkeypatch.setattr(module, "_IDENTITY_FILE", tmp_path / "model_identity.json")
+
+
+@pytest.fixture(autouse=True)
 def _no_default_reranker(monkeypatch):
     """Keep the default reranker from loading a model in tests that start the server."""
     monkeypatch.setenv("SESSIONFLOW_RERANKER", "off")

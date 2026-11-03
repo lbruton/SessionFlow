@@ -560,6 +560,11 @@ def regen(monkeypatch, tmp_path):
     monkeypatch.setattr(reembed, "get_embedding_budget", lambda: _Budget())
     monkeypatch.setattr(reembed, "_reembed_memories", lambda: None)
     monkeypatch.setattr(reembed, "_db_path", lambda: DB)
+    monkeypatch.setattr(reembed, "_server_fingerprint_hash", lambda: None)
+    monkeypatch.setattr(rag_engine, "write_embedding_stamp", lambda db_path=None: None)
+    # A runner without the cached model has an unresolved fingerprint, which holds the stamp.
+    resolved = dict(rag_engine.current_fingerprint(), revision="rev", tokenizer_sha256="t" * 64)
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(resolved))
     return types.SimpleNamespace(reembed=reembed, calls=calls, rows=rows)
 
 
