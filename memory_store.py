@@ -857,8 +857,8 @@ class MemoryStore:
 
         Index workers on every machine take this lock, so two workers never
         interleave a read and a Milvus write for the same record. The row also
-        carries the memory model (``index_model_name``, ``index_vector_dim``)
-        read in the same transaction.
+        carries the memory model (``index_model_name``, ``index_vector_dim``,
+        ``index_fingerprint``) read in the same transaction.
         """
         mid = uuid.UUID(str(memory_id))
         with self._pool.connection() as conn:
@@ -867,7 +867,8 @@ class MemoryStore:
                              (str(mid),))
                 row = conn.execute(
                     f"SELECT {_COLUMN_SQL}, meta.generation, "
-                    "meta.model_name AS index_model_name, meta.vector_dim AS index_vector_dim "
+                    "meta.model_name AS index_model_name, meta.vector_dim AS index_vector_dim, "
+                    "meta.fingerprint AS index_fingerprint "
                     "FROM memories CROSS JOIN memory_index_meta meta WHERE memory_id = %s",
                     (mid,),
                 ).fetchone()

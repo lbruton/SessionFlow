@@ -129,6 +129,7 @@ def env(monkeypatch, tmp_path):
     cap["stamps"] = []
     monkeypatch.setattr(rag_engine, "write_embedding_stamp",
                         lambda db_path=None: cap["stamps"].append(db_path), raising=False)
+    monkeypatch.setattr(reembed, "_server_fingerprint_hash", lambda: None, raising=False)
     monkeypatch.setattr(reembed, "get_embedding_budget", lambda: cap["budget"])
     monkeypatch.setattr(reembed, "_monotonic", lambda: cap["clock"][0])
     monkeypatch.setattr(reembed, "_sleep", lambda s: None)
@@ -340,6 +341,49 @@ def test_failed_stamp_keeps_the_run_open_until_a_retry_writes_it(env, monkeypatc
     assert second.status == "done"
     assert len(calls) == 2
     assert _state(env)["status"] == "done"
+
+
+def test_running_server_with_another_fingerprint_holds_the_stamp(env, monkeypatch):
+    monkeypatch.setattr(env["module"], "_server_fingerprint_hash", lambda: "0000000000000000")
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "error"
+    assert "restart" in report.message
+    assert env["stamps"] == []
+    assert _state(env)["status"] != "done"
+
+
+def test_running_server_with_the_same_fingerprint_allows_the_stamp(env, monkeypatch):
+    current = rag_engine.fingerprint_hash(rag_engine.current_fingerprint())
+    monkeypatch.setattr(env["module"], "_server_fingerprint_hash", lambda: current)
+
+    assert env["module"].run(confirmed=True).status == "done"
+    assert len(env["stamps"]) == 1
+
+
+def test_server_fingerprint_hash_reads_health(monkeypatch):
+    import io
+    import urllib.request
+
+    reembed = importlib.import_module("reembed")
+    body = json.dumps({"embedding": {"fingerprint": {"hash": "abc123"}}}).encode()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout: io.BytesIO(body))
+
+    assert reembed._server_fingerprint_hash() == "abc123"
+
+
+def test_server_fingerprint_hash_is_none_without_a_server(monkeypatch):
+    import urllib.request
+
+    reembed = importlib.import_module("reembed")
+
+    def refused(url, timeout):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", refused)
+
+    assert reembed._server_fingerprint_hash() is None
 
 
 def test_restart_flag_takes_a_fresh_snapshot(env):

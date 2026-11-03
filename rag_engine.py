@@ -350,10 +350,20 @@ def _index_has_data(db_path: Optional[str]) -> bool:
 
 
 def _read_file_stamp() -> Optional[Dict[str, object]]:
+    """Return the identity file stamp; None when the file is missing or unreadable.
+
+    A file that is not a JSON object returns a stamp marked ``malformed``, which
+    ``_model_changed`` treats as another model, so stored vectors stay protected.
+    """
     try:
-        return json.loads(_IDENTITY_FILE.read_text())
-    except (OSError, ValueError):
+        text = _IDENTITY_FILE.read_text()
+    except OSError:
         return None
+    try:
+        stamp = json.loads(text)
+    except ValueError:
+        stamp = None
+    return stamp if isinstance(stamp, dict) else {"malformed": True}
 
 
 def _read_property_stamp(client: MilvusClient) -> Optional[Dict[str, object]]:
@@ -398,6 +408,8 @@ def _stored_stamp(client: Optional[MilvusClient]) -> Optional[Dict[str, object]]
 
 
 def _model_changed(stored: Dict[str, object]) -> bool:
+    if stored.get("malformed"):
+        return True
     if stored.get("model_name") and stored["model_name"] != _MODEL_NAME:
         return True
     stored_fp = stored.get("fingerprint")
@@ -426,6 +438,11 @@ def _check_model_identity(db_path: Optional[str] = None):
         stored = property_stamp or _read_file_stamp()
         new = _current_stamp()
         if stored and _model_changed(stored):
+            if stored.get("malformed") and _index_has_data(db_path):
+                raise RuntimeError(
+                    f"{_IDENTITY_FILE} is not a JSON object, so the model of the stored vectors "
+                    f"is unknown. Restore the file, or run cleanup.py reset before indexing again."
+                )
             if _index_has_data(db_path):
                 raise RuntimeError(
                     f"Model mismatch: index was built with '{stored.get('model_name')}' "

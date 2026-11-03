@@ -411,6 +411,35 @@ def test_fingerprint_model_id_or_dimension_change_blocks_memory_vectors(store, m
     assert store.pending("fts:blue") == []
 
 
+def test_write_rereads_the_fingerprint_under_the_row_lock(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path, fingerprint=FP)
+
+    async def stale_refresh():
+        pass
+
+    idx._refresh_model_block = stale_refresh
+    store.bump_generation(model_name="embeddinggemma", vector_dim=768,
+                          fingerprint=dict(FP, model_id="other-model"))
+    written = store.add(_rec("written after another host changed the model ID"))
+
+    asyncio.run(idx.tick())
+
+    assert written.memory_id not in milvus.rows()
+    assert "other-model" in idx.health()["milvus_blocked"]
+
+
+def test_similar_refreshes_the_model_block_first(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path, fingerprint=FP)
+    store.bump_generation(model_name="embeddinggemma", vector_dim=768,
+                          fingerprint=dict(FP, model_id="other-model"))
+
+    hits, state = asyncio.run(idx.similar("anything", project="sessionflow", user_id="lbruton",
+                                          threshold=0.5))
+
+    assert (hits, state) == ([], "pending")
+    assert "other-model" in idx.health()["milvus_blocked"]
+
+
 def test_generation_bump_records_the_new_fingerprint_and_clears_drift(store, milvus, tmp_path):
     _index(store, milvus, tmp_path, host="minitron", fingerprint=FP)
     newer = dict(FP, impl_version=2)

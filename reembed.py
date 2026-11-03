@@ -490,14 +490,42 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
     return _report(state, outcome, message)
 
 
+def _server_fingerprint_hash() -> Optional[str]:
+    """Return the local server's embedding fingerprint hash from ``/health``; None when none answers.
+
+    A server that keeps indexing during the run must embed with the run's fingerprint
+    before the stamp can claim every stored vector. Other hosts are not checked.
+    """
+    import urllib.error
+    import urllib.request
+
+    base = os.getenv("SESSIONFLOW_URL", f"http://127.0.0.1:{os.getenv('SESSIONFLOW_PORT', '7102')}")
+    try:
+        with urllib.request.urlopen(f"{base.rstrip('/')}/health", timeout=5) as response:
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as e:  # a starting server answers 503 with the same body
+        try:
+            body = json.loads(e.read())
+        except ValueError:
+            return None
+    except (OSError, ValueError):
+        return None
+    return ((body.get("embedding") or {}).get("fingerprint") or {}).get("hash")
+
+
 def _stamp_finished_run(state: dict, db_path: str) -> tuple:
     """Record the run's fingerprint as the stamp; return ``(outcome, message)``.
 
-    A failed write leaves the run open, so the next ``run`` retries only the stamp. A
-    checkpoint without a fingerprint cannot prove which one its earlier chunks used.
+    A failed write, or a running server that embeds with another fingerprint, leaves
+    the run open, so the next ``run`` retries only the stamp. A checkpoint without a
+    fingerprint cannot prove which one its earlier chunks used.
     """
     if state.get("fingerprint") is None:
         return "done", "embedding stamp not written: the checkpoint has no fingerprint; use --restart"
+    server = _server_fingerprint_hash()
+    if server is not None and server != state["fingerprint"]:
+        return "error", (f"embedding stamp not written: the running server embeds with fingerprint "
+                         f"{server}, not {state['fingerprint']}; restart it, then run again")
     try:
         rag_engine.write_embedding_stamp(db_path=db_path)
     except Exception as e:  # noqa: BLE001 - the vectors are written; the next run retries the stamp

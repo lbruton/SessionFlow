@@ -322,6 +322,24 @@ def test_stale_status_schedules_a_refresh_and_answers_at_once(stamp_env, monkeyp
     assert scheduled == [1]
 
 
+def test_malformed_identity_file_refuses_over_stored_vectors(stamp_env, tmp_path):
+    stamp_env.write_text("{not json")
+
+    with pytest.raises(RuntimeError, match="model_identity.json"):
+        rag_engine._check_model_identity(db_path=str(tmp_path / "milvus.db"))
+
+    assert stamp_env.read_text() == "{not json"
+
+
+def test_malformed_identity_file_on_an_empty_index_restamps(stamp_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rag_engine, "_index_has_data", lambda db_path: False)
+    stamp_env.write_text("{not json")
+
+    rag_engine._check_model_identity(db_path=str(tmp_path / "milvus.db"))
+
+    assert json.loads(stamp_env.read_text()) == _stamp(CURRENT)
+
+
 def test_index_check_error_counts_as_data(monkeypatch):
     def unreachable(uri):
         raise ConnectionError("milvus down")

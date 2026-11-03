@@ -435,8 +435,8 @@ class MemoryIndex:
 
         Returns the row written, or None when the text changed after it was
         embedded, so the caller embeds again. A vector is refused, and the
-        block set, when the stored memory model is not this machine's model:
-        the check reads the model under the same lock as the write.
+        block set, when the stored memory model or fingerprint model ID is not
+        this machine's: the check reads both under the same lock as the write.
         """
         pk = rag_engine._pk_from_doc_id(memory_id)
         with self.store.locked_canonical(memory_id) as row:
@@ -447,6 +447,7 @@ class MemoryIndex:
                 return row
             if vector is None or row["content_hash"] != embedded_hash:
                 return None
+            self._set_fingerprint_drift(row.get("index_fingerprint"))
             self._set_model_block(row["index_model_name"], row["index_vector_dim"])
             if self.milvus_blocked:
                 return None
@@ -547,6 +548,7 @@ class MemoryIndex:
         active record in the project has a current-generation vector, and
         ``pending`` otherwise, so an empty list never hides missing vectors.
         """
+        await self._refresh_model_block()
         state = "pending" if self.milvus_blocked or await run_db(
             self.store.vectors_pending, project, user_id) else "ok"
         if self.milvus_blocked:
