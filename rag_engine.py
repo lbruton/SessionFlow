@@ -315,6 +315,11 @@ _IDENTITY_FILE = Path.home() / ".sessionflow" / "model_identity.json"
 STAMP_PROPERTY = "sessionflow.embedding"
 # The last stamp check: the current and stored fingerprints and their drift.
 _stamp_status: Optional[Dict[str, object]] = None
+# The Milvus path the server checked; embedding_stamp_status re-reads its stamp.
+_stamp_db_path: Optional[str] = None
+_stamp_refresh_lock = threading.Lock()
+_stamp_refreshing = False
+STAMP_STATUS_TTL_S = 300.0
 
 
 def _index_has_data(db_path: Optional[str]) -> bool:
@@ -371,8 +376,14 @@ def _record_stamp_status(stored_fp: Optional[Dict[str, object]]) -> List[str]:
         "fingerprint": current,
         "stored_hash": fingerprint_hash(stored_fp) if isinstance(stored_fp, dict) else None,
         "drift": drift,
+        "checked_at": time.monotonic(),
     }
     return drift
+
+
+def _stored_stamp(client: Optional[MilvusClient]) -> Optional[Dict[str, object]]:
+    """Return the Standalone property stamp, else the identity file stamp."""
+    return (_read_property_stamp(client) if client is not None else None) or _read_file_stamp()
 
 
 def _model_changed(stored: Dict[str, object]) -> bool:
@@ -392,6 +403,8 @@ def _check_model_identity(db_path: Optional[str] = None):
     stays visible in /health until ``write_embedding_stamp`` records a re-embed. A
     Standalone collection without a stamp property reads the legacy identity file.
     """
+    global _stamp_db_path
+    _stamp_db_path = db_path
     client = MilvusClient(db_path) if db_path and _is_remote_uri(db_path) else None
     try:
         if client is not None and not client.has_collection(COLLECTION_NAME):
@@ -421,6 +434,15 @@ def _check_model_identity(db_path: Optional[str] = None):
         stamp_store = property_stamp if client is not None else _read_file_stamp()
         if stamp_store != new:
             _write_stamp(client, new)
+            # Milvus has no compare-and-set: a server that starts at the same time
+            # can overwrite the first stamp, so read it back before indexing.
+            written = _read_property_stamp(client) if client is not None else new
+            if written and written != new and _model_changed(written):
+                raise RuntimeError(
+                    f"Model mismatch: another server stamped the index with "
+                    f"'{written.get('model_name')}' while SESSIONFLOW_MODEL is '{_MODEL_NAME}'. "
+                    f"Run every server with one model, or clear the index before switching."
+                )
     finally:
         if client is not None:
             client.close()
@@ -441,13 +463,57 @@ def write_embedding_stamp(db_path: Optional[str] = None) -> None:
     _record_stamp_status(current_fingerprint())
 
 
+def _refresh_stamp_status() -> None:
+    """Re-read the stored stamp of the checked index; writes nothing."""
+    path = _stamp_db_path
+    if not path:
+        return
+    client = MilvusClient(path) if _is_remote_uri(path) else None
+    try:
+        if client is not None and not client.has_collection(COLLECTION_NAME):
+            return
+        stored = _stored_stamp(client)
+    finally:
+        if client is not None:
+            client.close()
+    _record_stamp_status((stored or {}).get("fingerprint"))
+
+
+def _schedule_stamp_refresh() -> None:
+    """Run ``_refresh_stamp_status`` on a daemon thread unless one is running."""
+    global _stamp_refreshing
+    with _stamp_refresh_lock:
+        if _stamp_refreshing:
+            return
+        _stamp_refreshing = True
+
+    def _run():
+        global _stamp_refreshing
+        try:
+            _refresh_stamp_status()
+        except Exception as exc:  # noqa: BLE001 - /health keeps the previous status
+            logger.warning("Embedding stamp refresh failed: %s", _scrub_exception(exc))
+        finally:
+            with _stamp_refresh_lock:
+                _stamp_refreshing = False
+
+    threading.Thread(target=_run, name="stamp-refresh", daemon=True).start()
+
+
 def embedding_stamp_status() -> Dict[str, object]:
-    """Return the current fingerprint, the stored one's hash and the fields that differ."""
-    if _stamp_status is None:
+    """Return the current fingerprint, the stored one's hash and the fields that differ.
+
+    Answers from the last check at once. A check older than ``STAMP_STATUS_TTL_S``
+    schedules a re-read, so a re-embed by another process shows on a later call.
+    """
+    status = _stamp_status
+    if status is None:
         current = current_fingerprint()
         return {"hash": fingerprint_hash(current), "fingerprint": current,
                 "stored_hash": None, "drift": []}
-    return dict(_stamp_status)
+    if _stamp_db_path and time.monotonic() - status["checked_at"] > STAMP_STATUS_TTL_S:
+        _schedule_stamp_refresh()
+    return {k: v for k, v in status.items() if k != "checked_at"}
 
 
 def get_model_name() -> str:

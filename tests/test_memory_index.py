@@ -390,6 +390,20 @@ def test_fingerprint_drift_warns_and_still_writes_memory_vectors(store, milvus, 
     assert store.index_meta()["fingerprint"] == FP
 
 
+@pytest.mark.parametrize("field, value", [("model_id", "google/embeddinggemma-300m"), ("embed_dim", 512)])
+def test_fingerprint_model_id_or_dimension_change_blocks_memory_vectors(store, milvus, tmp_path,
+                                                                        field, value):
+    _index(store, milvus, tmp_path, host="minitron", fingerprint=FP)
+    other = _index(store, milvus, tmp_path, host="blue", fingerprint=dict(FP, **{field: value}))
+    written = store.add(_rec("other model ID"))
+
+    asyncio.run(other.tick())
+
+    assert written.memory_id not in milvus.rows()
+    assert str(value) in other.health()["milvus_blocked"]
+    assert store.pending("fts:blue") == []
+
+
 def test_generation_bump_records_the_new_fingerprint_and_clears_drift(store, milvus, tmp_path):
     _index(store, milvus, tmp_path, host="minitron", fingerprint=FP)
     newer = dict(FP, impl_version=2)

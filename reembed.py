@@ -350,6 +350,7 @@ def _new_state(ids: List[int]) -> dict:
         "run_id": run_id,
         "status": "running",
         "model_name": rag_engine.get_model_name(),
+        "fingerprint": rag_engine.fingerprint_hash(rag_engine.current_fingerprint()),
         "code_commit": _code_commit(),
         "created_at": _now_iso(),
         "snapshot_count": len(ids),
@@ -408,6 +409,11 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
                            f"checkpoint was built with model {state.get('model_name')!r}; "
                            f"active model is {rag_engine.get_model_name()!r}. "
                            "Use --restart to start over.")
+        current = rag_engine.fingerprint_hash(rag_engine.current_fingerprint())
+        if state.get("fingerprint") not in (None, current):
+            return _report(state, "refused",
+                           f"checkpoint was built with embedding fingerprint {state['fingerprint']}; "
+                           f"the active fingerprint is {current}. Use --restart to start over.")
         if state.get("status") == "done":
             return _report(state, "done", "run already complete; use --restart to redo")
         worklist = _load_worklist()
@@ -474,16 +480,28 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
         "seconds": round(seconds, 3),
         "outcome": outcome,
     })
+    if outcome == "done":
+        outcome, message = _stamp_finished_run(state, db_path)
     state["status"] = "done" if outcome == "done" else "paused"
     if outcome == "done":
         state["finished_at"] = _now_iso()
     _save_state(state)
-    if outcome == "done":
-        try:
-            rag_engine.write_embedding_stamp(db_path=db_path)
-        except Exception as e:  # noqa: BLE001 - the vectors are written; only the stamp is stale
-            message = f"embedding stamp not written: {rag_engine._scrub_exception(e)}"
     return _report(state, outcome, message)
+
+
+def _stamp_finished_run(state: dict, db_path: str) -> tuple:
+    """Record the run's fingerprint as the stamp; return ``(outcome, message)``.
+
+    A failed write leaves the run open, so the next ``run`` retries only the stamp. A
+    checkpoint without a fingerprint cannot prove which one its earlier chunks used.
+    """
+    if state.get("fingerprint") is None:
+        return "done", "embedding stamp not written: the checkpoint has no fingerprint; use --restart"
+    try:
+        rag_engine.write_embedding_stamp(db_path=db_path)
+    except Exception as e:  # noqa: BLE001 - the vectors are written; the next run retries the stamp
+        return "error", f"embedding stamp not written: {rag_engine._scrub_exception(e)}"
+    return "done", ""
 
 
 def verify(sample: int = 200, threshold: float = 0.9999,

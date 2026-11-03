@@ -295,6 +295,53 @@ def test_resume_refuses_on_model_change(env, monkeypatch):
     assert _state(env)["cursor"] == 2
 
 
+def test_resume_refuses_on_fingerprint_change(env, monkeypatch):
+    env["module"].run(confirmed=True, max_turns=2)
+    changed = dict(rag_engine.current_fingerprint(), revision="newer-snapshot")
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(changed))
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "refused"
+    assert "fingerprint" in report.message
+    assert env["stamps"] == []
+
+
+def test_checkpoint_without_a_fingerprint_finishes_without_stamping(env):
+    env["module"].run(confirmed=True, max_turns=2)
+    path = env["home"] / ".sessionflow" / "reembed_state.json"
+    state = json.loads(path.read_text())
+    del state["fingerprint"]
+    path.write_text(json.dumps(state))
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "done"
+    assert env["stamps"] == []
+    assert "stamp" in report.message
+
+
+def test_failed_stamp_keeps_the_run_open_until_a_retry_writes_it(env, monkeypatch):
+    calls = []
+
+    def flaky(db_path=None):
+        calls.append(db_path)
+        if len(calls) == 1:
+            raise RuntimeError("milvus unavailable")
+
+    monkeypatch.setattr(rag_engine, "write_embedding_stamp", flaky)
+
+    first = env["module"].run(confirmed=True)
+    assert first.status == "error"
+    assert "stamp" in first.message
+    assert _state(env)["status"] != "done"
+
+    second = env["module"].run(confirmed=True)
+    assert second.status == "done"
+    assert len(calls) == 2
+    assert _state(env)["status"] == "done"
+
+
 def test_restart_flag_takes_a_fresh_snapshot(env):
     env["module"].run(confirmed=True)
     report = env["module"].run(confirmed=True, restart=True)

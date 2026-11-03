@@ -133,6 +133,7 @@ def stamp_env(tmp_path, monkeypatch):
     monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(CURRENT))
     monkeypatch.setattr(rag_engine, "_index_has_data", lambda db_path: True)
     monkeypatch.setattr(rag_engine, "_stamp_status", None)
+    monkeypatch.setattr(rag_engine, "_stamp_db_path", None)
     return identity
 
 
@@ -276,6 +277,49 @@ def test_creating_the_standalone_sessions_collection_stamps_it(stamp_env, monkey
     rag_engine._create_collection(client, "http://milvus:19530")
 
     assert json.loads(client.properties[rag_engine.STAMP_PROPERTY]) == _stamp(CURRENT)
+
+
+def test_standalone_refuses_when_another_host_wins_the_first_stamp(stamp_env, monkeypatch):
+    other = json.dumps(_stamp(dict(CURRENT, model_id="google/embeddinggemma-300m"), model_name="modernbert"))
+
+    class Racing(FakeStandalone):
+        def alter_collection_properties(self, collection_name, properties):
+            self.altered.append(properties)
+            self.properties[rag_engine.STAMP_PROPERTY] = other
+
+    client = Racing()
+    monkeypatch.setattr(rag_engine, "MilvusClient", lambda uri: client)
+
+    with pytest.raises(RuntimeError, match="Model mismatch"):
+        rag_engine._check_model_identity(db_path="http://milvus:19530")
+
+
+def test_status_refresh_reads_a_stamp_written_by_another_process(stamp_env, monkeypatch):
+    client = FakeStandalone({rag_engine.STAMP_PROPERTY: json.dumps(_stamp(dict(CURRENT, revision="old")))})
+    monkeypatch.setattr(rag_engine, "MilvusClient", lambda uri: client)
+    rag_engine._check_model_identity(db_path="http://milvus:19530")
+    assert rag_engine.embedding_stamp_status()["drift"] == ["revision"]
+
+    client.properties[rag_engine.STAMP_PROPERTY] = json.dumps(_stamp(CURRENT))
+    rag_engine._refresh_stamp_status()
+
+    assert rag_engine.embedding_stamp_status()["drift"] == []
+    assert client.altered == []
+
+
+def test_stale_status_schedules_a_refresh_and_answers_at_once(stamp_env, monkeypatch):
+    client = FakeStandalone({rag_engine.STAMP_PROPERTY: json.dumps(_stamp(dict(CURRENT, revision="old")))})
+    monkeypatch.setattr(rag_engine, "MilvusClient", lambda uri: client)
+    rag_engine._check_model_identity(db_path="http://milvus:19530")
+    scheduled = []
+    monkeypatch.setattr(rag_engine, "_schedule_stamp_refresh", lambda: scheduled.append(1))
+
+    assert rag_engine.embedding_stamp_status()["drift"] == ["revision"]
+    assert scheduled == []
+
+    rag_engine._stamp_status["checked_at"] -= rag_engine.STAMP_STATUS_TTL_S + 1
+    assert rag_engine.embedding_stamp_status()["drift"] == ["revision"]
+    assert scheduled == [1]
 
 
 def test_health_embedding_block_reports_the_fingerprint(monkeypatch):
