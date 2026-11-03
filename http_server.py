@@ -917,8 +917,13 @@ def _embedding_status_payload() -> dict:
         identity_data = asdict(identity)
     except Exception as exc:
         identity_data = {"status": "error", "message": str(exc)}
+    try:
+        fingerprint = rag_engine.embedding_stamp_status()
+    except Exception as exc:
+        fingerprint = {"status": "error", "message": str(exc)}
     return {
         "identity": identity_data,
+        "fingerprint": fingerprint,
         "budget": get_embedding_budget().status(),
     }
 

@@ -68,7 +68,7 @@ def _count(dsn: str, sql: str, *params) -> int:
 def test_migrate_applies_once_and_records_it(memory_pg):
     s = MemoryStore(memory_pg)
     try:
-        assert s.migrate() == ["001_initial"]
+        assert s.migrate() == ["001_initial", "002_embedding_fingerprint"]
         assert s.migrate() == []
     finally:
         s.close()

@@ -916,31 +916,45 @@ class MemoryStore:
     # --- Embedding generation -----------------------------------------
 
     def index_meta(self) -> Dict[str, Any]:
-        """Return the memory model name, vector dimension and generation."""
+        """Return the memory model name, vector dimension, embedding fingerprint and generation."""
         with self._pool.connection() as conn:
             return dict(conn.execute(
-                "SELECT model_name, vector_dim, generation FROM memory_index_meta"
+                "SELECT model_name, vector_dim, fingerprint, generation FROM memory_index_meta"
             ).fetchone())
 
-    def claim_index_model(self, model_name: str, vector_dim: int) -> Dict[str, Any]:
-        """Record the memory model when none is set; return the stored meta either way."""
+    def claim_index_model(self, model_name: str, vector_dim: int,
+                          fingerprint: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Record the memory model when none is set; return the stored meta either way.
+
+        A stored model without a fingerprint takes ``fingerprint`` when its name and
+        dimension match, since nothing records what its vectors were built with.
+        """
+        value = Jsonb(fingerprint) if fingerprint is not None else None
         with self._pool.connection() as conn:
             conn.execute(
-                "UPDATE memory_index_meta SET model_name = %s, vector_dim = %s "
+                "UPDATE memory_index_meta SET model_name = %s, vector_dim = %s, fingerprint = %s "
                 "WHERE model_name IS NULL",
-                (model_name, vector_dim),
+                (model_name, vector_dim, value),
+            )
+            conn.execute(
+                "UPDATE memory_index_meta SET fingerprint = %s "
+                "WHERE fingerprint IS NULL AND model_name = %s AND vector_dim = %s",
+                (value, model_name, vector_dim),
             )
         return self.index_meta()
 
     def bump_generation(self, model_name: Optional[str] = None,
-                        vector_dim: Optional[int] = None) -> int:
-        """Start a new embedding generation, optionally for a new model; returns it."""
+                        vector_dim: Optional[int] = None,
+                        fingerprint: Optional[Dict[str, Any]] = None) -> int:
+        """Start a new embedding generation, optionally for a new model or fingerprint; returns it."""
+        value = Jsonb(fingerprint) if fingerprint is not None else None
         with self._pool.connection() as conn:
             row = conn.execute(
                 "UPDATE memory_index_meta SET generation = generation + 1, "
-                "model_name = COALESCE(%s, model_name), vector_dim = COALESCE(%s, vector_dim) "
+                "model_name = COALESCE(%s, model_name), vector_dim = COALESCE(%s, vector_dim), "
+                "fingerprint = COALESCE(%s, fingerprint) "
                 "RETURNING generation",
-                (model_name, vector_dim),
+                (model_name, vector_dim, value),
             ).fetchone()
         return int(row["generation"])
 

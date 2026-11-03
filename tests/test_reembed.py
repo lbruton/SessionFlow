@@ -126,6 +126,9 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(rag_engine, "upsert_rows", fake_upsert_rows, raising=False)
     monkeypatch.setattr(rag_engine, "embed_texts", fake_embed)
     monkeypatch.setattr(rag_engine, "upsert_document", forbidden)
+    cap["stamps"] = []
+    monkeypatch.setattr(rag_engine, "write_embedding_stamp",
+                        lambda db_path=None: cap["stamps"].append(db_path), raising=False)
     monkeypatch.setattr(reembed, "get_embedding_budget", lambda: cap["budget"])
     monkeypatch.setattr(reembed, "_monotonic", lambda: cap["clock"][0])
     monkeypatch.setattr(reembed, "_sleep", lambda s: None)
@@ -181,6 +184,18 @@ def test_full_run_reembeds_every_row_in_place(env):
     # Batched per the budget, through the budget.
     assert env["budget"].before == [2, 2, 2, 1]
     assert [t for t, _ in env["budget"].after] == [2, 2, 2, 1]
+
+
+def test_finished_run_restamps_the_embedding_fingerprint(env):
+    env["module"].run(confirmed=True)
+
+    assert env["stamps"] == [env["module"]._db_path()]
+
+
+def test_paused_run_keeps_the_old_stamp(env):
+    env["module"].run(confirmed=True, max_turns=4)
+
+    assert env["stamps"] == []
 
 
 def test_state_file_is_private_and_complete(env):
@@ -465,6 +480,7 @@ def test_cli_reembed_covers_memories_without_embedding_them(env, monkeypatch, me
         assert cleanup.cmd_reembed(args) == 0
 
         assert store.index_meta()["generation"] == 2
+        assert store.index_meta()["fingerprint"] == rag_engine.current_fingerprint()
         assert [r["memory_id"] for r in store.pending("milvus")] == [written.memory_id]
         flat = [t for batch in env["embed_inputs"] for t in batch]
         assert all("memory text" not in t for t in flat)

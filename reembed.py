@@ -299,6 +299,7 @@ def _reembed_memories() -> Optional[int]:
         generation = store.bump_generation(
             model_name=rag_engine.get_model_name(),
             vector_dim=rag_engine.MEMORIES_SPEC.vector_dim(),
+            fingerprint=rag_engine.current_fingerprint(),
         )
         store.reset_acks(consumer="milvus")
     except Exception as exc:  # noqa: BLE001 - a memory outage must not block transcripts
@@ -477,6 +478,11 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
     if outcome == "done":
         state["finished_at"] = _now_iso()
     _save_state(state)
+    if outcome == "done":
+        try:
+            rag_engine.write_embedding_stamp(db_path=db_path)
+        except Exception as e:  # noqa: BLE001 - the vectors are written; only the stamp is stale
+            message = f"embedding stamp not written: {rag_engine._scrub_exception(e)}"
     return _report(state, outcome, message)
 
 
