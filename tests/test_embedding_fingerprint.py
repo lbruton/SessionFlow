@@ -322,6 +322,55 @@ def test_stale_status_schedules_a_refresh_and_answers_at_once(stamp_env, monkeyp
     assert scheduled == [1]
 
 
+def test_index_check_error_counts_as_data(monkeypatch):
+    def unreachable(uri):
+        raise ConnectionError("milvus down")
+
+    monkeypatch.setattr(rag_engine, "MilvusClient", unreachable)
+
+    assert rag_engine._index_has_data("http://milvus:19530") is True
+
+
+def test_unresolved_fingerprint_is_not_cached(tmp_path, monkeypatch):
+    cache = tmp_path / "models--x--y"
+    monkeypatch.setattr(rag_engine, "_MODEL_CACHE", cache)
+    monkeypatch.setattr(rag_engine, "_current_fingerprint", None)
+
+    assert rag_engine.current_fingerprint()["revision"] is None
+
+    _cache(tmp_path)
+    assert rag_engine.current_fingerprint()["revision"] == "rev1"
+
+
+UNRESOLVED = dict(CURRENT, revision=None, tokenizer_sha256=None)
+
+
+def test_unresolved_fingerprint_is_not_stamped_on_lite(stamp_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(UNRESOLVED))
+
+    rag_engine._check_model_identity(db_path=str(tmp_path / "milvus.db"))
+
+    assert not stamp_env.exists()
+
+
+def test_unresolved_fingerprint_is_not_stamped_on_standalone(stamp_env, monkeypatch):
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(UNRESOLVED))
+    client = FakeStandalone()
+    monkeypatch.setattr(rag_engine, "MilvusClient", lambda uri: client)
+
+    rag_engine._check_model_identity(db_path="http://milvus:19530")
+
+    assert client.altered == []
+
+
+def test_unresolved_fingerprint_still_refuses_a_model_change(stamp_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(UNRESOLVED))
+    stamp_env.write_text(json.dumps(_stamp(CURRENT, model_name="modernbert")))
+
+    with pytest.raises(RuntimeError, match="Model mismatch"):
+        rag_engine._check_model_identity(db_path=str(tmp_path / "milvus.db"))
+
+
 def test_health_embedding_block_reports_the_fingerprint(monkeypatch):
     import http_server
 
@@ -330,6 +379,28 @@ def test_health_embedding_block_reports_the_fingerprint(monkeypatch):
     monkeypatch.setattr(http_server.rag_engine, "embedding_stamp_status", lambda: status, raising=False)
 
     assert http_server._embedding_status_payload()["fingerprint"] == status
+
+
+def test_creating_the_sessions_collection_skips_an_unresolved_stamp(stamp_env, monkeypatch):
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(UNRESOLVED))
+
+    class Creating(FakeStandalone):
+        def prepare_index_params(self):
+            class P:
+                def add_index(self, **kwargs):
+                    pass
+            return P()
+
+        def create_collection(self, **kwargs):
+            self.exists = True
+
+        def load_collection(self, collection_name):
+            pass
+
+    client = Creating(exists=False)
+    rag_engine._create_collection(client, "http://milvus:19530")
+
+    assert client.altered == []
 
 
 def test_creating_the_memories_collection_does_not_stamp(stamp_env, monkeypatch):

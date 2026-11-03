@@ -527,7 +527,9 @@ def test_cli_reembed_covers_memories_without_embedding_them(env, monkeypatch, me
         assert cleanup.cmd_reembed(args) == 0
 
         assert store.index_meta()["generation"] == 2
-        assert store.index_meta()["fingerprint"] == rag_engine.current_fingerprint()
+        fingerprint = rag_engine.current_fingerprint()
+        expected = fingerprint if rag_engine.fingerprint_resolved(fingerprint) else None
+        assert store.index_meta()["fingerprint"] == expected
         assert [r["memory_id"] for r in store.pending("milvus")] == [written.memory_id]
         flat = [t for batch in env["embed_inputs"] for t in batch]
         assert all("memory text" not in t for t in flat)

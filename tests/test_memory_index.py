@@ -365,6 +365,13 @@ def test_first_index_records_its_fingerprint(store, milvus, tmp_path):
     assert idx.health()["fingerprint_drift"] == []
 
 
+def test_unresolved_fingerprint_is_not_recorded(store, milvus, tmp_path):
+    idx = _index(store, milvus, tmp_path, fingerprint=dict(FP, revision=None, tokenizer_sha256=None))
+
+    assert store.index_meta()["fingerprint"] is None
+    assert idx.health()["fingerprint_drift"] == []
+
+
 def test_stored_meta_without_a_fingerprint_adopts_the_current_one(store, milvus, tmp_path):
     store.claim_index_model("embeddinggemma", 768)
     assert store.index_meta()["fingerprint"] is None

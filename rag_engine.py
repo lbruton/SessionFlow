@@ -288,12 +288,20 @@ def embedding_fingerprint(cfg: Optional[Dict[str, object]] = None, cache: Option
 _current_fingerprint: Optional[Dict[str, object]] = None
 
 
+def fingerprint_resolved(fingerprint: Dict[str, object]) -> bool:
+    """True when the fingerprint names a cached snapshot and its tokenizer."""
+    return bool(fingerprint.get("revision") and fingerprint.get("tokenizer_sha256"))
+
+
 def current_fingerprint() -> Dict[str, object]:
-    """Return the active model's fingerprint, computed once per process."""
+    """Return the active model's fingerprint, cached once the model cache resolves it."""
     global _current_fingerprint
-    if _current_fingerprint is None:
-        _current_fingerprint = embedding_fingerprint()
-    return dict(_current_fingerprint)
+    if _current_fingerprint is not None:
+        return dict(_current_fingerprint)
+    fingerprint = embedding_fingerprint()
+    if fingerprint_resolved(fingerprint):
+        _current_fingerprint = fingerprint
+    return dict(fingerprint)
 
 
 def fingerprint_hash(fingerprint: Dict[str, object]) -> str:
@@ -334,8 +342,11 @@ def _index_has_data(db_path: Optional[str]) -> bool:
                                      limit=1, output_fields=["id"]))
         finally:
             client.close()
-    except Exception:
-        return False
+    except Exception as exc:
+        # An unreadable index keeps a model-change refusal in place.
+        logger.warning("Could not check whether the index holds data; assuming it does: %s",
+                       _scrub_exception(exc))
+        return True
 
 
 def _read_file_stamp() -> Optional[Dict[str, object]]:
@@ -432,7 +443,8 @@ def _check_model_identity(db_path: Optional[str] = None):
                 ", ".join(drift),
             )
         stamp_store = property_stamp if client is not None else _read_file_stamp()
-        if stamp_store != new:
+        # Without a cached model the fingerprint has no revision; the next start stamps it.
+        if stamp_store != new and fingerprint_resolved(new["fingerprint"]):
             _write_stamp(client, new)
             # Milvus has no compare-and-set: a server that starts at the same time
             # can overwrite the first stamp, so read it back before indexing.
@@ -1038,7 +1050,7 @@ def _create_collection(client: MilvusClient, db_path: str = "",
     if _is_remote_uri(db_path):
         client.load_collection(collection_name=spec.name)
         print(f"Collection loaded: {spec.name}", file=sys.stderr)
-        if spec.name == COLLECTION_NAME:
+        if spec.name == COLLECTION_NAME and fingerprint_resolved(current_fingerprint()):
             _write_stamp(client, _current_stamp())
             _record_stamp_status(current_fingerprint())
 

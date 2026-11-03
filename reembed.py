@@ -294,12 +294,13 @@ def _reembed_memories() -> Optional[int]:
     pending, and the reset clears them. Returns the new generation, or None
     when the memory store is unreachable (transcripts still re-embed).
     """
+    fingerprint = rag_engine.current_fingerprint()
     try:
         store = _open_memory_store()
         generation = store.bump_generation(
             model_name=rag_engine.get_model_name(),
             vector_dim=rag_engine.MEMORIES_SPEC.vector_dim(),
-            fingerprint=rag_engine.current_fingerprint(),
+            fingerprint=fingerprint if rag_engine.fingerprint_resolved(fingerprint) else None,
         )
         store.reset_acks(consumer="milvus")
     except Exception as exc:  # noqa: BLE001 - a memory outage must not block transcripts

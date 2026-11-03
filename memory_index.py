@@ -317,7 +317,7 @@ class MemoryIndex:
         """Ensure the collection, check the memory model, and rebuild a missing or damaged FTS file."""
         await run_db(rag_engine._ensure_collection, self.milvus, self.milvus_uri, spec=self.spec)
         meta = await run_db(self.store.claim_index_model, self.model_name, self.spec.vector_dim(),
-                            self.fingerprint)
+                            self._claimable_fingerprint())
         self._set_fingerprint_drift(meta.get("fingerprint"))
         self._set_model_block(meta["model_name"], meta["vector_dim"])
         self.fts = await run_db(MemoryFTS, self.fts_path)
@@ -349,6 +349,10 @@ class MemoryIndex:
             logger.warning("Memory Milvus writes refused: %s", reason)
         self.milvus_blocked = reason
 
+    def _claimable_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """Return the fingerprint to record, or None while the model cache cannot resolve it."""
+        return self.fingerprint if rag_engine.fingerprint_resolved(self.fingerprint) else None
+
     def _set_fingerprint_drift(self, stored: Any) -> None:
         """Record which fingerprint fields differ from the stored memory vectors.
 
@@ -371,7 +375,7 @@ class MemoryIndex:
             meta["model_name"], meta["vector_dim"])
         if meta["model_name"] is None or adoptable:
             meta = await run_db(self.store.claim_index_model, self.model_name,
-                                self.spec.vector_dim(), self.fingerprint)
+                                self.spec.vector_dim(), self._claimable_fingerprint())
         self._set_fingerprint_drift(meta.get("fingerprint"))
         self._set_model_block(meta["model_name"], meta["vector_dim"])
 
