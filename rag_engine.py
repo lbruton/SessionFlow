@@ -30,7 +30,7 @@ os.environ['TRANSFORMERS_OFFLINE'] = '1'
 from pymilvus import MilvusClient, CollectionSchema, FieldSchema
 from pymilvus.exceptions import MilvusException
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Iterator, List, Dict, NamedTuple, Optional, Sequence, Union
 import asyncio
 import logging
@@ -503,6 +503,8 @@ _fts = FTSIndex("turns_fts", [
 ProjectRoots = Union[str, Sequence[str]]
 # db_path -> (monotonic time, roots); see known_project_roots.
 _known_roots_cache: Dict[Optional[str], tuple] = {}
+_known_roots_refreshing: Dict[Optional[str], Future] = {}
+_known_roots_lock = threading.Lock()
 KNOWN_ROOTS_TTL_S = 300.0
 _write_lock: Optional[asyncio.Lock] = None
 _embed_semaphore: Optional[asyncio.Semaphore] = None
@@ -2671,13 +2673,59 @@ def _fts_roots_complete(conn, db_path: Optional[str]) -> bool:
 def known_project_roots(db_path: Optional[str] = None) -> List[str]:
     """Return every distinct ``project_root`` in the index.
 
-    Reads the FTS sidecar, which is local, and reads Milvus instead when FTS
-    fails or is incomplete. The result is cached per ``db_path`` for
-    ``KNOWN_ROOTS_TTL_S``.
+    The result is cached per ``db_path``. A list older than ``KNOWN_ROOTS_TTL_S``
+    is returned at once and refreshed in the background, so only a caller with
+    no cached list waits, and it shares any scan already running.
     """
     cached = _known_roots_cache.get(db_path)
-    if cached and time.monotonic() - cached[0] < KNOWN_ROOTS_TTL_S:
-        return cached[1]
+    if cached is None:
+        return refresh_known_project_roots(db_path).result()
+    if time.monotonic() - cached[0] >= KNOWN_ROOTS_TTL_S:
+        refresh_known_project_roots(db_path)
+    return cached[1]
+
+
+def refresh_known_project_roots(db_path: Optional[str] = None) -> Future:
+    """Rescan the project roots on a background thread; one scan runs per ``db_path``.
+
+    A failed scan keeps the cached list, and the next read tries again.
+
+    Returns:
+        Future: the running scan, which every waiter shares. It holds the roots or the scan's error.
+    """
+    with _known_roots_lock:
+        running = _known_roots_refreshing.get(db_path)
+        if running is not None:
+            return running
+        scan: Future = Future()
+        _known_roots_refreshing[db_path] = scan
+
+    def run() -> None:
+        roots, error = None, None
+        try:
+            roots = _scan_project_roots(db_path)
+            _known_roots_cache[db_path] = (time.monotonic(), roots)
+        except Exception as e:
+            logger.warning("Project root refresh failed: %s", _scrub_exception(e))
+            error = e
+        finally:
+            try:
+                # FTS connections are per thread, and this thread ends here.
+                _fts.close_all()
+            finally:
+                with _known_roots_lock:
+                    del _known_roots_refreshing[db_path]
+                if error is None:
+                    scan.set_result(roots)
+                else:
+                    scan.set_exception(error)
+
+    threading.Thread(target=run, name="known-roots", daemon=True).start()
+    return scan
+
+
+def _scan_project_roots(db_path: Optional[str]) -> List[str]:
+    """Read the roots from the local FTS sidecar, or from Milvus when FTS fails or is incomplete."""
     roots = None
     try:
         conn = _fts.connection(db_path)
@@ -2693,9 +2741,7 @@ def known_project_roots(db_path: Optional[str] = None) -> List[str]:
         for batch in _query_batches(["project_root"], db_path=db_path):
             found.update(row.get("project_root") or "" for row in batch)
         roots = list(found)
-    roots = sorted(r for r in roots if r)
-    _known_roots_cache[db_path] = (time.monotonic(), roots)
-    return roots
+    return sorted(r for r in roots if r)
 
 
 def _query_batches(output_fields: list, batch_size: int = 1000,

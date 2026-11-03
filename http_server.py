@@ -1350,6 +1350,7 @@ async def _background_startup(
     global _startup_state
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(executor, _blocking_startup, db_path)
+    rag_engine.refresh_known_project_roots(db_path)
 
     if reranker.settings()["reranker"] != "off":
         tasks["reranker"] = asyncio.create_task(_load_reranker())

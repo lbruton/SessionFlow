@@ -365,6 +365,9 @@ class FTSIndex:
         elif project_root:
             sql += f" WHERE project_root IN ({', '.join('?' for _ in project_root)})"
             params = tuple(project_root)
+        else:
+            # A count on the FTS table walks every row; docsize holds one small row per doc.
+            sql += "_docsize"
         return int(conn.execute(sql, params).fetchone()[0])
 
     def distinct_values(self, conn: sqlite3.Connection, column: str) -> List[str]:
