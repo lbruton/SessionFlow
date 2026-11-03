@@ -450,7 +450,7 @@ def _check_model_identity(db_path: Optional[str] = None):
                     f"but SESSIONFLOW_MODEL is '{_MODEL_NAME}' ({_MODEL_ID}, {_EMBED_DIM} dims). "
                     f"Run cleanup.py reset or clear the index before switching models."
                 )
-        elif stored and isinstance(stored.get("fingerprint"), dict):
+        elif stored and isinstance(stored.get("fingerprint"), dict) and _index_has_data(db_path):
             new = stored
         drift = _record_stamp_status(new["fingerprint"])
         if drift:

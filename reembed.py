@@ -419,6 +419,12 @@ def run(*, confirmed: bool, max_minutes: Optional[float] = None,
             return _report(state, "done", "run already complete; use --restart to redo")
         worklist = _load_worklist()
     else:
+        server = _server_fingerprint_hash()
+        current = rag_engine.fingerprint_hash(rag_engine.current_fingerprint())
+        if server is not None and server != current:
+            return ReembedReport(status="refused", message=(
+                f"the running server embeds with fingerprint {server}, not {current}; "
+                "restart it before re-embedding, or its new rows keep the old vectors"))
         worklist = _snapshot_ids(db_path)
         _write_private_atomic(_worklist_path(), json.dumps(worklist))
         state = _new_state(worklist)
@@ -516,16 +522,22 @@ def _server_fingerprint_hash() -> Optional[str]:
 def _stamp_finished_run(state: dict, db_path: str) -> tuple:
     """Record the run's fingerprint as the stamp; return ``(outcome, message)``.
 
-    A failed write, or a running server that embeds with another fingerprint, leaves
-    the run open, so the next ``run`` retries only the stamp. A checkpoint without a
-    fingerprint cannot prove which one its earlier chunks used.
+    A failed write or an unresolved fingerprint leaves the run open, so the next ``run``
+    retries only the stamp. A server that embeds with another fingerprint may have
+    added rows outside the worklist, so the run closes unstamped and needs ``--restart``.
+    A checkpoint without a fingerprint cannot prove which one its earlier chunks used.
     """
     if state.get("fingerprint") is None:
         return "done", "embedding stamp not written: the checkpoint has no fingerprint; use --restart"
+    if not rag_engine.fingerprint_resolved(rag_engine.current_fingerprint()):
+        return "error", ("embedding stamp not written: the model cache does not resolve the "
+                         "fingerprint; download the model, then run again")
     server = _server_fingerprint_hash()
     if server is not None and server != state["fingerprint"]:
-        return "error", (f"embedding stamp not written: the running server embeds with fingerprint "
-                         f"{server}, not {state['fingerprint']}; restart it, then run again")
+        state["stamp_blocked"] = True
+        return "done", (f"embedding stamp not written: the running server embeds with fingerprint "
+                        f"{server}, not {state['fingerprint']}, so rows it added are not re-embedded; "
+                        "restart it, then run again with --restart")
     try:
         rag_engine.write_embedding_stamp(db_path=db_path)
     except Exception as e:  # noqa: BLE001 - the vectors are written; the next run retries the stamp

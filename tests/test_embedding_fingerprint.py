@@ -169,6 +169,16 @@ def test_fingerprint_mismatch_warns_and_does_not_refuse(stamp_env, tmp_path, cap
     assert json.loads(stamp_env.read_text())["fingerprint"] == old
 
 
+def test_drift_on_an_empty_index_restamps_the_current_fingerprint(stamp_env, tmp_path, monkeypatch):
+    monkeypatch.setattr(rag_engine, "_index_has_data", lambda db_path: False)
+    stamp_env.write_text(json.dumps(_stamp(dict(CURRENT, revision="old"))))
+
+    rag_engine._check_model_identity(db_path=str(tmp_path / "milvus.db"))
+
+    assert json.loads(stamp_env.read_text()) == _stamp(CURRENT)
+    assert rag_engine.embedding_stamp_status()["drift"] == []
+
+
 def test_model_name_mismatch_still_refuses(stamp_env, tmp_path):
     stamp_env.write_text(json.dumps(_stamp(CURRENT, model_name="modernbert")))
 

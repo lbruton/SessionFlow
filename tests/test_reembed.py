@@ -130,6 +130,9 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(rag_engine, "write_embedding_stamp",
                         lambda db_path=None: cap["stamps"].append(db_path), raising=False)
     monkeypatch.setattr(reembed, "_server_fingerprint_hash", lambda: None, raising=False)
+    # A runner without the cached model has an unresolved fingerprint, which holds the stamp.
+    resolved = dict(rag_engine.current_fingerprint(), revision="rev", tokenizer_sha256="t" * 64)
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(resolved))
     monkeypatch.setattr(reembed, "get_embedding_budget", lambda: cap["budget"])
     monkeypatch.setattr(reembed, "_monotonic", lambda: cap["clock"][0])
     monkeypatch.setattr(reembed, "_sleep", lambda s: None)
@@ -343,13 +346,40 @@ def test_failed_stamp_keeps_the_run_open_until_a_retry_writes_it(env, monkeypatc
     assert _state(env)["status"] == "done"
 
 
-def test_running_server_with_another_fingerprint_holds_the_stamp(env, monkeypatch):
+def test_fresh_run_refuses_while_the_server_embeds_with_another_fingerprint(env, monkeypatch):
     monkeypatch.setattr(env["module"], "_server_fingerprint_hash", lambda: "0000000000000000")
 
     report = env["module"].run(confirmed=True)
 
-    assert report.status == "error"
+    assert report.status == "refused"
     assert "restart" in report.message
+    assert env["snapshots"] == 0
+    assert env["stamps"] == []
+
+
+def test_server_mismatch_at_the_end_needs_a_fresh_sweep(env, monkeypatch):
+    current = rag_engine.fingerprint_hash(rag_engine.current_fingerprint())
+    answers = iter([current, "0000000000000000"])
+    monkeypatch.setattr(env["module"], "_server_fingerprint_hash", lambda: next(answers, current))
+
+    first = env["module"].run(confirmed=True)
+    assert "--restart" in first.message
+    assert env["stamps"] == []
+
+    # Rows the stale server wrote after the snapshot are outside the worklist.
+    second = env["module"].run(confirmed=True)
+    assert env["stamps"] == []
+    assert "--restart" in second.message
+
+
+def test_unresolved_fingerprint_holds_the_stamp(env, monkeypatch):
+    unresolved = dict(rag_engine.current_fingerprint(), revision=None, tokenizer_sha256=None)
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(unresolved))
+
+    report = env["module"].run(confirmed=True)
+
+    assert report.status == "error"
+    assert "cache" in report.message
     assert env["stamps"] == []
     assert _state(env)["status"] != "done"
 
