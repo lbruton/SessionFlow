@@ -100,6 +100,11 @@ def test_model_identity_stamp_records_the_collection(tmp_path, monkeypatch):
 
     stamp = tmp_path / "model_identity.json"
     monkeypatch.setattr(rag_engine, "_IDENTITY_FILE", stamp)
+    # A runner without the cached model has no revision, and no stamp is written then.
+    resolved = dict(rag_engine.current_fingerprint(), revision="rev", tokenizer_sha256="t" * 64)
+    monkeypatch.setattr(rag_engine, "current_fingerprint", lambda: dict(resolved))
+    monkeypatch.setattr(rag_engine, "_stamp_status", None)
+    monkeypatch.setattr(rag_engine, "_stamp_db_path", None)
 
     rag_engine._check_model_identity()
 
