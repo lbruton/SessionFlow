@@ -1066,6 +1066,23 @@ class MemoryStore:
             ).fetchone()
         return int(row["generation"])
 
+    def wrapped_sessions(self, session_ids: Sequence[str],
+                         user_id: str = DEFAULT_USER_ID) -> set:
+        """Return the IDs in ``session_ids`` that a live session summary names as its source.
+
+        Every project and status counts: a superseded summary still records a wrap.
+        """
+        ids = sorted({s for s in session_ids if s})
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT source_session_id FROM memories WHERE deleted_at IS NULL "
+                "AND user_id = %s AND type = 'session-summary' AND source_session_id = ANY(%s)",
+                (user_id, ids),
+            ).fetchall()
+        return {r["source_session_id"] for r in rows}
+
     # --- Maintenance --------------------------------------------------------
 
     def dump_status(self, now: Optional[datetime] = None) -> Dict[str, Any]:

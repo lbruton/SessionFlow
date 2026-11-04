@@ -9,6 +9,17 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-03
+
+### Added
+
+- `list_sessions` MCP tool: one line per session, newest first, with the full session ID, last `turn_index`,
+  turn count, first and last time, the first user message with text after boilerplate stripping, and
+  `wrapped` (whether a session-summary memory names the session as its source). Filters: `project_root`,
+  `provider`, `date_from`, `date_to`, `wrapped` and `include_subagents`; subagent sessions (`agent-*`) are
+  left out by default. Without the memory store, `wrapped` is unknown and the `wrapped` filter refuses
+  (SESF-63).
+
 ## [0.19.0] - 2026-11-03
 
 ### Added

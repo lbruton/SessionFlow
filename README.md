@@ -32,15 +32,18 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 |------|---------|
 | `search_session` | Turns that match a query in one project, or in one session with `session_id`. Omit `query` to list recent turns. |
 | `search_all_sessions` | Turns that match a query, with `project_root`, `git_branch`, `provider`, `date_from`, `date_to` and `issue_id` filters. |
+| `list_sessions` | One line per session, newest first: the full session ID, last `turn_index`, turn count, first user message and whether a session summary covers it. Filters: `project_root`, `provider`, `date_from`, `date_to`, `wrapped` and `include_subagents`. |
 | `get_turns` | The turns around one turn of a session. Requires `session_id` and `turn_index` from a search result. A unique `session_id` prefix of at least 8 characters also works, and the output prints the full ID. |
 | `get_session_stats` | Turn, session, branch and provider counts for one project, or for the index with `"*"`. |
 | `get_issue_timeline` | Every turn that mentions an issue ID, oldest first. Requires `issue_id`. |
 | `cleanup_sessions` | Deletes turns by age, session ID or git branch, across every project. |
 | `sanitize_index` | A dry-run report of secrets in the index. Removes them with `apply` and `confirm`. |
 
-`search_session`, `search_all_sessions` and `get_session_stats` take `project_root`: a path, a folder name such as `CoWork`, or `"*"` for every project. The tool descriptions ask the model to pass its working directory. Without the argument, the server asks the client for its MCP roots and uses the first folder. Claude Code answers with its working directory. A client can also name the project in the `X-Project-Root` header. When none of these names a project, the tool refuses the call and asks for `project_root`.
+`search_session`, `search_all_sessions`, `list_sessions` and `get_session_stats` take `project_root`: a path, a folder name such as `CoWork`, or `"*"` for every project. The tool descriptions ask the model to pass its working directory. Without the argument, the server asks the client for its MCP roots and uses the first folder. Claude Code answers with its working directory. A client can also name the project in the `X-Project-Root` header. When none of these names a project, the tool refuses the call and asks for `project_root`.
 
 `search_session` and `search_all_sessions` take `format`: `markdown` (the default), `json` or `compact`. `compact` prints one line per hit with a short preview and no reply text. Pass the session and turn values of a line to `get_turns`.
+
+`list_sessions` marks a session `wrapped:yes` when a session-summary memory names it as its source. `wrapped=false` returns only sessions that never ran `/wrap`. The flag needs the memory store: without it, every row says `wrapped:unknown` and the `wrapped` filter refuses the call. Subagent transcripts, whose session IDs start with `agent-`, are left out unless `include_subagents` is true.
 
 ### Search examples
 
@@ -48,6 +51,7 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 search_all_sessions("deployment decisions", date_from="2026-04-08", date_to="2026-04-08")
 search_all_sessions("what broke in production", date_from="2026-04-01")
 search_all_sessions(project_root="*")
+list_sessions(project_root="*", wrapped=false, date_from="2026-04-01")
 get_turns(session_id="<session_id from a result>", turn_index=12)
 ```
 
