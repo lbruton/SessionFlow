@@ -143,6 +143,10 @@ _Avoid_: current version, successor
 An issue, such as an epic, that more than `UMBRELLA_SHARE` of a project's lineage records with `extra.issues` name. The check applies once the project has `UMBRELLA_MIN_RECORDS` such records. An umbrella issue links no **Newer Record**.
 _Avoid_: parent issue (an umbrella issue is found by share, not by the Plane parent)
 
+**Wrapped Session**:
+A session that a session-summary memory names as its `source_session_id`. `list_sessions` reports it as `wrapped:yes`; a session no summary names is unwrapped.
+_Avoid_: closed session, finished session
+
 ## Relationships
 
 - A **Provider** has exactly one **Source Kind** per transcript format and exactly one **Provider Adapter**.
