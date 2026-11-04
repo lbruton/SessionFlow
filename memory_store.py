@@ -308,8 +308,9 @@ MAX_NEWER = 8
 
 UMBRELLA_SHARE = 0.25
 UMBRELLA_MIN_RECORDS = 10
-"""An issue named by more than this share of a project's lineage records, once it has
-this many, is an umbrella issue and links no records."""
+"""An issue named by more than this share of a project's lineage records with
+``extra.issues``, once it has this many, is an umbrella issue and links no records.
+Records without ``extra.issues`` stay out of the count, so imports do not dilute it."""
 
 _LINEAGE_COLS = "memory_id, type, created_at"
 _LIVE_IN_PROJECT = "deleted_at IS NULL AND status = 'active' AND user_id = %s AND project = %s"
@@ -525,11 +526,15 @@ class MemoryStore:
                     continue
                 scope = (row["user_id"], row["project"])
                 entries: Dict[str, Dict[str, Any]] = {}
-                hit = conn.execute(
-                    f"SELECT {_LINEAGE_COLS} FROM memories WHERE {_LIVE_IN_PROJECT} "
-                    f"AND supersedes @> ARRAY[%s]::uuid[] {_NEWEST}",
-                    (*scope, mid),
-                ).fetchone()
+                hit = None
+                # A topic replacement reactivates a superseded record and leaves the
+                # old supersedes pointer in place, so only a superseded row follows it.
+                if row["status"] == "superseded":
+                    hit = conn.execute(
+                        f"SELECT {_LINEAGE_COLS} FROM memories WHERE {_LIVE_IN_PROJECT} "
+                        f"AND supersedes @> ARRAY[%s]::uuid[] {_NEWEST}",
+                        (*scope, mid),
+                    ).fetchone()
                 if hit is not None:
                     entries[str(hit["memory_id"])] = _lineage_entry(hit, "supersedes")
                 issues = _worked_issues(row) if row["type"] in LINEAGE_TYPES else []
@@ -541,9 +546,9 @@ class MemoryStore:
                                         key=lambda i: (counts.get(i, 0), i)):
                         hit = conn.execute(
                             f"SELECT {_LINEAGE_COLS} FROM memories WHERE {_LIVE_IN_PROJECT} "
-                            f"AND {_LINEAGE_ROW} AND memory_id <> %s AND created_at > %s "
+                            f"AND {_LINEAGE_ROW} AND (created_at, memory_id) > (%s, %s) "
                             f"AND (extra -> 'issues') ? %s {_NEWEST}",
-                            (*scope, sorted(LINEAGE_TYPES), mid, row["created_at"], issue),
+                            (*scope, sorted(LINEAGE_TYPES), row["created_at"], mid, issue),
                         ).fetchone()
                         if hit is None:
                             continue
@@ -558,8 +563,9 @@ class MemoryStore:
                       scope: Tuple[str, str]) -> Tuple[set, Dict[str, int]]:
         """Return the project's umbrella issues and how many lineage records name each issue.
 
-        An umbrella issue, such as an epic most sessions list, is named by more than
-        ``UMBRELLA_SHARE`` of the records once the project has ``UMBRELLA_MIN_RECORDS``.
+        Both counts cover lineage records with ``extra.issues``. An umbrella issue, such as
+        an epic most sessions list, is named by more than ``UMBRELLA_SHARE`` of them once
+        the project has ``UMBRELLA_MIN_RECORDS``.
         """
         rows = conn.execute(
             f"SELECT issue, count(DISTINCT memory_id) AS n FROM memories, "

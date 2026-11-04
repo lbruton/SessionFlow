@@ -152,12 +152,12 @@ SessionFlow also stores memories: notes an agent writes on purpose, such as sess
 | Tool | Returns |
 |------|---------|
 | `add_memory` | The stored memory, or the existing one with the same topic key or text, and a list of similar memories. |
-| `search_memories` | Memories that match a query in one project, or in every project with `project: "*"`. A hit that a later record replaces names it on a `Newer:` line. |
+| `search_memories` | Memories that match a query in one project, or in every project with `project: "*"`. A `Newer:` line names the record that supersedes a hit and later work on its issues. |
 | `list_memories` | Memories newest first, with a cursor for the next page. |
-| `get_memory` / `update_memory` / `delete_memory` | One memory, read, changed or deleted by ID. `get_memory` also names the record that replaces it. |
+| `get_memory` / `update_memory` / `delete_memory` | One memory, read, changed or deleted by ID. `get_memory` also prints the `Newer:` line. |
 | `get_memory_context` | A memory, the turns of its source session that match it, the last turns of that session, and other sessions about its issue IDs. |
 
-A later record replaces a memory when it lists the memory in `supersedes`. Session summaries, decisions and handoffs also link by issue. Each issue in a memory's `extra.issues` names the newest later record of those types in the project that worked it. An issue that more than a quarter of a project's records name, such as an epic, links nothing. Records without `extra.issues` are never linked by issue, because `issue_ids` holds every ID their text mentions.
+A later record replaces a superseded memory when it lists the memory in `supersedes`. Session summaries, decisions and handoffs also link by issue. Each issue in a memory's `extra.issues` names the newest later record of those types in the project that worked it. That record is later work on the issue, not always a replacement. An issue that more than a quarter of a project's records with `extra.issues` name, such as an epic, links nothing. Records without `extra.issues` are never linked by issue, because `issue_ids` holds every ID their text mentions.
 
 | Variable | Default | Description |
 |----------|---------|-------------|

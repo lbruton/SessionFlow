@@ -516,8 +516,9 @@ def build_memory_tools() -> list[types.Tool]:
              ["text", "agent_id", "project", "type"]),
         tool("search_memories",
              "Search memories by meaning and keywords, validated against the canonical store. "
-             "Under 'newer', a hit names the later records that replace it: one that supersedes "
-             "it, and the newest record on each issue it worked. Read those for the current state.",
+             "Under 'newer', a hit names later records: one that supersedes it (a replacement), "
+             "and the newest record on each issue it worked (later work on that issue). Read them "
+             "to check whether the hit still holds.",
              {"query": {"type": "string", "description": "What to find."},
               "project": _PROJECT_PROP,
               "n": {"type": "integer", "default": 10, "description": "Number of results."},
@@ -534,7 +535,8 @@ def build_memory_tools() -> list[types.Tool]:
               **_FILTER_PROPS},
              ["project"]),
         tool("get_memory",
-             "Return one memory in full, and under 'newer' the later records that replace it.",
+             "Return one memory in full, and under 'newer' the record that supersedes it and "
+             "the newest later record on each issue it worked.",
              {"memory_id": _ID_PROP, "project": _PROJECT_PROP}, ["memory_id"]),
         tool("update_memory",
              "Change fields of one memory. Omitted fields keep their values; a new text replaces the old one.",

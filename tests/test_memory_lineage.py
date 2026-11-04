@@ -169,6 +169,39 @@ def test_a_supersedes_pointer_comes_first(svc, index):
     ]
 
 
+def test_a_supersedes_link_undone_by_topic_replacement_is_ignored(svc, index):
+    old = _add(svc, "old decision", type="decision", topic_key="decision:x")
+    _add(svc, "replacement", type="decision", supersedes=[old["memory_id"]])
+    refreshed = _add(svc, "refreshed decision", type="decision", topic_key="decision:x")
+    assert refreshed["memory_id"] == old["memory_id"]
+
+    rows = _search(svc, index, [_hit(svc, old)])
+
+    assert rows[old["memory_id"]]["status"] == "active"
+    assert "newer" not in rows[old["memory_id"]]
+
+
+def test_a_record_with_the_same_timestamp_and_a_higher_id_is_later(svc, store, index):
+    import hashlib
+    from datetime import datetime, timezone
+
+    from memory_store import NewMemory
+
+    when = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
+    written = []
+    for text in ("import one", "import two"):
+        written.append(store.add(NewMemory(
+            text=text, agent_id="claude-code", project="sessionflow", type="session-summary",
+            content_hash=hashlib.sha256(text.encode()).hexdigest(), extra={"issues": ["SESF-1"]},
+            created_at=when, updated_at=when)).memory_id)
+    first, second = sorted(written)
+
+    rows = _search(svc, index, [_hit(svc, {"memory_id": first}), _hit(svc, {"memory_id": second})])
+
+    assert _targets(rows[first]) == [(second, "issues", ["SESF-1"])]
+    assert "newer" not in rows[second]
+
+
 def test_records_without_worked_issues_get_no_newer_record(svc, index):
     # mem0 imports carry issue_ids from their text but no extra.issues.
     old = _add(svc, "imported note about SESF-3", type="decision")
