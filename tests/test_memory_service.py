@@ -459,8 +459,12 @@ def test_context_returns_source_turns_and_issue_sessions(svc, monkeypatch):
         return [{"session_id": "s-new", "provider": "codex", "last_timestamp": "2026-10-20T00:00:00Z"},
                 {"session_id": "s-old", "provider": "claude_code_cli", "last_timestamp": "2026-10-10T00:00:00Z"}]
 
+    async def no_matches(*_a, **_k):
+        return []
+
     monkeypatch.setattr(rag_engine, "session_turns", fake_turns)
     monkeypatch.setattr(rag_engine, "sessions_by_issue", fake_by_issue)
+    monkeypatch.setattr(rag_engine, "search_async", no_matches)
 
     out = asyncio.run(svc.context(written["memory_id"], project="sessionflow", limit=7))
 

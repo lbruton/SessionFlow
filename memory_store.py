@@ -300,6 +300,37 @@ def _uuid_or_none(value: str) -> Optional[uuid.UUID]:
         return None
 
 
+LINEAGE_TYPES = frozenset({"session-summary", "decision", "handoff"})
+"""Memory types that record the state of work, so a later one can replace an earlier one."""
+
+MAX_NEWER = 8
+"""Most later records ``MemoryStore.newer_records`` names for one memory."""
+
+UMBRELLA_SHARE = 0.25
+UMBRELLA_MIN_RECORDS = 10
+"""An issue named by more than this share of a project's lineage records, once it has
+this many, is an umbrella issue and links no records."""
+
+_LINEAGE_COLS = "memory_id, type, created_at"
+_LIVE_IN_PROJECT = "deleted_at IS NULL AND status = 'active' AND user_id = %s AND project = %s"
+_LINEAGE_ROW = "type = ANY(%s) AND jsonb_typeof(extra -> 'issues') = 'array'"
+_NEWEST = "ORDER BY created_at DESC, memory_id DESC LIMIT 1"
+
+
+def _lineage_entry(hit: Dict[str, Any], reason: str) -> Dict[str, Any]:
+    return {"memory_id": str(hit["memory_id"]), "type": hit["type"],
+            "created_at": hit["created_at"], "reason": reason, "issues": []}
+
+
+def _worked_issues(row: Dict[str, Any]) -> List[str]:
+    # extra.issues names the issues a session worked on; issue_ids names every
+    # ID the text mentions, which links unrelated records.
+    issues = (row.get("extra") or {}).get("issues")
+    if not isinstance(issues, list):
+        return []
+    return sorted({i for i in issues if isinstance(i, str) and i})
+
+
 def _row(raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if raw is None:
         return None
@@ -475,6 +506,76 @@ class MemoryStore:
                 (Jsonb([mem0_id]),),
             ).fetchone()
         return _row(row)
+
+    def newer_records(self, rows: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Return the later active records that follow each row, keyed by the row's ID.
+
+        An active record that lists the row in ``supersedes`` comes first (reason
+        ``supersedes``). Then, for a ``LINEAGE_TYPES`` row, each worked issue names
+        its newest later lineage record in the project (reason ``issues``), rarest
+        issue first, skipping umbrella issues (``_umbrella_issues``). One record
+        named for several issues appears once; at most ``MAX_NEWER`` entries.
+        """
+        found: Dict[str, List[Dict[str, Any]]] = {}
+        umbrellas: Dict[Tuple[str, str], Tuple[set, Dict[str, int]]] = {}
+        with self._pool.connection() as conn:
+            for row in rows:
+                mid = _uuid_or_none(row["memory_id"])
+                if mid is None:
+                    continue
+                scope = (row["user_id"], row["project"])
+                entries: Dict[str, Dict[str, Any]] = {}
+                hit = conn.execute(
+                    f"SELECT {_LINEAGE_COLS} FROM memories WHERE {_LIVE_IN_PROJECT} "
+                    f"AND supersedes @> ARRAY[%s]::uuid[] {_NEWEST}",
+                    (*scope, mid),
+                ).fetchone()
+                if hit is not None:
+                    entries[str(hit["memory_id"])] = _lineage_entry(hit, "supersedes")
+                issues = _worked_issues(row) if row["type"] in LINEAGE_TYPES else []
+                if issues:
+                    if scope not in umbrellas:
+                        umbrellas[scope] = self._issue_counts(conn, scope)
+                    skip, counts = umbrellas[scope]
+                    for issue in sorted((i for i in issues if i not in skip),
+                                        key=lambda i: (counts.get(i, 0), i)):
+                        hit = conn.execute(
+                            f"SELECT {_LINEAGE_COLS} FROM memories WHERE {_LIVE_IN_PROJECT} "
+                            f"AND {_LINEAGE_ROW} AND memory_id <> %s AND created_at > %s "
+                            f"AND (extra -> 'issues') ? %s {_NEWEST}",
+                            (*scope, sorted(LINEAGE_TYPES), mid, row["created_at"], issue),
+                        ).fetchone()
+                        if hit is None:
+                            continue
+                        key = str(hit["memory_id"])
+                        entries.setdefault(key, _lineage_entry(hit, "issues"))["issues"].append(issue)
+                if entries:
+                    found[row["memory_id"]] = list(entries.values())[:MAX_NEWER]
+        return found
+
+    @staticmethod
+    def _issue_counts(conn: psycopg.Connection,
+                      scope: Tuple[str, str]) -> Tuple[set, Dict[str, int]]:
+        """Return the project's umbrella issues and how many lineage records name each issue.
+
+        An umbrella issue, such as an epic most sessions list, is named by more than
+        ``UMBRELLA_SHARE`` of the records once the project has ``UMBRELLA_MIN_RECORDS``.
+        """
+        rows = conn.execute(
+            f"SELECT issue, count(DISTINCT memory_id) AS n FROM memories, "
+            f"jsonb_array_elements_text(extra -> 'issues') AS issue "
+            f"WHERE {_LIVE_IN_PROJECT} AND {_LINEAGE_ROW} GROUP BY issue",
+            (*scope, sorted(LINEAGE_TYPES)),
+        ).fetchall()
+        total = conn.execute(
+            f"SELECT count(*) AS n FROM memories WHERE {_LIVE_IN_PROJECT} AND {_LINEAGE_ROW}",
+            (*scope, sorted(LINEAGE_TYPES)),
+        ).fetchone()["n"]
+        counts = {r["issue"]: int(r["n"]) for r in rows}
+        skip = set()
+        if total >= UMBRELLA_MIN_RECORDS:
+            skip = {i for i, n in counts.items() if n > UMBRELLA_SHARE * total}
+        return skip, counts
 
     def _filter_sql(self, f: MemoryFilters) -> Tuple[List[str], List[Any]]:
         where = ["deleted_at IS NULL", "user_id = %s"]

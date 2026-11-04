@@ -515,7 +515,9 @@ def build_memory_tools() -> list[types.Tool]:
               **_PROVENANCE_PROPS},
              ["text", "agent_id", "project", "type"]),
         tool("search_memories",
-             "Search memories by meaning and keywords, validated against the canonical store.",
+             "Search memories by meaning and keywords, validated against the canonical store. "
+             "Under 'newer', a hit names the later records that replace it: one that supersedes "
+             "it, and the newest record on each issue it worked. Read those for the current state.",
              {"query": {"type": "string", "description": "What to find."},
               "project": _PROJECT_PROP,
               "n": {"type": "integer", "default": 10, "description": "Number of results."},
@@ -531,7 +533,8 @@ def build_memory_tools() -> list[types.Tool]:
               "source_session_id": {"type": "string", "description": "Only memories from this session."},
               **_FILTER_PROPS},
              ["project"]),
-        tool("get_memory", "Return one memory in full.",
+        tool("get_memory",
+             "Return one memory in full, and under 'newer' the later records that replace it.",
              {"memory_id": _ID_PROP, "project": _PROJECT_PROP}, ["memory_id"]),
         tool("update_memory",
              "Change fields of one memory. Omitted fields keep their values; a new text replaces the old one.",
@@ -546,7 +549,8 @@ def build_memory_tools() -> list[types.Tool]:
         tool("delete_memory", "Delete one memory. Its history is kept.",
              {"memory_id": _ID_PROP, "project": _PROJECT_PROP}, ["memory_id"]),
         tool("get_memory_context",
-             "Return a memory with the conversation that produced it and other sessions about its issues.",
+             "Return a memory with the conversation that produced it: the turns that match the "
+             "memory, the last turns, and other sessions about its issues.",
              {"memory_id": _ID_PROP, "project": _PROJECT_PROP,
               "limit": {"type": "integer", "default": 10, "description": "Items per section."}},
              ["memory_id"]),
@@ -585,6 +589,11 @@ def _format_memory(row: dict, heading: str = "") -> str:
     if row.get("source_session_id"):
         provider = f" ({row['source_provider']})" if row.get("source_provider") else ""
         lines.append(f"Source: session {row['source_session_id']}{provider}")
+    newer = row.get("newer") or []
+    if newer:
+        lines.append("Newer: " + " · ".join(
+            f"{'supersedes it' if e.get('reason') == 'supersedes' else ', '.join(e.get('issues') or [])}"
+            f" → `{e['memory_id']}` ({_when(e.get('created_at'))[:10]})" for e in newer))
     if row.get("text"):
         lines.append("")
         lines.append(row["text"])
@@ -625,6 +634,12 @@ def _format_context(payload: dict) -> str:
     source = payload.get("source_session")
     if source:
         parts.append(f"## Source session `{source.get('session_id', '')}`")
+        matched = source.get("matched_turns") or []
+        if matched:
+            parts.append("### Turns that match the memory")
+            parts.extend(f"- turn {t.get('turn_index')} ({str(t.get('timestamp') or '')[:19]}): "
+                         f"{t.get('content', '')}" for t in matched)
+            parts.append("### Last turns")
         for t in source.get("turns") or []:
             parts.append(f"- turn {t.get('turn_index')}: {t.get('content', '')}")
     related = payload.get("related_sessions") or []
