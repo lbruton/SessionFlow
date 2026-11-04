@@ -131,6 +131,18 @@ _Avoid_: model identity, embedding version
 Mark older memories in the same project as replaced by a new one. A superseded memory keeps its history and is left out of default reads.
 _Avoid_: delete, archive, overwrite
 
+**Worked Issues**:
+The issue IDs in a memory's `extra.issues`: the issues its session worked on. They differ from `issue_ids`, which hold every ID the text mentions.
+_Avoid_: issue tags, mentioned issues
+
+**Newer Record**:
+A later active memory that `MemoryStore.newer_records` names for a memory. It is the record that supersedes a superseded memory, or the newest later session summary, decision or handoff on one of its **Worked Issues**. An issue link means later work on that issue, not always a replacement.
+_Avoid_: current version, successor
+
+**Umbrella Issue**:
+An issue, such as an epic, that more than `UMBRELLA_SHARE` of a project's lineage records with `extra.issues` name. It links no **Newer Record**.
+_Avoid_: parent issue (an umbrella issue is found by share, not by the Plane parent)
+
 ## Relationships
 
 - A **Provider** has exactly one **Source Kind** per transcript format and exactly one **Provider Adapter**.
