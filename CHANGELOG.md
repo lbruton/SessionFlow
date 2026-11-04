@@ -9,6 +9,8 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-03
+
 ### Added
 
 - `list_sessions` MCP tool: one line per session, newest first, with the full session ID, last `turn_index`,
