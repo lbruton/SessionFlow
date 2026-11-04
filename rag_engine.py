@@ -3774,49 +3774,116 @@ def clear_collection(db_path: Optional[str] = None):
         _fts.clear(db_path)
 
 
-def list_sessions(project_root: Optional[str] = None,
-                  db_path: Optional[str] = None) -> List[Dict]:
-    """List all sessions with turn counts and date ranges. Optionally filter by project."""
-    all_results = _query_all(
-        ["session_id", "timestamp", "git_branch", "chunk_type", "project_root"],
-        filter_expr=_without_passages(
-            f'project_root == "{_escape_filter_scalar(project_root)}"' if project_root else None),
-        db_path=db_path,
-    )
+SESSION_TITLE_CANDIDATES = 8
+"""Earliest turns per session that ``session_titles`` reads to find a title."""
 
-    sessions: Dict[str, Dict] = {}
-    for r in all_results:
-        sid = r.get("session_id", "")
-        if not sid:
-            continue
-        if sid not in sessions:
-            sessions[sid] = {
-                "session_id": sid,
-                "turns": 0,
-                "branches": set(),
-                "min_ts": "",
-                "max_ts": "",
-            }
-        s = sessions[sid]
-        s["turns"] += 1
-        branch = r.get("git_branch", "")
-        if branch:
-            s["branches"].add(branch)
-        ts = r.get("timestamp", "")
-        if ts:
-            if not s["min_ts"] or ts < s["min_ts"]:
+SESSION_TITLE_CHARS = 150
+
+_SESSION_SCAN_FIELDS = ["doc_id", "session_id", "provider", "project_root", "timestamp",
+                        "turn_index", "git_branch"]
+_COMMAND_MARKER = re.compile(r"\[/[^\]]*\]")
+
+
+def list_sessions(project_root: Optional[ProjectRoots] = None,
+                  db_path: Optional[str] = None, *,
+                  date_from: Optional[str] = None, date_to: Optional[str] = None,
+                  provider: Optional[str] = None) -> List[Dict]:
+    """Return one aggregate per ``(session_id, provider)``, newest last turn first.
+
+    The scan reads no ``document`` and skips passages. Memory grows with the
+    session count: each session keeps the doc IDs of its
+    ``SESSION_TITLE_CANDIDATES`` earliest turns (``first_doc_ids``) for
+    ``session_titles``. Counts and times cover the turns inside the date window.
+
+    Args:
+        project_root: One root, several roots, or None for every project.
+        db_path: Milvus URI.
+        date_from: Earliest ISO date of a counted turn.
+        date_to: Latest ISO date of a counted turn.
+        provider: Only this provider; validated by the caller.
+
+    Returns:
+        Dicts with ``session_id``, ``provider``, ``project_root``, ``turns``,
+        ``branches``, ``min_ts``, ``max_ts``, ``last_turn_index`` and ``first_doc_ids``.
+    """
+    filter_expr = _without_passages(_build_milvus_filter(
+        None, None, project_root, provider, None, date_from, date_to))
+    sessions: Dict[tuple, Dict] = {}
+    for batch in _query_batches(_SESSION_SCAN_FIELDS, filter_expr=filter_expr, db_path=db_path):
+        for r in batch:
+            sid = r.get("session_id") or ""
+            if not sid:
+                continue
+            key = (sid, r.get("provider") or "")
+            s = sessions.get(key)
+            if s is None:
+                s = sessions[key] = {
+                    "session_id": sid, "provider": key[1],
+                    "project_root": r.get("project_root") or "", "turns": 0,
+                    "branches": set(), "min_ts": "", "max_ts": "",
+                    "last_turn_index": None, "_first": [],
+                }
+            s["turns"] += 1
+            if r.get("git_branch"):
+                s["branches"].add(r["git_branch"])
+            ts = r.get("timestamp") or ""
+            if ts and (not s["min_ts"] or ts < s["min_ts"]):
                 s["min_ts"] = ts
-            if not s["max_ts"] or ts > s["max_ts"]:
+            if ts and ts > s["max_ts"]:
                 s["max_ts"] = ts
+            turn_index = int(r.get("turn_index") or 0)
+            if s["last_turn_index"] is None or turn_index > s["last_turn_index"]:
+                s["last_turn_index"] = turn_index
+            # A max-heap of the earliest turns, bounded per session.
+            entry = (-turn_index, r.get("doc_id") or "")
+            if len(s["_first"]) < SESSION_TITLE_CANDIDATES:
+                heapq.heappush(s["_first"], entry)
+            elif entry > s["_first"][0]:
+                heapq.heapreplace(s["_first"], entry)
 
     result = []
     for s in sessions.values():
         s["branches"] = sorted(s["branches"])
+        s["first_doc_ids"] = [doc_id for _, doc_id in sorted(s.pop("_first"), reverse=True)]
         result.append(s)
-
-    # Sort by most recent first
     result.sort(key=lambda s: s["max_ts"], reverse=True)
     return result
+
+
+def _user_text(document: str) -> str:
+    """Return the user part of a stored turn after boilerplate stripping, or ''."""
+    clean, _ = boilerplate.strip(document or "")
+    if not clean.startswith("User: "):
+        return ""
+    user = clean[len("User: "):].partition("\n\nAssistant: ")[0]
+    return " ".join(user.split())
+
+
+def session_titles(sessions: List[Dict], db_path: Optional[str] = None) -> Dict[tuple, str]:
+    """Return a title per ``(session_id, provider)`` from each session's earliest turns.
+
+    The title is the first user message with text after ``boilerplate.strip``,
+    cut at ``SESSION_TITLE_CHARS``. A message that is only a slash-command
+    marker counts only when no other message has text.
+    """
+    doc_ids = [d for s in sessions for d in s.get("first_doc_ids") or []]
+    documents: Dict[str, str] = {}
+    pks = sorted({_pk_from_doc_id(d) for d in doc_ids})
+    for start in range(0, len(pks), _LISTING_FETCH_CHUNK):
+        id_filter = f"id in {json.dumps(pks[start:start + _LISTING_FETCH_CHUNK])}"
+        for batch in _query_batches(["doc_id", "document"], filter_expr=id_filter,
+                                    db_path=db_path):
+            for row in batch:
+                documents[row.get("doc_id") or ""] = row.get("document") or ""
+
+    titles: Dict[tuple, str] = {}
+    for s in sessions:
+        texts = [_user_text(documents.get(d, "")) for d in s.get("first_doc_ids") or []]
+        texts = [t for t in texts if t]
+        words = [t for t in texts if not _COMMAND_MARKER.fullmatch(t)]
+        title = (words or texts or [""])[0]
+        titles[(s["session_id"], s.get("provider") or "")] = title[:SESSION_TITLE_CHARS]
+    return titles
 
 
 # --- Async wrappers ---

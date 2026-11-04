@@ -15,6 +15,7 @@ import client_roots
 import rag_engine
 import sanitize
 import search_log
+import session_listing
 from project_scope import ProjectScope, resolve_project_scope
 from provider_adapters import (
     LEGAL_PROVIDERS,
@@ -241,6 +242,34 @@ def _render_results(fmt: str | None, results: list[dict], scope: ProjectScope) -
     return format_results(results, scope)
 
 
+MAX_SESSIONS = 200
+"""Largest ``n`` that list_sessions accepts."""
+
+_WRAPPED_LABEL = {True: "yes", False: "no", None: "unknown"}
+
+
+def format_sessions(payload: dict, scope: ProjectScope) -> str:
+    """Format a ``session_listing.list_sessions`` payload as one line per session."""
+    output = [_scope_line(scope), ""]
+    sessions = payload.get("sessions") or []
+    if not sessions:
+        return "\n".join(output + ["No sessions found."])
+    for s in sessions:
+        parts = [s.get("max_ts", "")[:19], s.get("provider", "")]
+        if s.get("project_root"):
+            parts.append(f"project:{Path(s['project_root']).name}")
+        parts += [f"session:{s.get('session_id', '')}",
+                  f"last_turn:{s.get('last_turn_index', 0)}",
+                  f"turns:{s.get('turns', 0)}",
+                  f"first:{s.get('min_ts', '')[:19]}",
+                  f"wrapped:{_WRAPPED_LABEL[s.get('wrapped')]}"]
+        title = s.get("title") or "(no user message)"
+        output.append(f"{' '.join(p for p in parts if p)} | {title}")
+    if not payload.get("wrapped_known", True):
+        output += ["", "Wrapped status is unknown: the memory store has not started or did not answer."]
+    return "\n".join(output)
+
+
 def format_turns(results: list[dict]) -> str:
     """Format get_turns results as markdown, opening with the full session ID."""
     output = [f"Session: {results[0].get('session_id', '')}", ""]
@@ -447,6 +476,52 @@ def build_search_all_sessions_schema() -> dict:
         },
         "required": [],
     }
+
+def build_list_sessions_schema() -> dict:
+    """Return the JSON-schema for the ``list_sessions`` tool input."""
+    return {
+        "type": "object",
+        "properties": {
+            "project_root": PROJECT_ROOT_PROPERTY,
+            "n": {
+                "type": "integer",
+                "description": f"Number of sessions to return (default: 20, at most {MAX_SESSIONS}).",
+                "default": 20,
+            },
+            "date_from": {
+                "type": "string",
+                "description": "Earliest date of a counted turn, as an ISO date, for example '2026-04-02'.",
+            },
+            "date_to": {
+                "type": "string",
+                "description": "Latest date of a counted turn, as an ISO date, for example '2026-04-02'.",
+            },
+            "provider": {
+                "type": "string",
+                "description": "Return only sessions from this provider, for example 'codex' or 'claude_code_cli'.",
+            },
+            "wrapped": {
+                "type": "boolean",
+                "description": (
+                    "true returns only sessions with a session summary, false only sessions "
+                    "without one. Needs the memory store."
+                ),
+            },
+            "include_subagents": {
+                "type": "boolean",
+                "description": "Include subagent transcripts (session IDs that start with 'agent-'). Default false.",
+                "default": False,
+            },
+            "format": {
+                "type": "string",
+                "enum": ["markdown", "json"],
+                "default": "markdown",
+                "description": "Output format: 'markdown' (default, one line per session) or 'json'.",
+            },
+        },
+        "required": [],
+    }
+
 
 # --- Memory tools ---
 
@@ -769,6 +844,17 @@ def register_tools(server: Server):
                 inputSchema=build_search_all_sessions_schema(),
             ),
             types.Tool(
+                name="list_sessions",
+                description=(
+                    "Return one line per session, newest first: its full session ID, last "
+                    "turn_index, turn count, first user message and whether a session summary "
+                    "covers it (wrapped). " + SCOPE_INSTRUCTION + " Pass wrapped=false to "
+                    "find sessions that never ran /wrap. Call get_turns with a session ID and "
+                    "last_turn to read the end of a session."
+                ),
+                inputSchema=build_list_sessions_schema(),
+            ),
+            types.Tool(
                 name="get_turns",
                 description=(
                     "Return the turns before and after one turn of a session. Requires "
@@ -1049,6 +1135,38 @@ def register_tools(server: Server):
                 )
                 await _log_turn_search(name, arguments, scope, results)
                 text = _render_results(arguments.get("format"), results, scope)
+                return [types.TextContent(type="text", text=text)]
+
+            elif name == "list_sessions":
+                provider_arg = arguments.get("provider")
+                err = _validate_enum_arg("provider", provider_arg, LEGAL_PROVIDERS)
+                if err:
+                    return [err]
+                n = arguments.get("n", 20)
+                if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= MAX_SESSIONS:
+                    return [types.TextContent(
+                        type="text", text=f"n must be an integer from 1 to {MAX_SESSIONS}")]
+                wrapped = arguments.get("wrapped")
+                if wrapped is not None and not isinstance(wrapped, bool):
+                    return [types.TextContent(type="text", text="wrapped must be true or false")]
+                scope = await _scope(arguments.get("project_root"), db)
+                if scope.unnamed:
+                    return [types.TextContent(type="text", text=UNNAMED_SCOPE_ERROR)]
+                try:
+                    payload = await session_listing.list_sessions(
+                        scope.filter_value(), n=n,
+                        date_from=arguments.get("date_from"), date_to=arguments.get("date_to"),
+                        provider=provider_arg, wrapped=wrapped,
+                        include_subagents=bool(arguments.get("include_subagents", False)),
+                        db_path=db, memory=_memory_service,
+                    )
+                except session_listing.WrappedUnavailable as exc:
+                    return [types.TextContent(type="text", text=str(exc))]
+                if arguments.get("format") == "json":
+                    text = _json_text({
+                        "scope": {"roots": scope.filter_value(), "note": scope.note}, **payload})
+                else:
+                    text = format_sessions(payload, scope)
                 return [types.TextContent(type="text", text=text)]
 
             elif name == "get_turns":

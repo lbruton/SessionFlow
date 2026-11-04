@@ -419,6 +419,10 @@ class MemoryService:
             if row["memory_id"] in newer:
                 row["newer"] = newer[row["memory_id"]]
 
+    async def wrapped_sessions(self, session_ids: List[str]) -> set:
+        """Return the session IDs that have a session summary (``MemoryStore.wrapped_sessions``)."""
+        return await run_db(self.store.wrapped_sessions, session_ids)
+
     async def list(self, filters: Dict[str, Any], limit: int = 20,
                    cursor: Optional[str] = None) -> Dict[str, Any]:
         """Return one page newest first, the next cursor, and the nightly dump status.
