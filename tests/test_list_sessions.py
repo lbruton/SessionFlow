@@ -197,6 +197,42 @@ def test_title_scans_past_the_candidates_for_real_user_text(monkeypatch):
     assert 'session_id == "s1"' in scan and 'provider == "claude_code_cli"' in scan
 
 
+def test_title_from_role_tagged_user_rows(monkeypatch):
+    rows = [
+        _row("o0", "oc", "2026-11-01T10:00:00", 0, " can you look at PR #5", provider="opencode",
+             chunk_type="user"),
+        _row("o1", "oc", "2026-11-01T10:01:00", 1, "Sure.", provider="opencode",
+             chunk_type="assistant"),
+        _row("g0", "ag", "2026-11-01T10:00:00", 0, "Created At: x\nCompleted", provider="antigravity_cli",
+             chunk_type="VIEW_FILE"),
+        _row("g1", "ag", "2026-11-01T10:01:00", 1,
+             "<USER_REQUEST>\nport the mcp configuration\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\n"
+             "The current local time is: 2026-05-23\n</ADDITIONAL_METADATA>",
+             provider="antigravity_cli", chunk_type="USER_INPUT"),
+        _row("g2", "ag2", "2026-11-01T10:00:00", 0,
+             "<USER_REQUEST>\n\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nnoise\n</ADDITIONAL_METADATA>",
+             provider="antigravity_desktop", chunk_type="USER_INPUT"),
+    ]
+    _patch(monkeypatch, rows)
+    sessions = rag_engine.list_sessions(db_path=DB)
+    titles = rag_engine.session_titles(sessions, db_path=DB)
+    assert titles[("oc", "opencode")] == "can you look at PR #5"
+    assert titles[("ag", "antigravity_cli")] == "port the mcp configuration"
+    assert titles[("ag2", "antigravity_desktop")] == ""
+
+
+def test_fallback_scan_finds_role_tagged_user_rows(monkeypatch):
+    k = rag_engine.SESSION_TITLE_CANDIDATES
+    rows = [_row(f"a{i}", "oc", f"2026-11-01T10:{i:02d}:00", i, f"reply {i}", provider="opencode",
+                 chunk_type="assistant") for i in range(k + 1)]
+    rows.append(_row("u", "oc", "2026-11-01T11:00:00", k + 3, "the first ask", provider="opencode",
+                     chunk_type="user"))
+    _patch(monkeypatch, rows)
+    sessions = rag_engine.list_sessions(db_path=DB)
+    titles = rag_engine.session_titles(sessions, db_path=DB)
+    assert titles[("oc", "opencode")] == "the first ask"
+
+
 def test_no_fallback_scan_when_candidates_hold_a_title(monkeypatch):
     rows = [_row(f"d{i}", "s1", f"2026-11-01T10:{i:02d}:00", i, f"User: q{i}") for i in range(30)]
     client = _patch(monkeypatch, rows)

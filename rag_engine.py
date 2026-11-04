@@ -3850,12 +3850,26 @@ def list_sessions(project_root: Optional[ProjectRoots] = None,
     return result
 
 
-def _user_text(document: str) -> str:
-    """Return the user part of a stored turn after boilerplate stripping, or ''."""
+_USER_REQUEST = re.compile(r"<USER_REQUEST>(.*?)</USER_REQUEST>", re.DOTALL)
+
+
+def _user_text(document: str, chunk_type: str = "") -> str:
+    """Return the user text of a stored row after boilerplate stripping, or ''.
+
+    Combined turns hold it after ``User: ``. Role-tagged rows keep the role in
+    ``chunk_type``: a ``user`` row is all user text, and a ``USER_INPUT`` row
+    holds it inside ``<USER_REQUEST>``.
+    """
     clean, _ = boilerplate.strip(document or "")
-    if not clean.startswith("User: "):
+    if chunk_type == "user":
+        user = clean
+    elif chunk_type == "USER_INPUT":
+        match = _USER_REQUEST.search(clean)
+        user = match.group(1) if match else ""
+    elif clean.startswith("User: "):
+        user = clean[len("User: "):].partition("\n\nAssistant: ")[0]
+    else:
         return ""
-    user = clean[len("User: "):].partition("\n\nAssistant: ")[0]
     return " ".join(user.split())
 
 
@@ -3868,19 +3882,20 @@ def session_titles(sessions: List[Dict], db_path: Optional[str] = None) -> Dict[
     turns hold no such message, ``_first_words`` scans the rest of the session.
     """
     doc_ids = [d for s in sessions for d in s.get("first_doc_ids") or []]
-    documents: Dict[str, str] = {}
+    texts_by_doc: Dict[str, str] = {}
     pks = sorted({_pk_from_doc_id(d) for d in doc_ids})
     for start in range(0, len(pks), _LISTING_FETCH_CHUNK):
         id_filter = f"id in {json.dumps(pks[start:start + _LISTING_FETCH_CHUNK])}"
-        for batch in _query_batches(["doc_id", "document"], filter_expr=id_filter,
+        for batch in _query_batches(["doc_id", "document", "chunk_type"], filter_expr=id_filter,
                                     db_path=db_path):
             for row in batch:
-                documents[row.get("doc_id") or ""] = row.get("document") or ""
+                texts_by_doc[row.get("doc_id") or ""] = _user_text(
+                    row.get("document") or "", row.get("chunk_type") or "")
 
     titles: Dict[tuple, str] = {}
     for s in sessions:
         candidates = s.get("first_doc_ids") or []
-        texts = [_user_text(documents.get(d, "")) for d in candidates]
+        texts = [texts_by_doc.get(d, "") for d in candidates]
         texts = [t for t in texts if t]
         words = [t for t in texts if not _COMMAND_MARKER.fullmatch(t)]
         if not words and s.get("turns", 0) > len(candidates):
@@ -3900,13 +3915,13 @@ def _first_words(session: Dict, db_path: Optional[str]) -> List[str]:
         f'provider == "{_escape_filter_scalar(session.get("provider") or "")}"',
     ]))
     best = None
-    for batch in _query_batches(["turn_index", "document"], filter_expr=filter_expr,
-                                db_path=db_path):
+    for batch in _query_batches(["turn_index", "document", "chunk_type"],
+                                filter_expr=filter_expr, db_path=db_path):
         for row in batch:
             turn_index = int(row.get("turn_index") or 0)
             if best is not None and turn_index >= best[0]:
                 continue
-            text = _user_text(row.get("document") or "")
+            text = _user_text(row.get("document") or "", row.get("chunk_type") or "")
             if text and not _COMMAND_MARKER.fullmatch(text):
                 best = (turn_index, text)
     return [best[1]] if best else []
