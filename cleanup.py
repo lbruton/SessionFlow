@@ -104,13 +104,16 @@ def cmd_list(args):
         print("No sessions indexed.")
         return
 
-    print(f"{'Session ID':<40} {'Turns':>6} {'Branch':<30} {'First':>20} {'Last':>20}")
-    print("-" * 120)
+    # One row per session and provider: a session ID can exist under two providers.
+    print(f"{'Session ID':<40} {'Provider':<20} {'Turns':>6} {'Branch':<30} "
+          f"{'First':>20} {'Last':>20}")
+    print("-" * 141)
     for s in sessions:
         branches = ", ".join(s["branches"]) if s["branches"] else "(none)"
         first = s["min_ts"][:19] if s["min_ts"] else ""
         last = s["max_ts"][:19] if s["max_ts"] else ""
-        print(f"{s['session_id']:<40} {s['turns']:>6} {branches:<30} {first:>20} {last:>20}")
+        print(f"{s['session_id']:<40} {s.get('provider', ''):<20} {s['turns']:>6} "
+              f"{branches:<30} {first:>20} {last:>20}")
 
     print(f"\nTotal: {len(sessions)} sessions, {sum(s['turns'] for s in sessions)} turns")
 

@@ -3864,7 +3864,8 @@ def session_titles(sessions: List[Dict], db_path: Optional[str] = None) -> Dict[
 
     The title is the first user message with text after ``boilerplate.strip``,
     cut at ``SESSION_TITLE_CHARS``. A message that is only a slash-command
-    marker counts only when no other message has text.
+    marker counts only when no other message has text. When the candidate
+    turns hold no such message, ``_first_words`` scans the rest of the session.
     """
     doc_ids = [d for s in sessions for d in s.get("first_doc_ids") or []]
     documents: Dict[str, str] = {}
@@ -3878,12 +3879,37 @@ def session_titles(sessions: List[Dict], db_path: Optional[str] = None) -> Dict[
 
     titles: Dict[tuple, str] = {}
     for s in sessions:
-        texts = [_user_text(documents.get(d, "")) for d in s.get("first_doc_ids") or []]
+        candidates = s.get("first_doc_ids") or []
+        texts = [_user_text(documents.get(d, "")) for d in candidates]
         texts = [t for t in texts if t]
         words = [t for t in texts if not _COMMAND_MARKER.fullmatch(t)]
+        if not words and s.get("turns", 0) > len(candidates):
+            words = _first_words(s, db_path)
         title = (words or texts or [""])[0]
         titles[(s["session_id"], s.get("provider") or "")] = title[:SESSION_TITLE_CHARS]
     return titles
+
+
+def _first_words(session: Dict, db_path: Optional[str]) -> List[str]:
+    """Scan a whole session for its earliest user text that is not a command marker.
+
+    Runs only for sessions whose candidate turns hold no such text, and keeps one row in memory.
+    """
+    filter_expr = _without_passages(" && ".join([
+        f'session_id == "{_escape_filter_scalar(session["session_id"])}"',
+        f'provider == "{_escape_filter_scalar(session.get("provider") or "")}"',
+    ]))
+    best = None
+    for batch in _query_batches(["turn_index", "document"], filter_expr=filter_expr,
+                                db_path=db_path):
+        for row in batch:
+            turn_index = int(row.get("turn_index") or 0)
+            if best is not None and turn_index >= best[0]:
+                continue
+            text = _user_text(row.get("document") or "")
+            if text and not _COMMAND_MARKER.fullmatch(text):
+                best = (turn_index, text)
+    return [best[1]] if best else []
 
 
 # --- Async wrappers ---

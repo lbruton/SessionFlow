@@ -61,6 +61,10 @@ class _Client:
         if ids:
             wanted = set(json.loads(ids.group(1)))
             rows = [r for r in rows if rag_engine._pk_from_doc_id(r["doc_id"]) in wanted]
+        for field in ("session_id", "provider"):
+            eq = re.search(rf'\b{field} == "([^"]*)"', filter)
+            if eq:
+                rows = [r for r in rows if r[field] == eq.group(1)]
         projected = [{k: r[k] for k in output_fields if k in r} for r in rows]
         return _Iterator(projected, batch_size)
 
@@ -175,6 +179,44 @@ def test_title_prefers_words_over_a_command_marker(monkeypatch):
     titles = rag_engine.session_titles(sessions, db_path=DB)
     assert titles[("s1", "claude_code_cli")] == "Pull, then SESF-63"
     assert titles[("s2", "claude_code_cli")] == "[/wrap]"
+
+
+def test_title_scans_past_the_candidates_for_real_user_text(monkeypatch):
+    k = rag_engine.SESSION_TITLE_CANDIDATES
+    rows = [_row(f"m{i}", "s1", f"2026-11-01T10:{i:02d}:00", i, "User: [/start]\n\nAssistant: x")
+            for i in range(k + 2)]
+    rows.append(_row("late", "s1", "2026-11-01T11:00:00", k + 5, "User: The real ask\n\nAssistant: ok"))
+    rows.append(_row("later", "s1", "2026-11-01T11:30:00", k + 9, "User: Another ask"))
+    rows.append(_row("o0", "s1", "2026-11-01T09:00:00", 0, "User: other provider",
+                     provider="codex"))
+    client = _patch(monkeypatch, rows)
+    sessions = [s for s in rag_engine.list_sessions(db_path=DB) if s["provider"] == "claude_code_cli"]
+    titles = rag_engine.session_titles(sessions, db_path=DB)
+    assert titles[("s1", "claude_code_cli")] == "The real ask"
+    scan = client.calls[-1]["filter"]
+    assert 'session_id == "s1"' in scan and 'provider == "claude_code_cli"' in scan
+
+
+def test_no_fallback_scan_when_candidates_hold_a_title(monkeypatch):
+    rows = [_row(f"d{i}", "s1", f"2026-11-01T10:{i:02d}:00", i, f"User: q{i}") for i in range(30)]
+    client = _patch(monkeypatch, rows)
+    sessions = rag_engine.list_sessions(db_path=DB)
+    rag_engine.session_titles(sessions, db_path=DB)
+    assert len(client.calls) == 2
+
+
+def test_cleanup_list_prints_provider(monkeypatch, capsys):
+    import cleanup
+
+    rows = [_row("a1", "s1", "2026-11-01T10:00:00", 1),
+            _row("c1", "s1", "2026-11-01T09:00:00", 1, provider="codex")]
+    _patch(monkeypatch, rows)
+    monkeypatch.setattr(cleanup, "get_db_path", lambda: DB)
+    cleanup.cmd_list(type("A", (), {"project": None})())
+    out = capsys.readouterr().out
+    assert "Provider" in out.splitlines()[0]
+    assert sum("claude_code_cli" in line for line in out.splitlines()) == 1
+    assert sum("codex" in line for line in out.splitlines()) == 1
 
 
 def test_title_is_cut_and_empty_when_no_user_text(monkeypatch):
