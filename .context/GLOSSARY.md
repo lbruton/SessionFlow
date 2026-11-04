@@ -144,7 +144,7 @@ An issue, such as an epic, that more than `UMBRELLA_SHARE` of a project's lineag
 _Avoid_: parent issue (an umbrella issue is found by share, not by the Plane parent)
 
 **Wrapped Session**:
-A session that a session-summary memory names as its `source_session_id`. `list_sessions` reports it as `wrapped:yes`; a session no summary names is unwrapped.
+A session that a session-summary memory names as its `source_session_id`. `list_sessions` reports it as `wrapped:yes` and a session no summary names as `wrapped:no`. When the memory store is unavailable, the state is `wrapped:unknown`.
 _Avoid_: closed session, finished session
 
 ## Relationships
