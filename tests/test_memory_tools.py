@@ -195,6 +195,32 @@ def test_listing_names_the_source_session(service, monkeypatch, name, method, ar
     assert text.count("Source:") == 1
 
 
+def test_memory_output_names_the_newer_record(service, monkeypatch):
+    async def row(*_a, **_k):
+        return {**_SOURCED, "type": "session-summary",
+                "newer": [{"memory_id": "m-8", "type": "decision", "reason": "supersedes",
+                           "created_at": "2026-11-02T02:00:00+00:00", "issues": []},
+                          {"memory_id": "m-9", "type": "handoff", "reason": "issues",
+                           "created_at": "2026-11-03T02:00:00+00:00",
+                           "issues": ["SESF-63", "SESF-69"]}]}
+    monkeypatch.setattr(service, "get", row)
+    text = _text(_call("get_memory", {"memory_id": "m-2", "project": "sessionflow"}))
+    assert ("Newer: supersedes it → `m-8` (2026-11-02) · SESF-63, SESF-69 → `m-9` (2026-11-03)\n"
+            in text)
+
+
+def test_context_output_lists_the_matching_turns(service, monkeypatch):
+    async def ctx(*_a, **_k):
+        return {"memory": {"memory_id": "m-2"}, "related_sessions": [], "note": None,
+                "source_session": {"session_id": "s-1", "turns": [],
+                                   "matched_turns": [{"turn_index": 12, "content": "we chose it",
+                                                      "timestamp": "2026-11-03T02:00:00Z"}]}}
+    monkeypatch.setattr(service, "context", ctx)
+    text = _text(_call("get_memory_context", {"memory_id": "m-2", "project": "sessionflow"}))
+    assert "### Turns that match the memory" in text
+    assert "- turn 12 (2026-11-03T02:00:00): we chose it" in text
+
+
 def test_get_memory_names_the_source_session(service, monkeypatch):
     async def row(*_a, **_k):
         return {**_SOURCED, "source_provider": None}

@@ -9,6 +9,18 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-03
+
+### Added
+
+- `search_memories` and `get_memory` name later records for a memory, as a `newer` list in JSON and on a
+  `Newer:` line in Markdown. For a superseded memory, the record that lists it in `supersedes` comes first.
+  Then each issue in the memory's `extra.issues` names the newest later session summary, decision or handoff
+  in the project that worked it, rarest issue first, at most 8. Umbrella issues, named by more than a
+  quarter of a project's records with `extra.issues` once it has 10, link nothing (SESF-96).
+- `get_memory_context` returns the turns of the source session that match the memory's first paragraph under
+  `matched_turns`, next to the last turns. Codex sources return none (SESF-96).
+
 ## [0.18.0] - 2026-11-02
 
 ### Added

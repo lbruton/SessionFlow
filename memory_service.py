@@ -68,6 +68,9 @@ def _index_key_limit(name: str) -> int:
 MAX_PROJECT_BYTES = _index_key_limit("project")
 MAX_USER_ID_BYTES = _index_key_limit("user_id")
 
+# Longest query get_memory_context sends to find the source turns that match a memory.
+CONTEXT_QUERY_CHARS = 1000
+
 # Types the audit lists when they stay active longer than the audit age.
 STALE_TYPES = frozenset({"open-item", "blocker"})
 
@@ -401,7 +404,20 @@ class MemoryService:
         row = await run_db(self.store.get, memory_id, expect_project=project)
         if row is None:
             raise MemoryNotFound(memory_id)
+        await self._attach_newer([row])
         return row
+
+    async def _attach_newer(self, rows: List[Dict[str, Any]]) -> None:
+        """Set ``newer`` on each row that a later record follows (``MemoryStore.newer_records``)."""
+        if not rows:
+            return
+        try:
+            newer = await run_db(self.store.newer_records, rows)
+        except Exception:  # noqa: BLE001 - lineage is advisory; the rows still answer
+            return
+        for row in rows:
+            if row["memory_id"] in newer:
+                row["newer"] = newer[row["memory_id"]]
 
     async def list(self, filters: Dict[str, Any], limit: int = 20,
                    cursor: Optional[str] = None) -> Dict[str, Any]:
@@ -490,6 +506,7 @@ class MemoryService:
             provider = row.get("source_provider")
             turns = await asyncio.to_thread(
                 lambda: rag_engine.session_turns(source_id, provider, limit=limit))
+            matched = await self._matched_turns(row, source_id, provider, limit)
             related = []
             if issue_ids:
                 related = await asyncio.to_thread(lambda: rag_engine.sessions_by_issue(
@@ -497,7 +514,7 @@ class MemoryService:
             return {"memory": row,
                     "source_session": {"session_id": source_id, "provider": provider,
                                        "project_root": row.get("source_project_root"),
-                                       "turns": turns},
+                                       "turns": turns, "matched_turns": matched},
                     "related_sessions": related, "note": None}
 
         found: List[Dict[str, Any]] = []
@@ -519,6 +536,29 @@ class MemoryService:
                         "share its issue IDs and sessions in its project on "
                         f"{day.isoformat()}."}
 
+    @staticmethod
+    async def _matched_turns(row: Dict[str, Any], session_id: str, provider: Optional[str],
+                             limit: int) -> List[Dict[str, Any]]:
+        """Return the source session's turns that best match the memory's first paragraph.
+
+        Codex rows store the rollout as ``logical_session_id``, which the search
+        filter does not match, so Codex sources return none.
+        """
+        import rag_engine
+
+        if provider == "codex":
+            return []
+        query = (row.get("text") or "").strip().split("\n\n", 1)[0][:CONTEXT_QUERY_CHARS]
+        if not query.strip():
+            return []
+        try:
+            hits = await rag_engine.search_async(query, n=limit, session_id=session_id,
+                                                 provider=provider or None, sort_by="relevance")
+        except Exception:  # noqa: BLE001 - the last turns and related sessions still answer
+            return []
+        return [{"turn_index": h.get("turn_index"), "timestamp": h.get("timestamp"),
+                 "content": h.get("content", "")} for h in hits]
+
     # --- Search -------------------------------------------------------------
 
     async def search(self, query: str, filters: Dict[str, Any], n: int = 10,
@@ -538,6 +578,7 @@ class MemoryService:
         if len(results) < n:
             results, channels = await self._search_once(query, parsed, n, fetch * 3, sort_by)
         incomplete = len(results) < n and bool(self.index.lagging())
+        await self._attach_newer(results)
         return {"results": results, "channels": channels, "incomplete": incomplete}
 
     @staticmethod
