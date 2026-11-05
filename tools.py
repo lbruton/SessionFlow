@@ -395,14 +395,17 @@ def format_timeline(entries: list[dict]) -> str:
     Renders each entry's matched ``doc_id`` alongside provider/session/timestamp
     metadata so the rendered text references every turn in the feed (the MCP
     transport contract; mirrors the HTTP route's structured feed). A feed with a
-    ``hidden_subagents`` count ends with one line that names it.
+    ``hidden_subagents`` count, or a capped one, ends with one line that names it.
     """
     hidden = getattr(entries, "hidden_subagents", 0)
+    capped = getattr(entries, "hidden_subagents_capped", False)
     note = ""
     if hidden:
         turns = "turn" if hidden == 1 else "turns"
-        count = f"At least {hidden}" if getattr(entries, "hidden_subagents_capped", False) else str(hidden)
+        count = f"At least {hidden}" if capped else str(hidden)
         note = f"{count} subagent {turns} hidden; pass include_subagents=true to show them."
+    elif capped:
+        note = "Subagent turns may be hidden; pass include_subagents=true to show them."
     if not entries:
         return "No turns reference that issue." + (f"\n\n{note}" if note else "")
 

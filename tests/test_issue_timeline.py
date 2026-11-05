@@ -765,3 +765,10 @@ def test_timeline_session_filter_runs_on_a_real_fts_index(monkeypatch, tmp_path)
     assert [r["doc_id"] for r in out] == ["m1"] and out.hidden_subagents == 2
     out = rag_engine.get_issue_timeline("SESF-25", include_subagents=True, db_path=db_path)
     assert sorted(r["doc_id"] for r in out) == ["a1", "a2", "m1"]
+
+
+def test_format_timeline_notes_a_capped_zero_count():
+    feed = rag_engine.TimelineResult([_entry("a", "2026-05-01T10:00:00")], hidden_subagents=0,
+                                     hidden_subagents_capped=True)
+    assert ("Subagent turns may be hidden; pass include_subagents=true to show them."
+            in tools.format_timeline(feed))
