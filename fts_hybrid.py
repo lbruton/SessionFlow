@@ -334,7 +334,7 @@ class FTSIndex:
         fts_path = self.db_path(milvus_db_path)
         if not Path(fts_path).exists():
             return None
-        conn = sqlite3.connect(f"{Path(fts_path).as_uri()}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"{Path(fts_path).resolve().as_uri()}?mode=ro", uri=True)
         try:
             tables = {name for (name,) in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'")}

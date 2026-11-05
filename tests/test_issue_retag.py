@@ -397,3 +397,14 @@ def test_cli_dry_run_still_reports_with_a_config_error(
     _use_patterns(monkeypatch, tmp_path / "missing.conf")
     assert _run(cleanup_mod, ["retag-issues"]) == 1
     assert "rows change" in capsys.readouterr().out
+
+
+def test_plan_reads_an_fts_sidecar_beside_a_relative_milvus_path(fake_milvus, tmp_path, monkeypatch):
+    fts = FTSIndex("turns_fts", list(rag_engine._fts.metadata_columns))
+    monkeypatch.setattr(rag_engine, "_fts", fts)
+    monkeypatch.chdir(tmp_path)
+    db_path = "milvus.db"
+    _add(fake_milvus, db_path, _row("s1::t1", "User: SESF-1", ",SESF-1,"))
+    plan = issue_retag.plan(db_path=db_path)
+    assert plan.fts_error is None
+    assert plan.changes == {}
