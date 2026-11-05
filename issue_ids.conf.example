@@ -1,0 +1,25 @@
+# SessionFlow issue ID patterns.
+#
+# Copy this file to ~/.sessionflow/issue_ids.conf, or point
+# SESSIONFLOW_ISSUE_ID_PATTERNS at another path. The server reads it again
+# when the file changes. Run `python cleanup.py retag-issues` to re-tag rows
+# indexed before the change; it never re-embeds.
+#
+# One entry per line. Blank lines and lines that start with # are ignored.
+# Matching ignores case, and tokens are stored in upper case. A stored token
+# holds only letters, digits and inner dashes; other matches are dropped.
+# A line that is not understood logs a warning with its line number.
+
+# Dashed IDs such as SESF-25 or OPS-50 (Plane, Linear, Jira). Always on.
+preset:dashed
+
+# ServiceNow numbers such as INC0012345 or RITM0012345 (seven digits).
+preset:servicenow
+
+# Any other ticket system: a Python regular expression. Anchor it with \b.
+# The token must match on its own, so lookaround such as (?<=#) is refused.
+# regex:\bCASE\d{8}\b
+
+# Drop tokens whose prefix is not a ticket, such as COVID-19.
+# The built-in list already holds UTF, SHA, HTTP, HTTPS, ISO, RFC, IPV, MD and BASE.
+# deny:COVID

@@ -79,6 +79,19 @@ Restart Claude Code after setup to load the MCP server.
 | `SESSIONFLOW_RERANKER` | `qwen3` | Reranks the top results of a search with a query: `qwen3`, `jina` or `off`. See [Reranking](#reranking). |
 | `SESSIONFLOW_RERANK_TOP` | `10` | Number of top results the reranker reorders. |
 | `SESSIONFLOW_RERANK_MAX_TOKENS` | `512` | Tokens of each result the reranker reads. |
+| `SESSIONFLOW_ISSUE_ID_PATTERNS` | `~/.sessionflow/issue_ids.conf` | Config file of issue ID patterns. See [Issue IDs](#issue-ids). |
+
+### Issue IDs
+
+SessionFlow tags each turn with the ticket IDs it mentions. The `issue_id` filter and `get_issue_timeline` read these tags. Dashed IDs such as `SESF-25` or `OPS-50` (Plane, Linear, Jira) are always on.
+
+To add a ticket system, copy [`issue_ids.conf.example`](issue_ids.conf.example) to `~/.sessionflow/issue_ids.conf` and edit it. Each line is one of these entries:
+
+- `preset:servicenow` matches ServiceNow numbers such as `INC0012345` and `RITM0012345`.
+- `regex:<pattern>` adds a Python regular expression, such as `regex:\bCASE\d{8}\b`.
+- `deny:<prefix>` drops tokens with that prefix, such as `deny:COVID`.
+
+Matching ignores case. The server reads the file again when it changes, and `get_session_stats` lists the patterns in force. New turns get the new tags. To re-tag turns already indexed, run `python cleanup.py retag-issues`. It prints the rows that would change. Add `--apply --yes` to rewrite them. Nothing is re-embedded.
 
 ## Running
 

@@ -68,6 +68,7 @@ from provider_adapters import (
     path_has_prefix,
 )
 import boilerplate
+import issue_patterns
 import passages
 import reranker
 import secret_redaction
@@ -82,11 +83,7 @@ _RANKING_SCRATCH_KEYS = ("_rrf_score", "_score", "_semantic_score", "_recency_sc
 
 logger = logging.getLogger("sessionflow.milvus")
 
-# Issue-ID extraction: technical-standard prefixes that match the
-# issue-token regex but are never issue references. Dropped during extraction.
-_ISSUE_ID_PREFIX_DENYLIST = frozenset(
-    {"UTF", "SHA", "HTTP", "HTTPS", "ISO", "RFC", "IPV", "MD", "BASE"}
-)
+_ISSUE_ID_PREFIX_DENYLIST = issue_patterns.BUILTIN_DENYLIST
 # Milvus VARCHAR field length the extracted ids are stored in.
 _ISSUE_ID_FIELD_MAX = ISSUE_ID_FIELD_MAX
 # Default number of timeline entries returned by get_issue_timeline.
@@ -127,10 +124,8 @@ _fts_backfill_lock = threading.Lock()
 def _extract_issue_ids(text: str) -> str:
     """Extract issue references (e.g. ``SESF-25``) from a turn's text.
 
-    Matches the issue-token regex ``\\b[A-Z][A-Z0-9]+-\\d+\\b`` case-insensitively
-    (canonicalizing matches to upper case), drops technical-standard prefixes in
-    ``_ISSUE_ID_PREFIX_DENYLIST`` (UTF-8, SHA-256, HTTP-2, ...), and
-    deduplicates the survivors in first-seen order.
+    Runs ``issue_patterns.active().extract``: every configured pattern, upper
+    case, denied prefixes dropped, each token once in first-seen order.
 
     Args:
         text: Raw turn text to scan.
@@ -142,22 +137,7 @@ def _extract_issue_ids(text: str) -> str:
         characters so a Milvus insert cannot overflow the storage field; if the
         next id would exceed the cap, extraction stops and logs one warning.
     """
-    if not text or not isinstance(text, str):
-        return ""
-    seen: List[str] = []
-    seen_set: set[str] = set()
-    # Match case-insensitively and canonicalize only the matched tokens, rather
-    # than allocating an uppercased copy of the whole (possibly large) turn text.
-    for match in re.finditer(r"\b[A-Z][A-Z0-9]+-\d+\b", text, re.IGNORECASE):
-        token = match.group(0).upper()
-        prefix = token.split("-", 1)[0]
-        if prefix in _ISSUE_ID_PREFIX_DENYLIST:
-            continue
-        if token in seen_set:
-            continue
-        seen_set.add(token)
-        seen.append(token)
-
+    seen = issue_patterns.active().extract(text)
     if not seen:
         return ""
 
@@ -1653,9 +1633,9 @@ def _issue_id_containment_token(issue_id: str) -> str:
     The token is matched as ``%,TOKEN,%`` against the comma-wrapped ``issue_ids``
     field. Surrounding whitespace is stripped so ``" sesf-25 "`` can't yield a
     never-matching ``%, SESF-25 ,%``; ``%``/``_`` are stripped so a malformed id
-    can't broaden the match into a wildcard scan; a valid token
-    (``[A-Z][A-Z0-9]+-\\d+``) contains none of these, so this is a no-op for
-    legitimate input. NUL bytes are rejected outright (mirroring
+    cannot broaden the match into a wildcard scan; a valid token holds only
+    letters, digits and dashes (``issue_patterns.IssuePatterns.matches``), so
+    this is a no-op for legitimate input. NUL bytes are rejected outright (mirroring
     ``_escape_filter_scalar``) since the FTS path consumes this token without
     going through that guard. Shared by the Milvus filter and the FTS filter so
     both halves of hybrid search stay in lockstep.
@@ -2794,6 +2774,7 @@ def get_stats(project_root: Optional[ProjectRoots] = None,
                 "providers": {},
                 "redaction": _redaction_status(),
                 "boilerplate": _boilerplate_status(),
+                "issue_patterns": issue_patterns.active().describe(),
             }
 
     # Query for breakdowns (capped by Milvus offset limit)
@@ -2838,6 +2819,7 @@ def get_stats(project_root: Optional[ProjectRoots] = None,
     # Operator-facing redaction status + durable per-rule counts (AC-10).
     stats["redaction"] = _redaction_status()
     stats["boilerplate"] = _boilerplate_status()
+    stats["issue_patterns"] = issue_patterns.active().describe()
     return stats
 
 
@@ -3267,7 +3249,17 @@ def _rewrite_fts_row(doc_id: str, row: dict, db_path: Optional[str]) -> bool:
 RETAGGABLE_FIELDS = frozenset({"project_root", "issue_ids", "timestamp", "git_branch"})
 
 
+class RowChanged(Exception):
+    """Raised by ``update_row_metadata`` when the stored document hash differs from the expected one."""
+
+
+def document_sha256(text: Optional[str]) -> str:
+    """Return the hex SHA-256 of a stored ``document``, as ``update_row_metadata`` compares it."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
 def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
+                        expect_document_sha256: Optional[str] = None,
                         **fields: str) -> UpsertResult:
     """Rewrite metadata fields on one turn in place, keeping its document and vector.
 
@@ -3280,6 +3272,9 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
     Args:
         doc_id: Stable document id of the turn to rewrite.
         db_path: Optional Milvus DB path; also derives the FTS sidecar path.
+        expect_document_sha256: When set, write only if the stored ``document``
+            still has this ``document_sha256``; values derived from an earlier
+            read must not land on text rewritten in place since.
         **fields: New string values, keyed by names in ``RETAGGABLE_FIELDS``.
 
     Returns:
@@ -3290,6 +3285,8 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
     Raises:
         ValueError: ``fields`` is empty, names a field outside
             ``RETAGGABLE_FIELDS``, or holds a non-string value.
+        RowChanged: The stored document differs from ``expect_document_sha256``;
+            nothing was written.
     """
     if not fields:
         raise ValueError("update_row_metadata needs at least one field")
@@ -3299,6 +3296,7 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
     if not all(isinstance(value, str) for value in fields.values()):
         raise ValueError("Retagged field values must be strings")
 
+    changed = False
     try:
         with milvus_client(db_path) as client:
             if not client.has_collection(COLLECTION_NAME):
@@ -3311,11 +3309,16 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
             if not rows:
                 return UpsertResult(False, False)
             row = dict(rows[0])
-            row.update(fields)
-            client.upsert(collection_name=COLLECTION_NAME, data=[row])
+            changed = (expect_document_sha256 is not None
+                       and document_sha256(row.get("document")) != expect_document_sha256)
+            if not changed:
+                row.update(fields)
+                client.upsert(collection_name=COLLECTION_NAME, data=[row])
     except Exception as e:
         logger.warning("Milvus metadata upsert failed for doc_id: %s", _scrub_exception(e))
         return UpsertResult(False, False)
+    if changed:
+        raise RowChanged(doc_id)
 
     return UpsertResult(True, _rewrite_fts_row(doc_id, row, db_path))
 

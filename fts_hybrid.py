@@ -152,6 +152,10 @@ def build_match_query(query: Optional[str]) -> str:
     return " OR ".join('"' + t.replace('"', '""') + '"' for t in terms)
 
 
+class FTSSchemaMismatch(Exception):
+    """Raised by ``FTSIndex.read_only_connection`` when the stored FTS schema differs."""
+
+
 class FTSIndex:
     """SQLite FTS5 full-text search index, designed as a sidecar to Milvus.
 
@@ -316,6 +320,35 @@ class FTSIndex:
             store[fts_path] = conn
             logger.info("Opened FTS connection: %s (thread=%s)", fts_path, threading.get_ident())
 
+        return conn
+
+    def read_only_connection(self, milvus_db_path: str) -> Optional[sqlite3.Connection]:
+        """Open the sidecar read-only, without creating or migrating it.
+
+        Returns:
+            A connection the caller closes, or None when the file or table is missing.
+
+        Raises:
+            FTSSchemaMismatch: The stored schema differs from this index's.
+        """
+        fts_path = self.db_path(milvus_db_path)
+        if not Path(fts_path).exists():
+            return None
+        conn = sqlite3.connect(f"{Path(fts_path).resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            tables = {name for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if "_fts_schema" not in tables or self.table_name not in tables:
+                conn.close()
+                return None
+            row = conn.execute("SELECT create_sql FROM _fts_schema WHERE table_name = ?",
+                               (self.table_name,)).fetchone()
+        except Exception:
+            conn.close()
+            raise
+        if not row or row[0] != self._create_sql:
+            conn.close()
+            raise FTSSchemaMismatch(f"{self.table_name} in {fts_path} has another schema")
         return conn
 
     def close_ephemeral(self, conn: sqlite3.Connection):

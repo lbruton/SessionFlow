@@ -487,6 +487,18 @@ def _isolated_embedding_stamp(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _default_issue_patterns(monkeypatch, tmp_path):
+    """Keep a developer's ``~/.sessionflow/issue_ids.conf`` out of every test."""
+    import issue_patterns
+
+    monkeypatch.delenv(issue_patterns.ENV_VAR, raising=False)
+    monkeypatch.setattr(issue_patterns, "DEFAULT_PATH", str(tmp_path / "no-issue-ids.conf"))
+    issue_patterns.reset()
+    yield
+    issue_patterns.reset()
+
+
+@pytest.fixture(autouse=True)
 def _no_default_reranker(monkeypatch):
     """Keep the default reranker from loading a model in tests that start the server."""
     monkeypatch.setenv("SESSIONFLOW_RERANKER", "off")
