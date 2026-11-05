@@ -204,6 +204,20 @@ def test_unreadable_configured_file_keeps_its_path_in_describe(tmp_path, monkeyp
     assert "built-in default" not in text
 
 
+def test_config_that_is_not_utf8_falls_back_to_dashed(tmp_path, monkeypatch, caplog):
+    path = tmp_path / "issue_ids.conf"
+    path.write_bytes(b"preset:servicenow\n\xff\xfe bad bytes\n")
+    monkeypatch.setenv(issue_patterns.ENV_VAR, str(path))
+    issue_patterns.reset()
+    with caplog.at_level(logging.WARNING):
+        patterns = issue_patterns.active()
+    assert patterns.extract("SESF-1 INC0000001") == ["SESF-1"]
+    info = patterns.describe()
+    assert info["source"] == str(path)
+    assert info["error"]
+    assert str(path) in caplog.text
+
+
 @pytest.mark.parametrize("pattern", [
     "(?<=#)\\d+\\b", "(?<!X)CASE\\d+", "CASE\\d+(?=\\s)", "CASE\\d+(?!X)",
 ])

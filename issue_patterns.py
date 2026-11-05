@@ -244,12 +244,14 @@ def load(path: Optional[str]) -> IssuePatterns:
     try:
         with open(path, "r", encoding="utf-8") as handle:
             lines = handle.readlines()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         logger.warning("Could not read issue ID config %s: %s; using the dashed preset",
                        path, exc)
         default = _default()
+        reason = exc.strerror if isinstance(exc, OSError) else None
         return IssuePatterns(labels=default.labels, regexes=default.regexes, source=path,
-                             error=exc.strerror or type(exc).__name__)
+                             error=reason or ("not UTF-8" if isinstance(exc, UnicodeDecodeError)
+                                              else type(exc).__name__))
     return parse(lines, source=path)
 
 
