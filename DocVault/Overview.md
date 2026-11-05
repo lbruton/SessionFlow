@@ -95,7 +95,7 @@ Ingest scans turn text for tracker issue tokens. The deduplicated, uppercased se
 
 - **`issue_id` filter** on `search_all_sessions` / `search_session` — optional structured exact-token pre-filter (`issue_ids like "%,SESF-25,%"`), case-insensitive, combinable conjunctively with `provider` / `project_root` / `date_from`. Unset leaves search behavior byte-identical.
 - **`get_issue_timeline(issue_id, limit=50, provider, date_from, date_to, include_subagents=false)`** MCP tool + `GET /timeline` HTTP endpoint: a single deduplicated, oldest-first cross-harness feed of every turn referencing an issue. Unions the structured field with an FTS keyword fallback (covering un-tagged turns), deduped by `doc_id`, sorted by `(timestamp, doc_id)`.
-- The timeline leaves out `agent-*` sessions (subagents and compactions) unless `include_subagents` is true. The output names the number of hidden turns. `/timeline` returns them as `hidden_subagents` and `hidden_subagents_capped`.
+- The timeline leaves out `agent-*` sessions (subagents and compactions) unless `include_subagents` is true. The output names the number of hidden turns. `/timeline` returns them as `hidden_subagents` and `hidden_subagents_capped`. When `hidden_subagents_capped` is true, the FTS fallback filled its fetch window and `hidden_subagents` is a lower bound.
 - **Re-tagging stored rows:** `cleanup.py retag-issues` re-extracts issue IDs from every stored `document` with the active patterns and rewrites the changed rows in Milvus and FTS without re-embedding. It is a dry run by default. Run `--apply --yes` after a config change, with the server stopped.
 
 ## Specs
