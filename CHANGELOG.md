@@ -9,6 +9,19 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-04
+
+### Added
+
+- Configurable issue ID patterns: `~/.sessionflow/issue_ids.conf`, or the path in
+  `SESSIONFLOW_ISSUE_ID_PATTERNS`, adds `preset:servicenow` (`INC0012345`, `RITM0012345` and other
+  seven-digit ServiceNow numbers), `regex:` patterns and `deny:` prefixes to the dashed pattern, which stays
+  on. Ingest, memory tagging, the `issue_id` filter and `get_issue_timeline` follow the file, which reloads
+  when it changes. `get_session_stats` lists the patterns in force. `issue_ids.conf.example` documents the
+  format (SESF-67).
+- `cleanup.py retag-issues [--apply --yes]` re-runs issue ID extraction on every stored row and rewrites
+  `issue_ids` in Milvus and FTS without re-embedding. Passages take their parent turn's tags (SESF-67).
+
 ## [0.20.0] - 2026-11-03
 
 ### Added
