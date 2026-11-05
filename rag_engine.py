@@ -63,6 +63,7 @@ from provider_adapters import (
     LEGAL_SORT_BY,
     LEGAL_SOURCE_KINDS,
     REPLACE_SAME_TURN,
+    SUBAGENT_PREFIX,
     default_provider_metadata,
     is_subagent_session,
     is_valid_issue_token,
@@ -2346,16 +2347,27 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     if date_to:
         fts_filters["timestamp_lte"] = ("<=", upper)
     fts_window = max(limit, _TIMELINE_FTS_FETCH_CAP)
-    try:
-        fts_hits = _fts.search(
-            f'"{canonical}"', n=fts_window,
-            filters=fts_filters or None, db_path=db_path,
-        )
-    except Exception as e:
-        logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s", canonical, _scrub_exception(e))
-        fts_hits = []
 
-    for row in fts_hits:
+    def _fts_hits(session_filter=None) -> List[Dict]:
+        """One FTS fallback query; ``session_filter`` keeps or drops ``agent-*`` sessions."""
+        filters = dict(fts_filters)
+        if session_filter:
+            filters["session_id"] = session_filter
+        try:
+            return _fts.search(f'"{canonical}"', n=fts_window,
+                               filters=filters or None, db_path=db_path)
+        except Exception as e:
+            logger.warning("FTS fallback failed for issue timeline %s (non-fatal): %s",
+                           canonical, _scrub_exception(e))
+            return []
+
+    # Hidden sessions are excluded in SQL, so they never fill the visible fetch
+    # window; a second query over them alone feeds the hidden count.
+    pattern = SUBAGENT_PREFIX + "%"
+    fts_hits = _fts_hits(None if include_subagents else ("NOT LIKE", pattern))
+    hidden_hits = [] if include_subagents else _fts_hits(("LIKE", pattern))
+
+    for row in fts_hits + hidden_hits:
         entry = _timeline_entry(row)
         if _passes(entry):
             collector.add(entry)
@@ -2363,7 +2375,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     # Dedup by doc_id (structured wins, streamed first), the oldest-first sort and
     # the ``limit`` slice all happen inside the collector (Req 4.1/4.2/4.5/6.2).
     return TimelineResult(collector.result(), hidden_subagents=len(hidden),
-                          hidden_subagents_capped=len(fts_hits) >= fts_window)
+                          hidden_subagents_capped=len(hidden_hits) >= fts_window)
 
 
 def _references_issue(text: str, canonical: str) -> bool:

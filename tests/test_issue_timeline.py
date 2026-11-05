@@ -710,3 +710,58 @@ def test_http_timeline_reports_a_capped_count(stub_rag_engine, tmp_path, monkeyp
     finally:
         client.close()
     assert body["hidden_subagents"] == 2 and body["hidden_subagents_capped"] is True
+
+
+def _patch_filtering_fts(monkeypatch, structured, fts):
+    """FTS fake that honours the session_id LIKE / NOT LIKE filter and the n limit."""
+    calls: list = []
+
+    def search(query, n=15, filters=None, db_path=None):
+        calls.append(dict(filters or {}))
+        rows = [dict(r) for r in fts]
+        op = (filters or {}).get("session_id")
+        if op == ("NOT LIKE", "agent-%"):
+            rows = [r for r in rows if not r["session_id"].startswith("agent-")]
+        elif op == ("LIKE", "agent-%"):
+            rows = [r for r in rows if r["session_id"].startswith("agent-")]
+        return rows[:n]
+
+    _patch_sources(monkeypatch, structured, [])
+    monkeypatch.setattr(rag_engine._fts, "search", search)
+    return calls
+
+
+def test_timeline_agent_fts_hits_do_not_use_the_visible_window(monkeypatch):
+    fts = [_agent(f"s{i}", f"2026-05-0{i}T10:00:00", f"agent-a{i}") for i in range(1, 4)]
+    fts.append(_entry("main", "2026-05-05T10:00:00"))
+    _patch_filtering_fts(monkeypatch, [], fts)
+    monkeypatch.setattr(rag_engine, "_TIMELINE_FTS_FETCH_CAP", 2)
+    out = rag_engine.get_issue_timeline("SESF-25", limit=1, db_path=DB)
+    assert [r["doc_id"] for r in out] == ["main"]
+    assert out.hidden_subagents == 2 and out.hidden_subagents_capped is True
+
+
+def test_timeline_fts_filters_follow_include_subagents(monkeypatch):
+    calls = _patch_filtering_fts(monkeypatch, [], [])
+    rag_engine.get_issue_timeline("SESF-25", db_path=DB)
+    assert sorted(c.get("session_id") for c in calls) == [("LIKE", "agent-%"), ("NOT LIKE", "agent-%")]
+    calls.clear()
+    rag_engine.get_issue_timeline("SESF-25", include_subagents=True, db_path=DB)
+    assert [c.get("session_id") for c in calls] == [None]
+
+
+def test_timeline_session_filter_runs_on_a_real_fts_index(monkeypatch, tmp_path):
+    from fts_hybrid import FTSIndex
+
+    fts = FTSIndex("turns_fts", ["session_id", "timestamp", "chunk_type", "provider", "issue_ids"])
+    db_path = str(tmp_path / "milvus.db")
+    rows = [("a1", "agent-a1"), ("a2", "agent-acompact-9"), ("m1", "sess-main")]
+    fts.insert(fts.connection(db_path), [
+        {"doc_id": d, "content": "work on SESF-25", "session_id": s, "timestamp": "2026-05-01T10:00:00",
+         "chunk_type": "turn", "provider": "claude_code_cli", "issue_ids": ""} for d, s in rows])
+    monkeypatch.setattr(rag_engine, "_fts", fts)
+    monkeypatch.setattr(rag_engine, "_query_batches", lambda *a, **kw: iter([]))
+    out = rag_engine.get_issue_timeline("SESF-25", db_path=db_path)
+    assert [r["doc_id"] for r in out] == ["m1"] and out.hidden_subagents == 2
+    out = rag_engine.get_issue_timeline("SESF-25", include_subagents=True, db_path=db_path)
+    assert sorted(r["doc_id"] for r in out) == ["a1", "a2", "m1"]
