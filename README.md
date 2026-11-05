@@ -35,7 +35,7 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 | `list_sessions` | One line per session, newest first: the full session ID, last `turn_index`, turn count, first user message and whether a session summary covers it. Filters: `project_root`, `provider`, `date_from`, `date_to`, `wrapped` and `include_subagents`. |
 | `get_turns` | The turns around one turn of a session. Requires `session_id` and `turn_index` from a search result. A unique `session_id` prefix of at least 8 characters also works, and the output prints the full ID. |
 | `get_session_stats` | Turn, session, branch and provider counts for one project, or for the index with `"*"`. |
-| `get_issue_timeline` | Every turn that mentions an issue ID, oldest first. Requires `issue_id`. |
+| `get_issue_timeline` | Every turn that mentions an issue ID, oldest first. Requires `issue_id`. Filters: `provider`, `date_from`, `date_to` and `include_subagents`. |
 | `cleanup_sessions` | Deletes turns by age, session ID or git branch, across every project. |
 | `sanitize_index` | A dry-run report of secrets in the index. Removes them with `apply` and `confirm`. |
 
@@ -43,7 +43,7 @@ SessionFlow HTTP server (SESSIONFLOW_PORT, default 7102)
 
 `search_session` and `search_all_sessions` take `format`: `markdown` (the default), `json` or `compact`. `compact` prints one line per hit with a short preview and no reply text. Pass the session and turn values of a line to `get_turns`.
 
-`list_sessions` marks a session `wrapped:yes` when a session-summary memory names it as its source. `wrapped=false` returns only sessions that never ran `/wrap`. The flag needs the memory store: without it, every row says `wrapped:unknown` and the `wrapped` filter refuses the call. Subagent transcripts, whose session IDs start with `agent-`, are left out unless `include_subagents` is true.
+`list_sessions` marks a session `wrapped:yes` when a session-summary memory names it as its source. `wrapped=false` returns only sessions that never ran `/wrap`. The flag needs the memory store: without it, every row says `wrapped:unknown` and the `wrapped` filter refuses the call. Subagent transcripts, whose session IDs start with `agent-`, are left out unless `include_subagents` is true. `get_issue_timeline` hides them the same way, compaction transcripts included, and its last line counts the turns it hid. Search keeps them.
 
 ### Search examples
 

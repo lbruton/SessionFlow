@@ -64,6 +64,7 @@ from provider_adapters import (
     LEGAL_SOURCE_KINDS,
     REPLACE_SAME_TURN,
     default_provider_metadata,
+    is_subagent_session,
     is_valid_issue_token,
     path_has_prefix,
 )
@@ -2205,12 +2206,22 @@ class _NewestN:
         return [row for _, _, row in sorted(self._heap, reverse=True)]
 
 
+class TimelineResult(list):
+    """Timeline entries plus the count of distinct ``agent-*`` turns the filter hid."""
+
+    def __init__(self, entries=(), hidden_subagents: int = 0):
+        """Hold ``entries`` in order and record ``hidden_subagents``."""
+        super().__init__(entries)
+        self.hidden_subagents = hidden_subagents
+
+
 def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
                        providers: Optional[List[str]] = None,
                        date_from: Optional[str] = None,
                        date_to: Optional[str] = None,
                        db_path: Optional[str] = None,
-                       newest: bool = False) -> List[Dict]:
+                       newest: bool = False,
+                       include_subagents: bool = False) -> TimelineResult:
     """Cross-harness, deduplicated, chronological feed of turns for an issue.
 
     Unions a structured Milvus source (``issue_ids like "%,ID,%"`` streamed batch
@@ -2236,11 +2247,13 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         db_path: Optional Milvus DB path override (also drives the FTS sidecar).
         newest: When true, keep the newest ``limit`` turns (via ``_NewestN``) and
             return them newest first; the default keeps the oldest ``limit``.
+        include_subagents: Keep turns of subagent and compaction transcripts
+            (``is_subagent_session``). Hidden turns do not count toward ``limit``.
 
     Returns:
-        A list of timeline entry dicts, oldest first (newest first when
-        ``newest`` is set); ``[]`` when nothing
-        references the issue (Req 4.7).
+        A ``TimelineResult`` of entry dicts, oldest first (newest first when
+        ``newest`` is set), empty when nothing references the issue (Req 4.7).
+        Its ``hidden_subagents`` counts the distinct turns the default hid.
     """
     if not is_valid_issue_token(issue_id):
         raise ValueError("issue_id must be a valid issue token like 'SESF-25'")
@@ -2261,8 +2274,18 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
     allowed = set(providers) if providers else None
     upper = date_to.split("T")[0] + "T23:59:59" if date_to else None
     token = f",{canonical},"
+    hidden: set = set()
 
     def _passes(entry: Dict) -> bool:
+        """Whether one entry clears the passage, provider, date, issue-token and subagent guards."""
+        if not _matches(entry):
+            return False
+        if not include_subagents and is_subagent_session(entry.get("session_id")):
+            hidden.add(entry.get("doc_id"))
+            return False
+        return True
+
+    def _matches(entry: Dict) -> bool:
         """Whether one entry clears the passage, provider, date-bound and issue-token guards."""
         if entry.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE:
             return False
@@ -2332,7 +2355,7 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
 
     # Dedup by doc_id (structured wins, streamed first), the oldest-first sort and
     # the ``limit`` slice all happen inside the collector (Req 4.1/4.2/4.5/6.2).
-    return collector.result()
+    return TimelineResult(collector.result(), hidden_subagents=len(hidden))
 
 
 def _references_issue(text: str, canonical: str) -> bool:
@@ -2351,7 +2374,9 @@ async def get_issue_timeline_async(issue_id: str, *,
                                    providers: Optional[List[str]] = None,
                                    date_from: Optional[str] = None,
                                    date_to: Optional[str] = None,
-                                   db_path: Optional[str] = None) -> List[Dict]:
+                                   db_path: Optional[str] = None,
+                                   newest: bool = False,
+                                   include_subagents: bool = False) -> TimelineResult:
     """Async wrapper over ``get_issue_timeline`` (mirrors ``search_async``).
 
     Runs the synchronous core in the default executor. The timeline does no
@@ -2363,6 +2388,7 @@ async def get_issue_timeline_async(issue_id: str, *,
         lambda: get_issue_timeline(
             issue_id, limit=limit, providers=providers,
             date_from=date_from, date_to=date_to, db_path=db_path,
+            newest=newest, include_subagents=include_subagents,
         ),
     )
 
@@ -2564,7 +2590,8 @@ def sessions_by_issue(issue_ids: List[str], *, limit: int,
     if issue_ids:
         for issue in issue_ids:
             rows.extend(get_issue_timeline(issue, limit=SESSION_SCAN_LIMIT,
-                                           db_path=db_path, newest=True))
+                                           db_path=db_path, newest=True,
+                                           include_subagents=True))
     elif day is not None and project_roots:
         rows = _rows_on_day(day, project_roots, db_path)
     bounds = chicago_day_bounds(day) if day is not None else None

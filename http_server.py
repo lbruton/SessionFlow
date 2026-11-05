@@ -1263,9 +1263,9 @@ async def timeline_endpoint(request: Request) -> JSONResponse:
     """Cross-harness issue timeline over HTTP (mirrors the MCP get_issue_timeline tool).
 
     Reads the same query params as the MCP tool (``issue_id`` required, plus
-    optional ``limit``, ``provider``, ``date_from``, ``date_to``) and returns the
-    engine's deduplicated, chronological feed as a JSON ``{"timeline": [...]}``
-    envelope. The singular ``provider`` param maps to the engine's ``providers``
+    optional ``limit``, ``provider``, ``date_from``, ``date_to`` and
+    ``include_subagents``) and returns the engine's deduplicated, chronological
+    feed as a JSON ``{"timeline": [...], "hidden_subagents": n}`` envelope. The singular ``provider`` param maps to the engine's ``providers``
     list. Same matching/sort/limit logic as the MCP transport (Req 5.3).
     """
     params = request.query_params
@@ -1295,6 +1295,10 @@ async def timeline_endpoint(request: Request) -> JSONResponse:
             {"error": f"invalid provider: {provider}; expected one of: {allowed}"},
             status_code=400,
         )
+    raw_include = params.get("include_subagents", "false")
+    if raw_include not in ("true", "false"):
+        return JSONResponse(
+            {"error": "include_subagents must be true or false"}, status_code=400)
     entries = await rag_engine.get_issue_timeline_async(
         issue_id,
         limit=limit,
@@ -1302,8 +1306,10 @@ async def timeline_endpoint(request: Request) -> JSONResponse:
         date_from=params.get("date_from"),
         date_to=params.get("date_to"),
         db_path=MILVUS_URI,
+        include_subagents=raw_include == "true",
     )
-    return JSONResponse({"timeline": entries})
+    return JSONResponse({"timeline": list(entries),
+                         "hidden_subagents": getattr(entries, "hidden_subagents", 0)})
 
 
 # --- Lifespan ---

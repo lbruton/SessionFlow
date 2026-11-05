@@ -9,6 +9,13 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+### Changed
+
+- `get_issue_timeline` hides turns from subagent and compaction transcripts (session IDs that start with
+  `agent-`) by default. `include_subagents=true` shows them. The MCP output ends with a line that counts the
+  hidden turns, and `GET /timeline` returns the count as `hidden_subagents`. Hidden turns do not count toward
+  `limit`. Search results keep these turns (SESF-75).
+
 ## [0.21.0] - 2026-11-04
 
 ### Added
