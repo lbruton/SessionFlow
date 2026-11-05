@@ -12,6 +12,7 @@ from mcp.server import Server
 from mcp import types
 
 import client_roots
+import issue_patterns
 import rag_engine
 import sanitize
 import search_log
@@ -335,6 +336,10 @@ def format_stats(stats: dict, db_path: str, scope: ProjectScope | None = None) -
         lines.append("\n### Providers")
         for provider, count in sorted(stats["providers"].items(), key=lambda x: x[1], reverse=True):
             lines.append(f"- {provider}: {count}")
+
+    if stats.get("issue_patterns"):
+        lines.append("\n### Issue IDs")
+        lines += issue_patterns.format_lines(stats["issue_patterns"])
 
     lines.append(f"\n**Index Location:** {db_path}")
     return "\n".join(lines)

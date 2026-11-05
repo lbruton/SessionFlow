@@ -17,6 +17,7 @@ Usage:
     cleanup.py passages    {plan|run|drive|status|verify}    # Re-parse cut turns and add passages to long turns
     cleanup.py retag-project --from <old> --to <new> [--provider P] [--apply --yes]
                                                              # Move turns to a new project root
+    cleanup.py retag-issues  [--apply --yes]                 # Re-tag issue IDs after a config change
     cleanup.py restamp-codex [--apply --yes]                 # Rewrite Codex turn times and branches
     cleanup.py prune-codex   [--apply --yes]                 # Same as dedupe-codex
     cleanup.py dedupe-turns  [--apply --yes]                 # Repair Claude turns indexed mid-write
@@ -558,6 +559,68 @@ def cmd_retag_project(args) -> int:
     return 0
 
 
+def _print_top(title: str, counts, limit: int = 10) -> None:
+    if not counts:
+        return
+    print(f"\n{title}:")
+    for token, count in counts.most_common(limit):
+        print(f"  {count:>7}  {token}")
+    if len(counts) > limit:
+        print(f"  ... and {len(counts) - limit} more IDs")
+
+
+def cmd_retag_issues(args) -> int:
+    """Rewrite stored ``issue_ids`` with the active issue patterns, without re-embedding.
+
+    Re-runs extraction on every stored ``document`` (``issue_retag.plan``) and
+    rewrites the rows that differ in Milvus or FTS. Run it after editing the
+    issue ID config. Dry run by default; ``--apply`` refuses without ``--yes``
+    before any read.
+
+    Args:
+        args: Parsed argparse namespace with ``apply`` and ``yes``.
+
+    Returns:
+        ``0`` on success, ``1`` when the confirmation gate refuses or any row
+        failed to rewrite.
+    """
+    import issue_patterns
+    import issue_retag
+
+    if args.apply and not args.yes:
+        print(
+            "Refusing to apply: confirmation required. Re-run with --yes to "
+            "rewrite the affected rows.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("Issue ID patterns:")
+    for line in issue_patterns.format_lines(issue_patterns.active().describe()):
+        print(f"  {line}")
+
+    db_path = get_db_path()
+    retag = issue_retag.plan(db_path=db_path)
+    print(f"\n{len(retag.changes)} of {retag.scanned} rows change "
+          f"({retag.fts_stale} only in FTS).")
+    if retag.fts_error:
+        print(f"FTS sidecar not read: {retag.fts_error}")
+    _print_top("Tags added", retag.added)
+    _print_top("Tags removed", retag.removed)
+
+    if not args.apply:
+        print("\nDry run: nothing written. Re-run with --apply --yes to retag.")
+        return 0
+
+    result = issue_retag.apply(retag, db_path=db_path)
+    print(f"\nRewrote {result.written} rows.")
+    if result.milvus_failed or result.fts_failed:
+        print(f"Milvus failures:     {result.milvus_failed}")
+        print(f"FTS-only failures:   {result.fts_failed} (re-run to converge)")
+        return 1
+    return 0
+
+
 def _codex_adapter():
     from provider_codex import CodexAdapter
 
@@ -1053,6 +1116,16 @@ def build_parser():
     p_retag.add_argument("--yes", "-y", action="store_true",
                          help="Confirm an --apply run (required; no interactive prompt)")
 
+    # retag-issues
+    p_retag_issues = subparsers.add_parser(
+        "retag-issues",
+        help="Rewrite stored issue IDs with the active issue patterns (dry-run by default)",
+    )
+    p_retag_issues.add_argument("--apply", action="store_true",
+                                help="Rewrite the rows; requires --yes")
+    p_retag_issues.add_argument("--yes", "-y", action="store_true",
+                                help="Confirm an --apply run (required; no interactive prompt)")
+
     # restamp-codex
     p_restamp = subparsers.add_parser(
         "restamp-codex",
@@ -1193,6 +1266,7 @@ def main():
         "migrate-schema": cmd_migrate_schema,
         "sanitize": cmd_sanitize,
         "retag-project": cmd_retag_project,
+        "retag-issues": cmd_retag_issues,
         "restamp-codex": cmd_restamp_codex,
         "prune-codex": cmd_prune_codex,
         "dedupe-turns": cmd_dedupe_turns,

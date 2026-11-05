@@ -15,6 +15,8 @@ import logging
 import os
 import re
 
+import issue_patterns
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,22 +45,15 @@ LEGAL_SOURCE_CLASSES = frozenset({
     "fallback",
 })
 
-# Canonical issue-token shape (e.g. SESF-25), matching the ingestion extractor.
-ISSUE_ID_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
-
-
 def is_valid_issue_token(raw: object) -> bool:
-    """Whether ``raw`` is a well-formed issue token like ``SESF-25``.
+    """Whether ``raw`` is one issue token that the active issue patterns would store.
 
-    Case-insensitive and whitespace-tolerant (callers should ``.strip().upper()``
-    before storing/matching). Rejects empty/non-str input and anything carrying
-    LIKE/FTS metacharacters or whitespace, so a filter token can't broaden a
-    Milvus ``LIKE`` or break an FTS ``MATCH``.
+    Case-insensitive and whitespace-tolerant (callers ``.strip().upper()`` before
+    matching). ``issue_patterns.IssuePatterns.matches`` rejects LIKE and FTS
+    metacharacters, so a filter token cannot broaden a Milvus ``LIKE`` or break
+    an FTS ``MATCH``.
     """
-    return (
-        isinstance(raw, str)
-        and ISSUE_ID_PATTERN.match(raw.strip().upper()) is not None
-    )
+    return issue_patterns.active().matches(raw)
 
 LEGAL_SORT_BY = frozenset({
     "relevance",
