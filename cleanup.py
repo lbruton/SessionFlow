@@ -603,10 +603,14 @@ def cmd_retag_issues(args) -> int:
     retag = issue_retag.plan(db_path=db_path)
     print(f"\n{len(retag.changes)} of {retag.scanned} rows change "
           f"({retag.fts_stale} only in FTS).")
-    if retag.fts_error:
-        print(f"FTS sidecar not read: {retag.fts_error}")
     _print_top("Tags added", retag.added)
     _print_top("Tags removed", retag.removed)
+
+    if retag.fts_error:
+        # Without the FTS values the plan misses FTS-only drift, so it is incomplete.
+        print(f"\nFTS sidecar not read: {retag.fts_error}. Nothing written; "
+              "fix the sidecar and re-run.")
+        return 1
 
     if not args.apply:
         print("\nDry run: nothing written. Re-run with --apply --yes to retag.")

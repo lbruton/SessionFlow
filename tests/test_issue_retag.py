@@ -172,6 +172,15 @@ def test_missing_fts_rows_are_ignored_when_fts_cannot_be_read(fake_milvus, db_pa
     assert plan.fts_error
 
 
+def test_orphan_passage_with_stale_fts_is_listed(fake_milvus, db_path):
+    # A passage without a parent keeps its Milvus tags; FTS must still match them.
+    _add(fake_milvus, db_path, _row("gone::t9::p0", "orphan text", ",SESF-9,",
+                                    chunk_type="turn_passage"), fts_issue_ids="")
+    plan = issue_retag.plan(db_path=db_path)
+    assert plan.changes == {"gone::t9::p0": ",SESF-9,"}
+    assert plan.fts_stale == 1
+
+
 def test_apply_restores_a_missing_fts_row(fake_milvus, db_path):
     row = _row("s1::t1", "User: SESF-1", ",SESF-1,")
     fake_milvus["rows"][row["id"]] = dict(row)
@@ -267,6 +276,25 @@ def test_cli_apply_writes_and_returns_zero(cleanup_mod, fake_milvus, capsys):
     assert _run(cleanup_mod, ["retag-issues", "--apply", "--yes"]) == 0
     assert "Rewrote 4 rows" in capsys.readouterr().out
     assert len(fake_milvus["upserts"]) == 4
+
+
+def _unreadable_fts(monkeypatch):
+    def boom(db_path):
+        raise RuntimeError("sidecar locked")
+
+    monkeypatch.setattr(issue_retag, "_fts_issue_ids", boom)
+
+
+def test_cli_dry_run_returns_one_when_fts_cannot_be_read(cleanup_mod, monkeypatch, capsys):
+    _unreadable_fts(monkeypatch)
+    assert _run(cleanup_mod, ["retag-issues"]) == 1
+    assert "FTS" in capsys.readouterr().out
+
+
+def test_cli_apply_refuses_when_fts_cannot_be_read(cleanup_mod, fake_milvus, monkeypatch):
+    _unreadable_fts(monkeypatch)
+    assert _run(cleanup_mod, ["retag-issues", "--apply", "--yes"]) == 1
+    assert fake_milvus["upserts"] == []
 
 
 def test_cli_apply_returns_one_on_failure(cleanup_mod, monkeypatch):

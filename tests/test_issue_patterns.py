@@ -186,7 +186,44 @@ def test_describe_names_source_patterns_and_denylist(use_config):
 
 def test_describe_default():
     info = issue_patterns.active().describe()
-    assert info == {"source": None, "patterns": ["preset:dashed"], "deny": [], "skipped": 0}
+    assert info == {"source": None, "patterns": ["preset:dashed"], "deny": [], "skipped": 0,
+                    "error": None}
+
+
+def test_unreadable_configured_file_keeps_its_path_in_describe(tmp_path, monkeypatch):
+    missing = str(tmp_path / "absent.conf")
+    monkeypatch.setenv(issue_patterns.ENV_VAR, missing)
+    issue_patterns.reset()
+    info = issue_patterns.active().describe()
+    assert info["source"] == missing
+    assert info["patterns"] == ["preset:dashed"]
+    assert info["error"]
+    text = "\n".join(issue_patterns.format_lines(info))
+    assert missing in text
+    assert "not read" in text
+    assert "built-in default" not in text
+
+
+@pytest.mark.parametrize("pattern", [
+    "(?<=#)\\d+\\b", "(?<!X)CASE\\d+", "CASE\\d+(?=\\s)", "CASE\\d+(?!X)",
+])
+def test_lookaround_patterns_are_skipped_with_a_warning(use_config, caplog, pattern):
+    use_config(f"regex:{pattern}\n")
+    with caplog.at_level(logging.WARNING):
+        patterns = issue_patterns.active()
+    assert patterns.skipped == 1
+    assert "line 1" in caplog.text
+    assert patterns.describe()["patterns"] == ["preset:dashed"]
+
+
+def test_every_extracted_token_passes_validation(use_config):
+    # \B depends on the character before the match; a token that only matched
+    # in context would be stored but refused by every issue_id filter.
+    use_config("regex:\\BCASE\\d+\\b\nregex:\\bOK\\d+\\b\n")
+    patterns = issue_patterns.active()
+    tokens = patterns.extract("XCASE12 OK3")
+    assert tokens == ["OK3"]
+    assert all(patterns.matches(token) for token in tokens)
 
 
 def test_get_stats_reports_issue_patterns_without_a_collection(monkeypatch):

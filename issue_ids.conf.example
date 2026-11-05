@@ -17,6 +17,7 @@ preset:dashed
 preset:servicenow
 
 # Any other ticket system: a Python regular expression. Anchor it with \b.
+# The token must match on its own, so lookaround such as (?<=#) is refused.
 # regex:\bCASE\d{8}\b
 
 # Drop tokens whose prefix is not a ticket, such as COVID-19.

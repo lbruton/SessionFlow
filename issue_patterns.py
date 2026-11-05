@@ -36,6 +36,9 @@ _SAFE_TOKEN = re.compile(r"^[A-Z0-9]+(?:-[A-Z0-9]+)*$")
 _MAX_TOKEN_CHARS = 64
 _DENY_PREFIX = re.compile(r"^[A-Z0-9]+$")
 _LEADING_LETTERS = re.compile(r"^[A-Z]+")
+# A lookaround match depends on text outside the token, so ``matches`` could not
+# validate what extraction stores.
+_LOOKAROUND = re.compile(r"\(\?<?[=!]")
 
 
 @dataclass(frozen=True)
@@ -46,8 +49,9 @@ class IssuePatterns:
         labels: One label per pattern, such as ``preset:dashed`` or ``regex:<pattern>``.
         regexes: The compiled patterns, in ``labels`` order.
         deny: Prefixes added by the config file, on top of ``BUILTIN_DENYLIST``.
-        source: The config file read, or None for the built-in default.
+        source: The config file named, or None for the built-in default.
         skipped: Config lines that were not understood.
+        error: Why ``source`` could not be read, or None.
     """
 
     labels: Tuple[str, ...]
@@ -55,6 +59,7 @@ class IssuePatterns:
     deny: frozenset = field(default_factory=frozenset)
     source: Optional[str] = None
     skipped: int = 0
+    error: Optional[str] = None
 
     def _denied(self, token: str) -> bool:
         if "-" in token:
@@ -65,8 +70,14 @@ class IssuePatterns:
         return prefix in BUILTIN_DENYLIST or prefix in self.deny
 
     def _keep(self, token: str) -> bool:
+        """Whether an upper-case token is safe, not denied, and matched in full by a pattern.
+
+        Extraction and ``matches`` both use it, so every stored token passes an
+        ``issue_id`` filter.
+        """
         return (len(token) <= _MAX_TOKEN_CHARS and _SAFE_TOKEN.match(token) is not None
-                and not self._denied(token))
+                and not self._denied(token)
+                and any(regex.fullmatch(token) for regex in self.regexes))
 
     def extract(self, text: str) -> List[str]:
         """Return the issue tokens in ``text``, upper case, once each, in text order.
@@ -75,8 +86,9 @@ class IssuePatterns:
             text: Turn or memory text to scan.
 
         Returns:
-            Tokens matched by any pattern, minus denied prefixes and tokens with
-            characters other than letters, digits and inner dashes.
+            Tokens matched by any pattern, minus denied prefixes, tokens with
+            characters other than letters, digits and inner dashes, and tokens
+            no pattern matches on their own.
         """
         if not text or not isinstance(text, str):
             return []
@@ -106,18 +118,16 @@ class IssuePatterns:
         """
         if not isinstance(raw, str):
             return False
-        token = raw.strip().upper()
-        if not self._keep(token):
-            return False
-        return any(regex.fullmatch(token) for regex in self.regexes)
+        return self._keep(raw.strip().upper())
 
     def describe(self) -> Dict[str, object]:
-        """Return the source file, pattern labels, extra denied prefixes and skipped-line count."""
+        """Return the config file, pattern labels, extra denied prefixes, skipped lines and read error."""
         return {
             "source": self.source,
             "patterns": list(self.labels),
             "deny": sorted(self.deny),
             "skipped": self.skipped,
+            "error": self.error,
         }
 
 
@@ -135,6 +145,8 @@ def format_lines(info: Dict[str, object]) -> List[str]:
         lines.append(f"- Denied prefixes: {', '.join(info['deny'])}")
     source = str(info.get("source") or "none (built-in default)")
     skipped = int(info.get("skipped") or 0)
+    if info.get("error"):
+        source += f" (not read: {info['error']}; only the dashed preset applies)"
     if skipped:
         source += f" ({skipped} line{'' if skipped == 1 else 's'} skipped)"
     lines.append(f"- Config: {source}")
@@ -200,6 +212,8 @@ def parse(lines: List[str], source: Optional[str] = None) -> IssuePatterns:
                 continue
             if not pattern:
                 bad(line_no, "empty regex")
+            elif _LOOKAROUND.search(pattern):
+                bad(line_no, "lookaround is not supported; a token must match on its own")
             elif f"regex:{pattern}" not in labels:
                 labels.append(f"regex:{pattern}")
                 regexes.append(compiled)
@@ -233,7 +247,9 @@ def load(path: Optional[str]) -> IssuePatterns:
     except OSError as exc:
         logger.warning("Could not read issue ID config %s: %s; using the dashed preset",
                        path, exc)
-        return _default()
+        default = _default()
+        return IssuePatterns(labels=default.labels, regexes=default.regexes, source=path,
+                             error=exc.strerror or type(exc).__name__)
     return parse(lines, source=path)
 
 

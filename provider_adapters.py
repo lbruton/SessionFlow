@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple
 import hashlib
 import logging
 import os
-import re
 
 import issue_patterns
 

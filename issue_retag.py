@@ -96,8 +96,7 @@ def plan(*, db_path: Optional[str] = None) -> RetagPlan:
             else:
                 computed[doc_id] = rag_engine._extract_issue_ids(row.get("document") or "")
     for doc_id, parent in passage_rows.items():
-        if parent in computed:
-            computed[doc_id] = computed[parent]
+        computed[doc_id] = computed[parent] if parent in computed else stored[doc_id]
 
     fts: Optional[Dict[str, str]] = None
     if db_path:
