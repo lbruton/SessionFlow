@@ -91,11 +91,11 @@ Each result names the signals that ranked it (SESF-68, SESF-77): `Semantic: 0.44
 
 ### Issue-ID search & timeline (SESF-25 / SESF-26)
 
-Turn text is scanned at ingestion for tracker issue tokens (`[A-Z][A-Z0-9]+-\d+`, boundary-anchored, with a technical-standard prefix denylist) and the deduplicated, uppercased set is stored in a structured `issue_ids` field — Milvus `VARCHAR(4096)` plus an FTS5 `issue_ids` metadata column.
+Ingest scans turn text for tracker issue tokens. The deduplicated, uppercased set goes in a structured `issue_ids` field (Milvus `VARCHAR(4096)` plus an FTS5 `issue_ids` metadata column). `issue_patterns.py` decides which tokens count. The dashed preset is always on: `[A-Z][A-Z0-9]+-\d+`, boundary-anchored, with a technical-standard prefix denylist. `~/.sessionflow/issue_ids.conf`, or the path in `SESSIONFLOW_ISSUE_ID_PATTERNS`, adds the `servicenow` preset, custom `regex:` lines and `deny:` prefixes (see `issue_ids.conf.example`).
 
 - **`issue_id` filter** on `search_all_sessions` / `search_session` — optional structured exact-token pre-filter (`issue_ids like "%,SESF-25,%"`), case-insensitive, combinable conjunctively with `provider` / `project_root` / `date_from`. Unset leaves search behavior byte-identical.
 - **`get_issue_timeline(issue_id, limit=50, provider, date_from, date_to)`** MCP tool + `GET /timeline` HTTP endpoint — single deduplicated, oldest-first cross-harness feed of every turn referencing an issue. Unions the structured field with an FTS keyword fallback (covering un-tagged turns), deduped by `doc_id`, sorted by `(timestamp, doc_id)`.
-- **DEVS-39 dependency:** `issue_ids` is populated only on ingest. Pre-existing rows stay empty until the post-merge DEVS-39 dedicated-Milvus 2.6.x re-index runs, so the structured filter returns empty for historical data until then; the timeline's FTS fallback still surfaces those turns. The shared claude-context Milvus is left untouched.
+- **Re-tagging stored rows:** `cleanup.py retag-issues` re-extracts issue IDs from every stored `document` with the active patterns and rewrites the changed rows in Milvus and FTS without re-embedding. It is a dry run by default. Run `--apply --yes` after a config change, with the server stopped.
 
 ## Specs
 
