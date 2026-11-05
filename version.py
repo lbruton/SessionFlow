@@ -1,3 +1,3 @@
 """SessionFlow version. CHANGELOG.md names the same version in its newest released heading."""
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"

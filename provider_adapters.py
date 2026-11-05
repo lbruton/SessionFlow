@@ -19,6 +19,15 @@ import issue_patterns
 logger = logging.getLogger(__name__)
 
 
+SUBAGENT_PREFIX = "agent-"
+"""Session IDs of subagent and compaction transcripts start with this prefix."""
+
+
+def is_subagent_session(session_id: Optional[str]) -> bool:
+    """Whether a session ID names a subagent or compaction transcript."""
+    return bool(session_id) and str(session_id).startswith(SUBAGENT_PREFIX)
+
+
 LEGAL_PROVIDERS = frozenset({
     "claude_code_cli",
     "claude_cowork_legacy",

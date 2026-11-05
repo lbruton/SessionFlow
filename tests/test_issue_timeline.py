@@ -521,3 +521,254 @@ def test_chicago_day_bounds_are_half_open_and_follow_dst():
     start, end = rag_engine.chicago_day_bounds(date(2026, 11, 1))
     assert start == datetime(2026, 11, 1, 5, 0, tzinfo=timezone.utc)
     assert end == datetime(2026, 11, 2, 6, 0, tzinfo=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Subagent and compaction transcripts (agent-* sessions) are hidden by default.
+# ---------------------------------------------------------------------------
+
+
+def _agent(doc_id, ts, session_id):
+    row = _entry(doc_id, ts)
+    row["session_id"] = session_id
+    return row
+
+
+def test_timeline_hides_agent_sessions_by_default(monkeypatch):
+    structured = [_entry("main", "2026-05-01T10:00:00"),
+                  _agent("sub", "2026-05-02T10:00:00", "agent-a1b2c3")]
+    fts = [_agent("compact", "2026-05-03T10:00:00", "agent-acompact-5c789c")]
+    _patch_sources(monkeypatch, structured, fts)
+    out = rag_engine.get_issue_timeline("SESF-25", db_path=DB)
+    assert [r["doc_id"] for r in out] == ["main"]
+    assert out.hidden_subagents == 2
+
+
+def test_timeline_include_subagents_keeps_agent_sessions(monkeypatch):
+    structured = [_entry("main", "2026-05-01T10:00:00"),
+                  _agent("sub", "2026-05-02T10:00:00", "agent-a1b2c3")]
+    fts = [_agent("compact", "2026-05-03T10:00:00", "agent-acompact-5c789c")]
+    _patch_sources(monkeypatch, structured, fts)
+    out = rag_engine.get_issue_timeline("SESF-25", include_subagents=True, db_path=DB)
+    assert [r["doc_id"] for r in out] == ["main", "sub", "compact"]
+    assert out.hidden_subagents == 0
+
+
+def test_timeline_hidden_count_dedups_across_sources(monkeypatch):
+    row = _agent("sub", "2026-05-02T10:00:00", "agent-a1b2c3")
+    _patch_sources(monkeypatch, [row], [row])
+    out = rag_engine.get_issue_timeline("SESF-25", db_path=DB)
+    assert list(out) == [] and out.hidden_subagents == 1
+
+
+def test_timeline_hidden_count_skips_rows_other_filters_drop(monkeypatch):
+    structured = [_agent("old", "2026-04-01T10:00:00", "agent-a1"),
+                  _agent("codex", "2026-05-02T10:00:00", "agent-a2")]
+    structured[1]["provider"] = "codex"
+    _patch_sources(monkeypatch, structured, [])
+    out = rag_engine.get_issue_timeline("SESF-25", providers=["claude_code_cli"],
+                                        date_from="2026-05-01", db_path=DB)
+    assert out.hidden_subagents == 0
+
+
+def test_timeline_limit_counts_only_visible_turns(monkeypatch):
+    structured = [_agent(f"s{i}", f"2026-05-0{i}T09:00:00", f"agent-a{i}") for i in range(1, 8)]
+    structured += [_entry(f"m{i}", f"2026-05-0{i}T10:00:00") for i in range(5, 8)]
+    _patch_sources(monkeypatch, structured, [])
+    out = rag_engine.get_issue_timeline("SESF-25", limit=3, db_path=DB)
+    assert [r["doc_id"] for r in out] == ["m5", "m6", "m7"]
+
+
+@pytest.mark.anyio
+async def test_timeline_async_forwards_newest_and_include_subagents(monkeypatch):
+    seen: dict = {}
+
+    def fake(issue_id, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(rag_engine, "get_issue_timeline", fake)
+    await rag_engine.get_issue_timeline_async("SESF-25", newest=True,
+                                              include_subagents=True, db_path=DB)
+    assert seen["newest"] is True and seen["include_subagents"] is True
+
+
+def test_sessions_by_issue_keeps_agent_sessions(monkeypatch):
+    seen: dict = {}
+
+    def fake(issue_id, **kwargs):
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(rag_engine, "get_issue_timeline", fake)
+    rag_engine.sessions_by_issue(["DEVS-145"], limit=5)
+    assert seen["include_subagents"] is True
+
+
+def test_mcp_timeline_schema_has_include_subagents():
+    schemas, _ = _tool_registry()
+    prop = schemas["get_issue_timeline"]["properties"]["include_subagents"]
+    assert prop["type"] == "boolean" and prop["default"] is False
+
+
+def _call_timeline(monkeypatch, args, feed=None):
+    seen: dict = {}
+
+    def _spy(issue_id, **kwargs):
+        seen.update(kwargs)
+        return feed if feed is not None else [_entry("a", "2026-05-01T10:00:00")]
+
+    monkeypatch.setattr(tools.rag_engine, "get_issue_timeline", _spy)
+    monkeypatch.setattr(tools, "get_current_project_root", lambda: None)
+    _, call_tool = _tool_registry()
+    result = asyncio.run(call_tool("get_issue_timeline", {"issue_id": "SESF-25", **args}))
+    return seen, result[0].text
+
+
+def test_mcp_timeline_passes_include_subagents(monkeypatch):
+    seen, _ = _call_timeline(monkeypatch, {})
+    assert seen["include_subagents"] is False
+    seen, _ = _call_timeline(monkeypatch, {"include_subagents": True})
+    assert seen["include_subagents"] is True
+
+
+def test_mcp_timeline_refuses_non_bool_include_subagents(monkeypatch):
+    seen, text = _call_timeline(monkeypatch, {"include_subagents": "yes"})
+    assert seen == {} and "include_subagents must be true or false" in text
+
+
+def test_format_timeline_names_hidden_subagent_turns():
+    feed = rag_engine.TimelineResult([_entry("a", "2026-05-01T10:00:00")], hidden_subagents=3)
+    text = tools.format_timeline(feed)
+    assert "3 subagent turns hidden; pass include_subagents=true to show them." in text
+    assert "hidden" not in tools.format_timeline([_entry("a", "2026-05-01T10:00:00")])
+
+
+def test_format_timeline_empty_feed_names_hidden_turns():
+    text = tools.format_timeline(rag_engine.TimelineResult([], hidden_subagents=1))
+    assert text.startswith("No turns reference that issue.")
+    assert "1 subagent turn hidden" in text
+
+
+def _http_client(stub_rag_engine, tmp_path, monkeypatch, fake):
+    import sys
+
+    from starlette.testclient import TestClient
+
+    stub_rag_engine.get_issue_timeline = fake
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sys.modules.pop("http_server", None)
+    http_server = importlib.import_module("http_server")
+    return TestClient(http_server.app)
+
+
+def test_http_timeline_parses_include_subagents(stub_rag_engine, tmp_path, monkeypatch):
+    seen: list = []
+
+    def fake(issue_id, **kwargs):
+        seen.append(kwargs["include_subagents"])
+        return rag_engine.TimelineResult([], hidden_subagents=4)
+
+    client = _http_client(stub_rag_engine, tmp_path, monkeypatch, fake)
+    try:
+        body = client.get("/timeline", params={"issue_id": "SESF-25"}).json()
+        assert body["hidden_subagents"] == 4 and body["timeline"] == []
+        client.get("/timeline", params={"issue_id": "SESF-25", "include_subagents": "true"})
+        client.get("/timeline", params={"issue_id": "SESF-25", "include_subagents": "false"})
+        bad = client.get("/timeline", params={"issue_id": "SESF-25", "include_subagents": "1"})
+        assert bad.status_code == 400
+    finally:
+        client.close()
+    assert seen == [False, True, False]
+
+
+def test_timeline_hidden_count_is_a_lower_bound_when_fts_fills_its_window(monkeypatch):
+    fts = [_agent("s1", "2026-05-02T10:00:00", "agent-a1"), _entry("m1", "2026-05-03T10:00:00")]
+    _patch_sources(monkeypatch, [], fts)
+    monkeypatch.setattr(rag_engine, "_TIMELINE_FTS_FETCH_CAP", 2)
+    out = rag_engine.get_issue_timeline("SESF-25", limit=1, db_path=DB)
+    assert out.hidden_subagents == 1 and out.hidden_subagents_capped is True
+
+
+def test_timeline_hidden_count_is_exact_below_the_fts_window(monkeypatch):
+    _patch_sources(monkeypatch, [], [_agent("s1", "2026-05-02T10:00:00", "agent-a1")])
+    out = rag_engine.get_issue_timeline("SESF-25", db_path=DB)
+    assert out.hidden_subagents == 1 and out.hidden_subagents_capped is False
+
+
+def test_format_timeline_says_at_least_when_the_count_is_capped():
+    feed = rag_engine.TimelineResult([_entry("a", "2026-05-01T10:00:00")], hidden_subagents=2,
+                                     hidden_subagents_capped=True)
+    assert "At least 2 subagent turns hidden" in tools.format_timeline(feed)
+
+
+def test_http_timeline_reports_a_capped_count(stub_rag_engine, tmp_path, monkeypatch):
+    client = _http_client(stub_rag_engine, tmp_path, monkeypatch, lambda *a, **kw: rag_engine.TimelineResult(
+        [], hidden_subagents=2, hidden_subagents_capped=True))
+    try:
+        body = client.get("/timeline", params={"issue_id": "SESF-25"}).json()
+    finally:
+        client.close()
+    assert body["hidden_subagents"] == 2 and body["hidden_subagents_capped"] is True
+
+
+def _patch_filtering_fts(monkeypatch, structured, fts):
+    """FTS fake that honours the session_id LIKE / NOT LIKE filter and the n limit."""
+    calls: list = []
+
+    def search(query, n=15, filters=None, db_path=None):
+        calls.append(dict(filters or {}))
+        rows = [dict(r) for r in fts]
+        op = (filters or {}).get("session_id")
+        if op == ("NOT LIKE", "agent-%"):
+            rows = [r for r in rows if not r["session_id"].startswith("agent-")]
+        elif op == ("LIKE", "agent-%"):
+            rows = [r for r in rows if r["session_id"].startswith("agent-")]
+        return rows[:n]
+
+    _patch_sources(monkeypatch, structured, [])
+    monkeypatch.setattr(rag_engine._fts, "search", search)
+    return calls
+
+
+def test_timeline_agent_fts_hits_do_not_use_the_visible_window(monkeypatch):
+    fts = [_agent(f"s{i}", f"2026-05-0{i}T10:00:00", f"agent-a{i}") for i in range(1, 4)]
+    fts.append(_entry("main", "2026-05-05T10:00:00"))
+    _patch_filtering_fts(monkeypatch, [], fts)
+    monkeypatch.setattr(rag_engine, "_TIMELINE_FTS_FETCH_CAP", 2)
+    out = rag_engine.get_issue_timeline("SESF-25", limit=1, db_path=DB)
+    assert [r["doc_id"] for r in out] == ["main"]
+    assert out.hidden_subagents == 2 and out.hidden_subagents_capped is True
+
+
+def test_timeline_fts_filters_follow_include_subagents(monkeypatch):
+    calls = _patch_filtering_fts(monkeypatch, [], [])
+    rag_engine.get_issue_timeline("SESF-25", db_path=DB)
+    assert sorted(c.get("session_id") for c in calls) == [("LIKE", "agent-%"), ("NOT LIKE", "agent-%")]
+    calls.clear()
+    rag_engine.get_issue_timeline("SESF-25", include_subagents=True, db_path=DB)
+    assert [c.get("session_id") for c in calls] == [None]
+
+
+def test_timeline_session_filter_runs_on_a_real_fts_index(monkeypatch, tmp_path):
+    from fts_hybrid import FTSIndex
+
+    fts = FTSIndex("turns_fts", ["session_id", "timestamp", "chunk_type", "provider", "issue_ids"])
+    db_path = str(tmp_path / "milvus.db")
+    rows = [("a1", "agent-a1"), ("a2", "agent-acompact-9"), ("m1", "sess-main")]
+    fts.insert(fts.connection(db_path), [
+        {"doc_id": d, "content": "work on SESF-25", "session_id": s, "timestamp": "2026-05-01T10:00:00",
+         "chunk_type": "turn", "provider": "claude_code_cli", "issue_ids": ""} for d, s in rows])
+    monkeypatch.setattr(rag_engine, "_fts", fts)
+    monkeypatch.setattr(rag_engine, "_query_batches", lambda *a, **kw: iter([]))
+    out = rag_engine.get_issue_timeline("SESF-25", db_path=db_path)
+    assert [r["doc_id"] for r in out] == ["m1"] and out.hidden_subagents == 2
+    out = rag_engine.get_issue_timeline("SESF-25", include_subagents=True, db_path=db_path)
+    assert sorted(r["doc_id"] for r in out) == ["a1", "a2", "m1"]
+
+
+def test_format_timeline_notes_a_capped_zero_count():
+    feed = rag_engine.TimelineResult([_entry("a", "2026-05-01T10:00:00")], hidden_subagents=0,
+                                     hidden_subagents_capped=True)
+    assert ("Subagent turns may be hidden; pass include_subagents=true to show them."
+            in tools.format_timeline(feed))

@@ -394,10 +394,20 @@ def format_timeline(entries: list[dict]) -> str:
 
     Renders each entry's matched ``doc_id`` alongside provider/session/timestamp
     metadata so the rendered text references every turn in the feed (the MCP
-    transport contract; mirrors the HTTP route's structured feed).
+    transport contract; mirrors the HTTP route's structured feed). A feed with a
+    ``hidden_subagents`` count, or a capped one, ends with one line that names it.
     """
+    hidden = getattr(entries, "hidden_subagents", 0)
+    capped = getattr(entries, "hidden_subagents_capped", False)
+    note = ""
+    if hidden:
+        turns = "turn" if hidden == 1 else "turns"
+        count = f"At least {hidden}" if capped else str(hidden)
+        note = f"{count} subagent {turns} hidden; pass include_subagents=true to show them."
+    elif capped:
+        note = "Subagent turns may be hidden; pass include_subagents=true to show them."
     if not entries:
-        return "No turns reference that issue."
+        return "No turns reference that issue." + (f"\n\n{note}" if note else "")
 
     output = []
     for i, e in enumerate(entries, 1):
@@ -426,6 +436,8 @@ def format_timeline(entries: list[dict]) -> str:
         output.append("---")
         output.append("")
 
+    if note:
+        output.append(note)
     return "\n".join(output)
 
 
@@ -912,7 +924,9 @@ def register_tools(server: Server):
                     "Return every turn that mentions an issue ID, oldest first, across all "
                     "providers and without duplicates. Requires 'issue_id', for example "
                     "'SESF-25'. Turns match on their issue tag or on a keyword search, so "
-                    "untagged mentions appear too. Pass 'limit', 'provider' or a date range "
+                    "untagged mentions appear too. Turns of subagent and compaction "
+                    "transcripts (session IDs that start with 'agent-') are hidden unless "
+                    "'include_subagents' is true. Pass 'limit', 'provider' or a date range "
                     "to narrow the feed."
                 ),
                 inputSchema={
@@ -938,6 +952,11 @@ def register_tools(server: Server):
                         "date_to": {
                             "type": "string",
                             "description": "Latest date to include, as an ISO date, for example '2026-04-30'.",
+                        },
+                        "include_subagents": {
+                            "type": "boolean",
+                            "description": "Include subagent and compaction transcripts (session IDs that start with 'agent-'). Default false.",
+                            "default": False,
                         },
                     },
                     "required": ["issue_id"],
@@ -1210,6 +1229,10 @@ def register_tools(server: Server):
                 if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
                     return [types.TextContent(
                         type="text", text="limit must be a positive integer")]
+                include_subagents = arguments.get("include_subagents", False)
+                if not isinstance(include_subagents, bool):
+                    return [types.TextContent(
+                        type="text", text="include_subagents must be true or false")]
                 entries = await rag_engine.get_issue_timeline_async(
                     arguments["issue_id"],
                     limit=limit,
@@ -1217,6 +1240,7 @@ def register_tools(server: Server):
                     date_from=arguments.get("date_from"),
                     date_to=arguments.get("date_to"),
                     db_path=db,
+                    include_subagents=include_subagents,
                 )
                 return [types.TextContent(type="text", text=format_timeline(entries))]
 

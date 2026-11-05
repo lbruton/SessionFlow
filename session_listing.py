@@ -11,9 +11,7 @@ import asyncio
 from typing import Any, Dict, List, Optional, Sequence
 
 import rag_engine
-
-SUBAGENT_PREFIX = "agent-"
-"""Session IDs of subagent transcripts start with this prefix."""
+from provider_adapters import is_subagent_session
 
 WRAPPED_CHUNK = 50
 """Sessions checked against the memory store per query while filling a page."""
@@ -51,7 +49,7 @@ async def list_sessions(project_root: Optional[Sequence[str]], *, n: int = 20,
         date_to: Latest ISO date of a counted turn.
         provider: Only this provider.
         wrapped: True or False keeps only wrapped or only unwrapped sessions.
-        include_subagents: Keep subagent transcripts (``SUBAGENT_PREFIX``).
+        include_subagents: Keep subagent transcripts (``is_subagent_session``).
         db_path: Milvus URI.
         memory: An object with an async ``wrapped_sessions(ids)``, or None.
 
@@ -62,7 +60,7 @@ async def list_sessions(project_root: Optional[Sequence[str]], *, n: int = 20,
         rag_engine.list_sessions, list(project_root) if project_root else None,
         db_path, date_from=date_from, date_to=date_to, provider=provider)
     if not include_subagents:
-        rows = [r for r in rows if not r["session_id"].startswith(SUBAGENT_PREFIX)]
+        rows = [r for r in rows if not is_subagent_session(r["session_id"])]
 
     picked: List[Dict[str, Any]] = []
     known = memory is not None
