@@ -27,7 +27,7 @@ class RetagPlan:
     Attributes:
         changes: ``{doc_id: new issue_ids}`` for every row to rewrite.
         scanned: Milvus rows read.
-        fts_stale: Rows whose Milvus value is right but whose FTS value is not.
+        fts_stale: Rows whose Milvus value is right but whose FTS row is wrong or missing.
         added: Per issue ID, the rows that gain it.
         removed: Per issue ID, the rows that lose it.
         fts_error: Why the FTS sidecar could not be read, or None.
@@ -70,8 +70,9 @@ def plan(*, db_path: Optional[str] = None) -> RetagPlan:
     """Scan every row and list the ones whose ``issue_ids`` would change. Writes nothing.
 
     A turn's tags come from its own ``document``. A passage takes its parent's
-    tags, as at ingest; a passage without a parent row keeps its value. A row
-    whose FTS value differs from the computed one is listed too.
+    tags, as at ingest; a passage without a parent row keeps its value. When
+    the FTS sidecar can be read, a row whose FTS value differs or is missing is
+    listed too.
 
     Args:
         db_path: Milvus DB path; also derives the FTS sidecar path.
@@ -98,12 +99,13 @@ def plan(*, db_path: Optional[str] = None) -> RetagPlan:
         if parent in computed:
             computed[doc_id] = computed[parent]
 
-    try:
-        fts = _fts_issue_ids(db_path)
-    except Exception as exc:
-        result.fts_error = rag_engine._scrub_exception(exc)
-        logger.warning("FTS issue_ids read failed: %s", result.fts_error)
-        fts = {}
+    fts: Optional[Dict[str, str]] = None
+    if db_path:
+        try:
+            fts = _fts_issue_ids(db_path)
+        except Exception as exc:
+            result.fts_error = rag_engine._scrub_exception(exc)
+            logger.warning("FTS issue_ids read failed: %s", result.fts_error)
 
     for doc_id, new in computed.items():
         old = stored[doc_id]
@@ -113,7 +115,8 @@ def plan(*, db_path: Optional[str] = None) -> RetagPlan:
                 result.added[token] += 1
             for token in _ids(old) - _ids(new):
                 result.removed[token] += 1
-        elif doc_id in fts and fts[doc_id] != new:
+        # A failed FTS insert leaves no row behind its delete, so a missing row is stale too.
+        elif fts is not None and fts.get(doc_id) != new:
             result.changes[doc_id] = new
             result.fts_stale += 1
     return result

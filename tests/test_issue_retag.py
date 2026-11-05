@@ -150,6 +150,36 @@ def test_plan_finds_changed_rows_only(seeded):
     assert plan.added["SESF-3"] == 1
 
 
+def test_plan_lists_a_row_missing_from_fts(fake_milvus, db_path):
+    # A failed FTS insert after the delete leaves Milvus right and FTS without the row.
+    row = _row("s1::t1", "User: SESF-1", ",SESF-1,")
+    fake_milvus["rows"][row["id"]] = dict(row)
+    plan = issue_retag.plan(db_path=db_path)
+    assert plan.changes == {"s1::t1": ",SESF-1,"}
+    assert plan.fts_stale == 1
+
+
+def test_missing_fts_rows_are_ignored_when_fts_cannot_be_read(fake_milvus, db_path, monkeypatch):
+    row = _row("s1::t1", "User: SESF-1", ",SESF-1,")
+    fake_milvus["rows"][row["id"]] = dict(row)
+
+    def boom(db_path):
+        raise RuntimeError("sidecar locked")
+
+    monkeypatch.setattr(issue_retag, "_fts_issue_ids", boom)
+    plan = issue_retag.plan(db_path=db_path)
+    assert plan.changes == {}
+    assert plan.fts_error
+
+
+def test_apply_restores_a_missing_fts_row(fake_milvus, db_path):
+    row = _row("s1::t1", "User: SESF-1", ",SESF-1,")
+    fake_milvus["rows"][row["id"]] = dict(row)
+    issue_retag.apply(issue_retag.plan(db_path=db_path), db_path=db_path)
+    assert _fts_issue_ids(db_path, "s1::t1") == ",SESF-1,"
+    assert issue_retag.plan(db_path=db_path).changes == {}
+
+
 def test_plan_writes_nothing(seeded, fake_milvus):
     issue_retag.plan(db_path=seeded)
     assert fake_milvus["upserts"] == []
