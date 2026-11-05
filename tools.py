@@ -401,7 +401,8 @@ def format_timeline(entries: list[dict]) -> str:
     note = ""
     if hidden:
         turns = "turn" if hidden == 1 else "turns"
-        note = f"{hidden} subagent {turns} hidden; pass include_subagents=true to show them."
+        count = f"At least {hidden}" if getattr(entries, "hidden_subagents_capped", False) else str(hidden)
+        note = f"{count} subagent {turns} hidden; pass include_subagents=true to show them."
     if not entries:
         return "No turns reference that issue." + (f"\n\n{note}" if note else "")
 

@@ -2207,12 +2207,18 @@ class _NewestN:
 
 
 class TimelineResult(list):
-    """Timeline entries plus the count of distinct ``agent-*`` turns the filter hid."""
+    """Timeline entries plus the count of distinct ``agent-*`` turns the filter hid.
 
-    def __init__(self, entries=(), hidden_subagents: int = 0):
-        """Hold ``entries`` in order and record ``hidden_subagents``."""
+    ``hidden_subagents_capped`` is true when the FTS fallback filled its fetch window,
+    so FTS-only turns past that window are missing and the count is a lower bound.
+    """
+
+    def __init__(self, entries=(), hidden_subagents: int = 0,
+                 hidden_subagents_capped: bool = False):
+        """Hold ``entries`` in order and record the hidden count and whether it is capped."""
         super().__init__(entries)
         self.hidden_subagents = hidden_subagents
+        self.hidden_subagents_capped = hidden_subagents_capped
 
 
 def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
@@ -2339,9 +2345,10 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
         fts_filters["timestamp_gte"] = (">=", date_from)
     if date_to:
         fts_filters["timestamp_lte"] = ("<=", upper)
+    fts_window = max(limit, _TIMELINE_FTS_FETCH_CAP)
     try:
         fts_hits = _fts.search(
-            f'"{canonical}"', n=max(limit, _TIMELINE_FTS_FETCH_CAP),
+            f'"{canonical}"', n=fts_window,
             filters=fts_filters or None, db_path=db_path,
         )
     except Exception as e:
@@ -2355,7 +2362,8 @@ def get_issue_timeline(issue_id: str, *, limit: int = DEFAULT_TIMELINE_LIMIT,
 
     # Dedup by doc_id (structured wins, streamed first), the oldest-first sort and
     # the ``limit`` slice all happen inside the collector (Req 4.1/4.2/4.5/6.2).
-    return TimelineResult(collector.result(), hidden_subagents=len(hidden))
+    return TimelineResult(collector.result(), hidden_subagents=len(hidden),
+                          hidden_subagents_capped=len(fts_hits) >= fts_window)
 
 
 def _references_issue(text: str, canonical: str) -> bool:

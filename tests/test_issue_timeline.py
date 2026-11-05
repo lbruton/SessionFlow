@@ -680,3 +680,33 @@ def test_http_timeline_parses_include_subagents(stub_rag_engine, tmp_path, monke
     finally:
         client.close()
     assert seen == [False, True, False]
+
+
+def test_timeline_hidden_count_is_a_lower_bound_when_fts_fills_its_window(monkeypatch):
+    fts = [_agent("s1", "2026-05-02T10:00:00", "agent-a1"), _entry("m1", "2026-05-03T10:00:00")]
+    _patch_sources(monkeypatch, [], fts)
+    monkeypatch.setattr(rag_engine, "_TIMELINE_FTS_FETCH_CAP", 2)
+    out = rag_engine.get_issue_timeline("SESF-25", limit=1, db_path=DB)
+    assert out.hidden_subagents == 1 and out.hidden_subagents_capped is True
+
+
+def test_timeline_hidden_count_is_exact_below_the_fts_window(monkeypatch):
+    _patch_sources(monkeypatch, [], [_agent("s1", "2026-05-02T10:00:00", "agent-a1")])
+    out = rag_engine.get_issue_timeline("SESF-25", db_path=DB)
+    assert out.hidden_subagents == 1 and out.hidden_subagents_capped is False
+
+
+def test_format_timeline_says_at_least_when_the_count_is_capped():
+    feed = rag_engine.TimelineResult([_entry("a", "2026-05-01T10:00:00")], hidden_subagents=2,
+                                     hidden_subagents_capped=True)
+    assert "At least 2 subagent turns hidden" in tools.format_timeline(feed)
+
+
+def test_http_timeline_reports_a_capped_count(stub_rag_engine, tmp_path, monkeypatch):
+    client = _http_client(stub_rag_engine, tmp_path, monkeypatch, lambda *a, **kw: rag_engine.TimelineResult(
+        [], hidden_subagents=2, hidden_subagents_capped=True))
+    try:
+        body = client.get("/timeline", params={"issue_id": "SESF-25"}).json()
+    finally:
+        client.close()
+    assert body["hidden_subagents"] == 2 and body["hidden_subagents_capped"] is True
