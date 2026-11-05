@@ -172,6 +172,46 @@ def test_missing_fts_rows_are_ignored_when_fts_cannot_be_read(fake_milvus, db_pa
     assert plan.fts_error
 
 
+def test_plan_leaves_an_fts_sidecar_with_an_old_schema_alone(fake_milvus, db_path, tmp_path, monkeypatch):
+    # Opening the sidecar for writes drops a table whose schema differs; planning must not.
+    import sqlite3
+
+    import fts_hybrid
+
+    sentinel = tmp_path / "fts_backfill_needed"
+    monkeypatch.setattr(fts_hybrid, "FTS_BACKFILL_SENTINEL", sentinel)
+    row = _row("s1::t1", "User: SESF-1", ",SESF-1,")
+    fake_milvus["rows"][row["id"]] = dict(row)
+    fts_path = FTSIndex.db_path(db_path)
+    conn = sqlite3.connect(fts_path)
+    conn.execute("CREATE TABLE _fts_schema (table_name TEXT PRIMARY KEY, create_sql TEXT NOT NULL)")
+    conn.execute("INSERT INTO _fts_schema VALUES ('turns_fts', 'old schema')")
+    conn.execute("CREATE VIRTUAL TABLE turns_fts USING fts5(doc_id, content)")
+    conn.execute("INSERT INTO turns_fts VALUES ('s1::t1', 'old row')")
+    conn.commit()
+    conn.close()
+
+    plan = issue_retag.plan(db_path=db_path)
+
+    assert plan.fts_error
+    assert not sentinel.exists()
+    conn = sqlite3.connect(fts_path)
+    try:
+        assert conn.execute("SELECT count(*) FROM turns_fts").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_plan_does_not_create_a_missing_fts_sidecar(fake_milvus, db_path):
+    import os
+
+    row = _row("s1::t1", "User: SESF-1", ",SESF-1,")
+    fake_milvus["rows"][row["id"]] = dict(row)
+    plan = issue_retag.plan(db_path=db_path)
+    assert plan.fts_error is None
+    assert not os.path.exists(FTSIndex.db_path(db_path))
+
+
 def test_orphan_passage_with_stale_fts_is_listed(fake_milvus, db_path):
     # A passage without a parent keeps its Milvus tags; FTS must still match them.
     _add(fake_milvus, db_path, _row("gone::t9::p0", "orphan text", ",SESF-9,",

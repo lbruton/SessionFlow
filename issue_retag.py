@@ -61,15 +61,20 @@ def _ids(value: Optional[str]) -> set:
 
 
 def _fts_issue_ids(db_path: Optional[str]) -> Dict[str, str]:
-    """Read ``{doc_id: issue_ids}`` from the FTS sidecar; raises when it cannot be read."""
+    """Read ``{doc_id: issue_ids}`` from the FTS sidecar; raises when it cannot be read.
+
+    Opens it read-only: a write connection migrates an old schema by dropping the table.
+    """
     if not db_path:
         return {}
-    conn = rag_engine._fts.connection(db_path)
+    conn = rag_engine._fts.read_only_connection(db_path)
+    if conn is None:
+        return {}
     try:
         return {doc_id: value or "" for doc_id, value in rag_engine._fts.select_where(
             conn, ["doc_id", "issue_ids"], "1 = 1", ())}
     finally:
-        rag_engine._fts.close_ephemeral(conn)
+        conn.close()
 
 
 def plan(*, db_path: Optional[str] = None) -> RetagPlan:
