@@ -154,6 +154,13 @@ def test_tokens_with_unsafe_characters_are_dropped(use_config):
     assert not patterns.matches("T_3")
 
 
+def test_a_token_ending_in_a_newline_is_dropped(use_config):
+    # "$" matches before a final newline, so the check must cover the whole token.
+    use_config("regex:\\bCASE\\d+\\s\n")
+    patterns = issue_patterns.active()
+    assert patterns.extract("Fix CASE123\nnext") == []
+
+
 def test_preset_dashed_line_is_accepted(use_config):
     use_config("preset:dashed\n")
     patterns = issue_patterns.active()

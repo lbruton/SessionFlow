@@ -75,7 +75,7 @@ class IssuePatterns:
         Extraction and ``matches`` both use it, so every stored token passes an
         ``issue_id`` filter.
         """
-        return (len(token) <= _MAX_TOKEN_CHARS and _SAFE_TOKEN.match(token) is not None
+        return (len(token) <= _MAX_TOKEN_CHARS and _SAFE_TOKEN.fullmatch(token) is not None
                 and not self._denied(token)
                 and any(regex.fullmatch(token) for regex in self.regexes))
 
