@@ -9,6 +9,8 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-05
+
 ### Changed
 
 - `get_issue_timeline` hides turns from subagent and compaction transcripts (session IDs that start with
