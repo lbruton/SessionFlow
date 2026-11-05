@@ -327,3 +327,33 @@ def test_cli_apply_returns_one_on_failure(cleanup_mod, monkeypatch):
     monkeypatch.setattr(rag_engine, "update_row_metadata",
                         lambda doc_id, *, db_path=None, **f: rag_engine.UpsertResult(False, False))
     assert _run(cleanup_mod, ["retag-issues", "--apply", "--yes"]) == 1
+
+
+def _use_patterns(monkeypatch, path):
+    monkeypatch.setenv(issue_patterns.ENV_VAR, str(path))
+    issue_patterns.reset()
+
+
+def test_cli_apply_refuses_when_the_config_cannot_be_read(
+        cleanup_mod, fake_milvus, monkeypatch, tmp_path, capsys):
+    # Only the dashed preset applies then, so applying would strip every other tag.
+    _use_patterns(monkeypatch, tmp_path / "missing.conf")
+    assert _run(cleanup_mod, ["retag-issues", "--apply", "--yes"]) == 1
+    assert "config" in capsys.readouterr().out
+    assert fake_milvus["upserts"] == []
+
+
+def test_cli_apply_refuses_when_config_lines_were_skipped(
+        cleanup_mod, fake_milvus, monkeypatch, tmp_path):
+    conf = tmp_path / "issue_ids.conf"
+    conf.write_text("preset:servicenow\npreset:servicenwo\n")
+    _use_patterns(monkeypatch, conf)
+    assert _run(cleanup_mod, ["retag-issues", "--apply", "--yes"]) == 1
+    assert fake_milvus["upserts"] == []
+
+
+def test_cli_dry_run_still_reports_with_a_config_error(
+        cleanup_mod, monkeypatch, tmp_path, capsys):
+    _use_patterns(monkeypatch, tmp_path / "missing.conf")
+    assert _run(cleanup_mod, ["retag-issues"]) == 1
+    assert "rows change" in capsys.readouterr().out

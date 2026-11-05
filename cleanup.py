@@ -581,7 +581,8 @@ def cmd_retag_issues(args) -> int:
         args: Parsed argparse namespace with ``apply`` and ``yes``.
 
     Returns:
-        ``0`` on success, ``1`` when the confirmation gate refuses or any row
+        ``0`` on success, ``1`` when the confirmation gate refuses, the FTS
+        sidecar or the issue ID config cannot be read in full, or any row
         failed to rewrite.
     """
     import issue_patterns
@@ -595,8 +596,9 @@ def cmd_retag_issues(args) -> int:
         )
         return 1
 
+    patterns = issue_patterns.active()
     print("Issue ID patterns:")
-    for line in issue_patterns.format_lines(issue_patterns.active().describe()):
+    for line in issue_patterns.format_lines(patterns.describe()):
         print(f"  {line}")
 
     db_path = get_db_path()
@@ -610,6 +612,12 @@ def cmd_retag_issues(args) -> int:
         # Without the FTS values the plan misses FTS-only drift, so it is incomplete.
         print(f"\nFTS sidecar not read: {retag.fts_error}. Nothing written; "
               "fix the sidecar and re-run.")
+        return 1
+
+    if patterns.error or patterns.skipped:
+        # A broken config falls back to fewer patterns, so applying would strip valid tags.
+        print("\nThe issue ID config was not read in full. Nothing written; "
+              "fix the config and re-run.")
         return 1
 
     if not args.apply:
