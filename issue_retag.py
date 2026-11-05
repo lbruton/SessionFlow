@@ -31,9 +31,11 @@ class RetagPlan:
         added: Per issue ID, the rows that gain it.
         removed: Per issue ID, the rows that lose it.
         fts_error: Why the FTS sidecar could not be read, or None.
+        document_hashes: ``{doc_id: document_sha256}`` of each changed row as scanned.
     """
 
     changes: Dict[str, str] = field(default_factory=dict)
+    document_hashes: Dict[str, str] = field(default_factory=dict)
     scanned: int = 0
     fts_stale: int = 0
     added: Counter = field(default_factory=Counter)
@@ -43,11 +45,15 @@ class RetagPlan:
 
 @dataclass
 class RetagResult:
-    """Counts of an applied plan: rows written, and rows whose Milvus or FTS write failed."""
+    """Counts of an applied plan.
+
+    ``changed`` counts rows whose document was rewritten after the scan and were left alone.
+    """
 
     written: int = 0
     milvus_failed: int = 0
     fts_failed: int = 0
+    changed: int = 0
 
 
 def _ids(value: Optional[str]) -> set:
@@ -84,6 +90,7 @@ def plan(*, db_path: Optional[str] = None) -> RetagPlan:
     stored: Dict[str, str] = {}
     computed: Dict[str, str] = {}
     passage_rows: Dict[str, str] = {}
+    hashes: Dict[str, str] = {}
     for batch in rag_engine._query_batches(
             ["doc_id", "document", "issue_ids", "chunk_type"],
             batch_size=_SCAN_BATCH, db_path=db_path):
@@ -91,6 +98,7 @@ def plan(*, db_path: Optional[str] = None) -> RetagPlan:
             doc_id = row["doc_id"]
             result.scanned += 1
             stored[doc_id] = row.get("issue_ids") or ""
+            hashes[doc_id] = rag_engine.document_sha256(row.get("document"))
             if row.get("chunk_type") == passages.PASSAGE_CHUNK_TYPE:
                 passage_rows[doc_id] = passages.passage_parent(doc_id) or ""
             else:
@@ -118,6 +126,7 @@ def plan(*, db_path: Optional[str] = None) -> RetagPlan:
         elif fts is not None and fts.get(doc_id) != new:
             result.changes[doc_id] = new
             result.fts_stale += 1
+    result.document_hashes = {doc_id: hashes[doc_id] for doc_id in result.changes}
     return result
 
 
@@ -131,12 +140,19 @@ def apply(retag: RetagPlan, *, db_path: Optional[str] = None,
         progress_every: Log a progress line after this many rows.
 
     Returns:
-        Rows written, and rows whose Milvus or FTS write failed. A re-run of
-        :func:`plan` lists a row again while either store is stale.
+        Rows written, rows whose Milvus or FTS write failed, and rows skipped
+        because their document changed after the scan. A re-run of :func:`plan`
+        lists a row again while either store is stale.
     """
     outcome = RetagResult()
     for count, (doc_id, new) in enumerate(retag.changes.items(), start=1):
-        written = rag_engine.update_row_metadata(doc_id, db_path=db_path, issue_ids=new)
+        try:
+            written = rag_engine.update_row_metadata(
+                doc_id, db_path=db_path, issue_ids=new,
+                expect_document_sha256=retag.document_hashes.get(doc_id))
+        except rag_engine.RowChanged:
+            outcome.changed += 1
+            continue
         if not written.milvus_ok:
             outcome.milvus_failed += 1
         elif not written.fts_ok:

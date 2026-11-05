@@ -3249,7 +3249,17 @@ def _rewrite_fts_row(doc_id: str, row: dict, db_path: Optional[str]) -> bool:
 RETAGGABLE_FIELDS = frozenset({"project_root", "issue_ids", "timestamp", "git_branch"})
 
 
+class RowChanged(Exception):
+    """Raised by ``update_row_metadata`` when the stored document hash differs from the expected one."""
+
+
+def document_sha256(text: Optional[str]) -> str:
+    """Return the hex SHA-256 of a stored ``document``, as ``update_row_metadata`` compares it."""
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
 def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
+                        expect_document_sha256: Optional[str] = None,
                         **fields: str) -> UpsertResult:
     """Rewrite metadata fields on one turn in place, keeping its document and vector.
 
@@ -3262,6 +3272,9 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
     Args:
         doc_id: Stable document id of the turn to rewrite.
         db_path: Optional Milvus DB path; also derives the FTS sidecar path.
+        expect_document_sha256: When set, write only if the stored ``document``
+            still has this ``document_sha256``; values derived from an earlier
+            read must not land on text rewritten in place since.
         **fields: New string values, keyed by names in ``RETAGGABLE_FIELDS``.
 
     Returns:
@@ -3272,6 +3285,8 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
     Raises:
         ValueError: ``fields`` is empty, names a field outside
             ``RETAGGABLE_FIELDS``, or holds a non-string value.
+        RowChanged: The stored document differs from ``expect_document_sha256``;
+            nothing was written.
     """
     if not fields:
         raise ValueError("update_row_metadata needs at least one field")
@@ -3281,6 +3296,7 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
     if not all(isinstance(value, str) for value in fields.values()):
         raise ValueError("Retagged field values must be strings")
 
+    changed = False
     try:
         with milvus_client(db_path) as client:
             if not client.has_collection(COLLECTION_NAME):
@@ -3293,11 +3309,16 @@ def update_row_metadata(doc_id: str, *, db_path: Optional[str] = None,
             if not rows:
                 return UpsertResult(False, False)
             row = dict(rows[0])
-            row.update(fields)
-            client.upsert(collection_name=COLLECTION_NAME, data=[row])
+            changed = (expect_document_sha256 is not None
+                       and document_sha256(row.get("document")) != expect_document_sha256)
+            if not changed:
+                row.update(fields)
+                client.upsert(collection_name=COLLECTION_NAME, data=[row])
     except Exception as e:
         logger.warning("Milvus metadata upsert failed for doc_id: %s", _scrub_exception(e))
         return UpsertResult(False, False)
+    if changed:
+        raise RowChanged(doc_id)
 
     return UpsertResult(True, _rewrite_fts_row(doc_id, row, db_path))
 

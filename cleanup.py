@@ -618,9 +618,10 @@ def cmd_retag_issues(args) -> int:
 
     result = issue_retag.apply(retag, db_path=db_path)
     print(f"\nRewrote {result.written} rows.")
-    if result.milvus_failed or result.fts_failed:
+    if result.milvus_failed or result.fts_failed or result.changed:
         print(f"Milvus failures:     {result.milvus_failed}")
         print(f"FTS-only failures:   {result.fts_failed} (re-run to converge)")
+        print(f"Changed since scan:  {result.changed} (left alone; re-run to re-tag)")
         return 1
     return 0
 

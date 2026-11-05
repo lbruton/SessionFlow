@@ -20,7 +20,8 @@ have no git tags or GitHub Releases. For changes before the fork, see [UPSTREAM-
   when it changes. `get_session_stats` lists the patterns in force. `issue_ids.conf.example` documents the
   format (SESF-67).
 - `cleanup.py retag-issues [--apply --yes]` re-runs issue ID extraction on every stored row and rewrites
-  `issue_ids` in Milvus and FTS without re-embedding. Passages take their parent turn's tags (SESF-67).
+  `issue_ids` in Milvus and FTS without re-embedding. Passages take their parent turn's tags. A row whose
+  document changed after the scan is left alone and reported (SESF-67).
 
 ## [0.20.0] - 2026-11-03
 

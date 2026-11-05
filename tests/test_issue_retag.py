@@ -236,6 +236,32 @@ def test_apply_counts_failures(seeded, monkeypatch):
     assert result.fts_failed == 1
 
 
+def test_apply_skips_a_row_whose_document_changed_after_the_scan(seeded, fake_milvus):
+    # rewrite and sanitize change ``document`` in place under the same doc_id.
+    plan = issue_retag.plan(db_path=seeded)
+    pk = rag_engine._pk_from_doc_id("s1::t1")
+    fake_milvus["rows"][pk]["document"] = "User: redacted text with SESF-1"
+    fake_milvus["rows"][pk]["issue_ids"] = ",SESF-1,"
+    result = issue_retag.apply(plan, db_path=seeded)
+    assert result.changed == 1
+    assert result.written == 3
+    assert fake_milvus["rows"][pk]["issue_ids"] == ",SESF-1,"
+
+
+def test_update_row_metadata_refuses_a_changed_document(fake_milvus, db_path):
+    row = _row("s1::t1", "User: SESF-1", ",SESF-1,")
+    fake_milvus["rows"][row["id"]] = dict(row)
+    with pytest.raises(rag_engine.RowChanged):
+        rag_engine.update_row_metadata(
+            "s1::t1", db_path=db_path, issue_ids=",X-1,",
+            expect_document_sha256=rag_engine.document_sha256("other text"))
+    assert fake_milvus["upserts"] == []
+    result = rag_engine.update_row_metadata(
+        "s1::t1", db_path=db_path, issue_ids=",SESF-2,",
+        expect_document_sha256=rag_engine.document_sha256("User: SESF-1"))
+    assert result.milvus_ok
+
+
 # --- CLI -------------------------------------------------------------------------
 
 
