@@ -6,7 +6,7 @@ description: >
   Triggers on: "create issue", "issue", "new issue", "new bug", "file a bug",
   "track this".
 user-invocable: false
-library-version: e3dbf30dcd3c
+library-version: 4b65e212cbd7
 ---
 
 # Issue Management
@@ -38,7 +38,8 @@ If there is no `plane` block, stop and tell the user the project isn't wired to 
    mcp__plane__label   action: "list", project_id: {plane_project_id}
    ```
 
-   Map names → uuids. Cache for the rest of the session.
+   Map names → uuids. Use a UUID only from a list result still in your context; after a compaction, list
+   again. Never type a state or label UUID from memory or from another project.
 
 2. **Pick state and label from user intent:**
 

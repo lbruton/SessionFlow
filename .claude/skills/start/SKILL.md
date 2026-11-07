@@ -8,7 +8,7 @@ description: >
   for continuing same-day work or resuming after a short break.
   No indexing, no code search, no agent dispatch.
   Triggers: "start", "quick start", "resume", "orient me", "where were we".
-library-version: e3dbf30dcd3c
+library-version: 4b65e212cbd7
 ---
 
 # Start
